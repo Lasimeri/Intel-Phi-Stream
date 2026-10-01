@@ -1674,12 +1674,14 @@ impl Engine {
     /// while it is read and the chase that joins it all come out of the
     /// cells the live sequence leaves (about 1/32 of the read twice over,
     /// at the reading's chunks, and 2048 to spare); and no single read takes
-    /// more than a third of the context, so one file cannot crowd out the
-    /// rest of its memory.
+    /// more than an eighth of the context (about 4k tokens of 32k), so it
+    /// reads code a function at a time and one file cannot crowd out the
+    /// rest of its memory (in the dev session a read of a third of it went
+    /// straight to a rollover).
     fn read_room(&self) -> usize {
         let n_ctx = self.llm.n_ctx() as usize;
         let left = n_ctx.saturating_sub(self.history.len() + 2048);
-        (left * 32 / 34).min(n_ctx / 3)
+        (left * 32 / 34).min(n_ctx / 8)
     }
 
     /// A file the mind asked for (`PATH`, or `PATH:START-END` for those
@@ -1731,9 +1733,10 @@ impl Engine {
         let n = self.tok(&framed, false)?.len();
         let room = self.read_room();
         if n > room {
-            // Too big for the room it has: its size and a range that fits.
+            // Too big for the room it has: its size, and a range of about 2k
+            // tokens (a function or two), not the most that would fit.
             let lines = text.lines().count().max(1);
-            let fit = (room * lines / n).max(1);
+            let fit = (room.min(2048) * lines / n).max(1);
             let first = range.map_or(1, |(a, _)| a);
             let msg = self.framed_system(&format!(
                 "{} is {n} tokens in {lines} lines and there is room for about {room} now: read it by lines, [read: {path}:{first}-{}]",

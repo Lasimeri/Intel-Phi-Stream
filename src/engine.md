@@ -148,9 +148,11 @@ those lines, 1-based and inclusive):
   reading's cells, the thoughts placed meanwhile and the chase all come
   out of the cells the live sequence leaves, so a read must fit what is
   left (`read_room`): the free cells less 2048, less the thoughts, and
-  never more than a third of the context. A read that does not fit is
-  refused into the chain with its size, its line count and a range that
-  would fit.
+  never more than an eighth of the context (about 4k tokens). A read
+  that does not fit is refused into the chain with its size, its line
+  count and a range of about 2k tokens. With a third as the cap, the
+  stream took the largest range offered (10.9k tokens of `main.rs`) and
+  went straight to a rollover.
   - In the first dev session, one 21026-token file read at position
     18000 filled the 32768 cells. The decode failed and the service
     stopped.
