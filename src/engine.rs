@@ -1853,10 +1853,26 @@ impl Engine {
         // before the test, so no spelling escapes it.
         if let Some(root) = &self.cfg.dev {
             if !inside(&p, &[root.as_path(), self.cfg.workspace.as_path()]) {
-                return self.read_failed(
-                    &p,
-                    "outside the repository and your workspace, all a read may reach while developing",
-                );
+                // Where it may read, and the read it likely meant: the longest
+                // tail of the path that exists in the repository.
+                let comps: Vec<_> = p.components().collect();
+                let meant = (1..=comps.len().min(4)).rev().find_map(|k| {
+                    let tail: PathBuf = comps[comps.len() - k..].iter().collect();
+                    root.join(&tail)
+                        .is_file()
+                        .then(|| tail.display().to_string())
+                });
+                let msg = match meant {
+                    Some(t) => format!(
+                        "outside the repository ({}) and your workspace, all a read may reach while developing; it has {t}: [read: {t}]",
+                        root.display()
+                    ),
+                    None => format!(
+                        "outside the repository ({}) and your workspace, all a read may reach while developing",
+                        root.display()
+                    ),
+                };
+                return self.read_failed(&p, &msg);
             }
         }
         let outcome = fs::metadata(&p)
