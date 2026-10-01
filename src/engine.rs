@@ -2088,6 +2088,7 @@ impl Engine {
         let mono = clock::mono_us();
         let now = clock::now_us();
         if idle
+            && !self.in_code
             && self.cfg.time_every_us > 0
             && mono - self.last_outside_mono.max(self.last_anchor_mono) >= self.cfg.time_every_us
         {

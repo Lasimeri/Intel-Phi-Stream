@@ -266,7 +266,8 @@ Every check is an `Event::Reflect` (an episode: `reflect.md`), a line in
 
 **Its code is left alone**: inside a ``` block of its own text (tracked
 across tokens, restored by a rewind) no check fires and no circling
-nudge comes, since code repeats by nature.
+nudge comes and the clock line waits until the block closes (in the
+dev session it cut two of the stream's code blocks in half), since code repeats by nature.
 
 **Logs rotate** (`rotlog.md`): `stream.log`, `chain.log`, `mind.log` and
 `reflect.log` each move to `NAME.1` past 64 MiB, the dev stream's own
