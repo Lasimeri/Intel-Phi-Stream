@@ -20,7 +20,7 @@ use crossterm::event::{self, Event as TEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Color, ResetColor};
 use crossterm::{cursor, execute, queue, terminal};
 
-use crate::client::{escape, parse, unescape, Client, Delib, DelibKind, Msg};
+use crate::client::{escape, parse, unescape, Client, Delib, DelibKind, Msg, TermLine};
 use crate::engine::{Kind, Mode, Status};
 use crate::format::{self, Class};
 use crate::mind::Reading;
@@ -157,6 +157,9 @@ struct View {
     output_chars: usize,
     /// The last piece was speech (the next speech continues its utterance).
     speaking: bool,
+    /// Its terminal: each command and its output, as pieces.
+    term: Vec<Piece>,
+    term_chars: usize,
     /// What the stream is working toward (`objective` lines), and since when.
     objective: Option<(i64, String)>,
     /// Kinds of line this terminal does not show, each noted once.
@@ -316,6 +319,45 @@ fn episode_short(e: &Episode) -> String {
 const KEEP_CHARS: usize = 400_000;
 
 impl View {
+    /// A `term` line into the terminal's text: a command as `$ COMMAND`
+    /// under its time, its end as its output and how it ended.
+    fn term_push(&mut self, t: &TermLine) {
+        let pieces: Vec<Piece> = if t.end {
+            let how = match (t.code, t.timed_out) {
+                (_, true) => "stopped at its time limit".to_string(),
+                (Some(c), _) => format!("exit {c}"),
+                (None, _) => "did not run".to_string(),
+            };
+            vec![
+                Piece {
+                    text: format!("{}\n", t.text.trim_end()),
+                    kind: Kind::Think,
+                },
+                Piece {
+                    text: format!(
+                        "[{how}, {:.0} ms{}]\n",
+                        t.ms,
+                        if t.cut { ", output cut" } else { "" }
+                    ),
+                    kind: Kind::Given,
+                },
+            ]
+        } else {
+            vec![Piece {
+                text: format!("\n[{}] $ {}\n", crate::clock::hms(t.t_us), t.text),
+                kind: Kind::Speak,
+            }]
+        };
+        for p in pieces {
+            self.term_chars += p.text.chars().count();
+            self.term.push(p);
+        }
+        while self.term_chars > KEEP_DELIB_CHARS && self.term.len() > 1 {
+            let p = self.term.remove(0);
+            self.term_chars -= p.text.chars().count();
+        }
+    }
+
     /// Speech into the output: an utterance begins under its time, the
     /// oldest dropped past `KEEP_DELIB_CHARS`.
     fn output_push(&mut self, text: &str, t_us: i64) {
@@ -384,6 +426,7 @@ impl View {
                 Pane::Log => 2,
                 Pane::Delib => 3,
                 Pane::Output => 4,
+                Pane::Term => 5,
             },
             self.scroll,
             self.heard,
@@ -409,6 +452,7 @@ impl View {
                         2 => Pane::Log,
                         3 => Pane::Delib,
                         4 => Pane::Output,
+                        5 => Pane::Term,
                         _ => Pane::Feed,
                     }
                 }
@@ -548,6 +592,9 @@ enum Pane {
     /// What it says aloud, utterance by utterance (its compartment under the
     /// deliberation from `WIDE` columns; a view under it).
     Output,
+    /// Its terminal: the commands it runs and their output (in the side
+    /// column from `WIDE` columns; a view under it).
+    Term,
 }
 
 impl Pane {
@@ -558,6 +605,7 @@ impl Pane {
             Pane::Log => "LOG",
             Pane::Delib => "DELIBERATION",
             Pane::Output => "OUTPUT",
+            Pane::Term => "TERMINAL",
         }
     }
 
@@ -565,7 +613,8 @@ impl Pane {
         match self {
             Pane::Feed => Pane::Delib,
             Pane::Delib => Pane::Output,
-            Pane::Output => Pane::Mind,
+            Pane::Output => Pane::Term,
+            Pane::Term => Pane::Mind,
             Pane::Mind => Pane::Log,
             Pane::Log => Pane::Feed,
         }
@@ -581,6 +630,8 @@ struct Layout {
     delib: Option<Rect>,
     /// The output under the deliberation, likewise.
     output: Option<Rect>,
+    /// The terminal in the side column, between the assessment and the log.
+    term: Option<Rect>,
     /// The last check, framed.
     assess: Rect,
     /// The log beside the view, framed, when there is room for a side column.
@@ -637,10 +688,17 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
                 h: assess_h,
                 w: SIDE_W,
             },
-            log: Some(Rect {
+            // Under the assessment: the terminal, then the log, halves.
+            term: Some(Rect {
                 top: 1 + assess_h,
                 left,
-                h: body - assess_h,
+                h: (body - assess_h) / 2,
+                w: SIDE_W,
+            }),
+            log: Some(Rect {
+                top: 1 + assess_h + (body - assess_h) / 2,
+                left,
+                h: body - assess_h - (body - assess_h) / 2,
                 w: SIDE_W,
             }),
             mind,
@@ -659,6 +717,7 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
             },
             delib: None,
             output: None,
+            term: None,
             assess: Rect {
                 top: 1 + body - assess_h,
                 left: 0,
@@ -908,6 +967,34 @@ fn draw_rows(s: &mut Screen, inner: Rect, rows: &[Vec<(String, Kind, Class)>], s
     }
 }
 
+/// Its terminal: each command and its output; says so when there is none.
+fn draw_term(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
+    if v.term.is_empty() {
+        let why =
+            "no command since this terminal connected (the service runs them with --terminal)";
+        for (r, l) in wrap(why, inner.w.saturating_sub(2), 0)
+            .iter()
+            .take(inner.h)
+            .enumerate()
+        {
+            s.put_to(
+                inner.top + r,
+                inner.left + 1,
+                inner.left + inner.w,
+                l,
+                plain(theme::GIVEN, theme::BG),
+            );
+        }
+        return;
+    }
+    draw_rows(
+        s,
+        inner,
+        &piece_rows(&v.term, inner.w.saturating_sub(2)),
+        scroll,
+    );
+}
+
 /// What it said aloud, each utterance under its time; says so when it
 /// has said nothing yet.
 fn draw_output(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
@@ -1037,6 +1124,7 @@ fn draw(
         }
         Pane::Delib => draw_delib(&mut s, inner, v, v.scroll),
         Pane::Output => draw_output(&mut s, inner, v, v.scroll),
+        Pane::Term => draw_term(&mut s, inner, v, v.scroll),
         Pane::Mind => {
             // The readings, newest at the bottom; a check beside the
             // reading it was asked from (the one before its token).
@@ -1079,6 +1167,10 @@ fn draw(
     if let Some(dr) = lay.delib {
         s.frame(dr, g, edge, "DELIBERATION", label);
         draw_delib(&mut s, dr.inner(), v, 0);
+    }
+    if let Some(tr) = lay.term {
+        s.frame(tr, g, edge, "TERMINAL", label);
+        draw_term(&mut s, tr.inner(), v, 0);
     }
     if let Some(or) = lay.output {
         s.frame(or, g, edge, "OUTPUT", label);
@@ -1229,7 +1321,7 @@ fn draw(
         None => String::new(),
     };
     let hints = format!(
-        "{follows} Enter speaks · Tab views · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        "{follows} Enter speaks · Tab views · /objective TEXT · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
     s.line(lay.hints, &hints, plain(theme::ACCENT_DIM, theme::BG));
@@ -1276,6 +1368,17 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
         };
         v.scroll = 0;
         return;
+    } else if line == "/objective" {
+        v.notes.push(match &v.objective {
+            Some((_, t)) => {
+                format!("objective: {t} (/objective TEXT sets one, /objective - clears it)")
+            }
+            None => "no objective (/objective TEXT sets one)".to_string(),
+        });
+        return;
+    } else if let Some(o) = line.strip_prefix("/objective ") {
+        let o = o.trim();
+        format!("objective {}", if o == "-" { "" } else { o })
     } else if line == "/quit" {
         v.quitting = true;
         "quit".to_string()
@@ -1360,6 +1463,8 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             output: Vec::new(),
             output_chars: 0,
             speaking: false,
+            term: Vec::new(),
+            term_chars: 0,
             objective: None,
             unknown: Default::default(),
         };
@@ -1470,6 +1575,13 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                     Ok(Msg::Ok(_)) => {}
                     Ok(Msg::Delib(d)) => {
                         v.delib_push(d);
+                        dirty = true;
+                    }
+                    Ok(Msg::Term(t)) => {
+                        if !t.end {
+                            v.log_push(t.t_us, format!("ran: {}", t.text));
+                        }
+                        v.term_push(&t);
                         dirty = true;
                     }
                     Ok(Msg::Objective(t, text)) => {
@@ -1597,6 +1709,8 @@ mod tests {
             output: Vec::new(),
             output_chars: 0,
             speaking: false,
+            term: Vec::new(),
+            term_chars: 0,
             objective: None,
             unknown: Default::default(),
         }
@@ -1619,6 +1733,7 @@ mod tests {
             rects.extend(l.log);
             rects.extend(l.delib);
             rects.extend(l.output);
+            rects.extend(l.term);
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.top >= 1 && a.top + a.h <= l.mind, "{w}x{h} {a:?}");
                 assert!(a.left + a.w <= w, "{w}x{h} {a:?}");
@@ -1633,6 +1748,7 @@ mod tests {
             assert_eq!(l.log.is_some(), w >= WIDE);
             assert_eq!(l.delib.is_some(), w >= WIDE);
             assert_eq!(l.output.is_some(), w >= WIDE);
+            assert_eq!(l.term.is_some(), w >= WIDE);
             assert!(l.assess.h >= 6, "{w}x{h}: room for the token frame");
             assert_eq!(
                 (l.mind, l.status, l.input, l.hints),

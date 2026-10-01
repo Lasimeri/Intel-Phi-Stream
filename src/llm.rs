@@ -296,6 +296,13 @@ impl Llm {
         self.set_sampling(s);
     }
 
+    /// The banned tokens replaced (a gate opened or closed while it runs);
+    /// the sampler rebuilt with `recent` accepted, so its penalties stand.
+    pub fn set_banned(&mut self, tokens: &[i32], s: &Sampling, recent: &[i32]) {
+        self.banned = tokens.to_vec();
+        self.reset_sampler(s, s.seed, recent);
+    }
+
     /// Text to tokens; `special` parses the template's control tokens.
     pub fn tokenize(&self, text: &str, special: bool) -> Result<Vec<i32>> {
         let mut out = vec![0i32; text.len() + 8];

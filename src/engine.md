@@ -294,3 +294,40 @@ that carried a live token, `side_tps` over those that read or caught up,
 Commands: `Say`, `Feed`, `Pause` (the engine waits for the next command),
 `Resume`, `Chunk`, `Temp` (the temperature alone; the rest of the
 sampling stays), `Quit`.
+
+## What it is, its objective, its tools, its restarts
+
+- **The self-model.** After the persona, the opening and every rollover
+  base carry "what this mind is" (`about`), from the run's own facts: the
+  model's file, its blocks on the GPU and where the rest are (the cards
+  when `GGML_BACKEND_PATH` names `ggml_phi`), its memory (the context in
+  thousands), what it perceives (its context: its text, what it is told
+  and handed with the time it arrived, what its tools return; no screen,
+  no sound; it does not claim what it has not seen), how it goes on (the
+  summary at a rollover, notes and preferences on disk, a restart resumes
+  from the summary and is told what changed), its tools, and its
+  objective. The preamble no longer says it has no tools, nor the
+  mechanics that it never speaks of a system: it knows what it is and
+  does not dwell on it. None of it in a task (a measurement's text does
+  not move).
+- **The objective, and output idle without one** (on by default;
+  `--no-objective-gate` turns it off; never in a task). Kept in
+  `objective.md` in the workspace, set by `objective TEXT` on the socket
+  (`phi-stream objective TEXT`, `/objective TEXT` in the terminal; `-` or
+  empty clears it). Without one it keeps thinking, and its output idles:
+  the tokens carrying `»` (in chat, `</think>`) join the banned ones (the
+  sampler rebuilt with its history, so its penalties stand), and its tool
+  lines do nothing (it is told so, at most every 5 minutes). A change is
+  told to it as a line from the system and sent as an `objective` line.
+  After the Machine of Person of Interest, which acts only when asked
+  (the note "The Machine learning from Finch" in the person's vault).
+- **Its terminal** (`term.md`): `[run: COMMAND]`; the output comes back as
+  a document, `the command ... ended (exit 0, 12 ms); its output`.
+- **Quit writes the summary first** (the service): `quit` asks for the
+  summary at the next point with nothing in flight, keeps it, and stops
+  (by two minutes at the latest; a second `quit` stops at once). Every
+  summary is also kept by its time in `summaries/`, so none is lost to
+  the next.
+- **What changed** (in development): the commit it runs is kept in
+  `last_run`; at a start on another commit it is told the commits between,
+  newest first, at most 30.

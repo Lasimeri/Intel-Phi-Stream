@@ -99,6 +99,13 @@ pub enum Event {
         think_tokens: usize,
         capped: bool,
     },
+    /// What it works toward changed: the real time and the text (empty:
+    /// none, and its output is idle).
+    Objective(i64, String),
+    /// Its terminal (`term.rs`): a command began (its id, the real time,
+    /// the command), or one ended (the real time, how).
+    TermStart(u64, i64, String),
+    TermEnd(i64, crate::term::Ran),
     Stopped,
 }
 
@@ -121,6 +128,9 @@ pub enum Command {
     Persona(String),
     /// Ask for a status event now.
     Status,
+    /// What it works toward (empty: none, and its output is idle until one
+    /// is given).
+    Objective(String),
     Quit,
 }
 
@@ -191,6 +201,15 @@ pub struct Config {
     /// The repository the stream develops with Claude (`docs/dev.md`): its reads
     /// resolve there, its persona says so; none: no development.
     pub dev: Option<PathBuf>,
+    /// Its terminal (`term.md`): `[run: COMMAND]` runs in a sandbox.
+    pub terminal: bool,
+    /// Its output idle until it has an objective (`objective.md` in the
+    /// workspace, or the `objective` command): it thinks, and its speech
+    /// and tool lines wait.
+    pub gate_output: bool,
+    /// `quit` writes the summary first, so a restart resumes from it (the
+    /// service; a one-shot run stops at once).
+    pub summary_on_quit: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -198,16 +217,16 @@ pub const DEFAULT_BASE: &str = "It is concrete, curious, and honest about what i
 
 /// What the journal is told before the base: how to take a person's
 /// standing instructions as a mind's own manner.
-const PREAMBLE_JOURNAL: &str = "What follows, quoted line by line, is the standing instruction set of the person this mind lives with. The journal never reproduces it: it is a document the mind has read, not something it writes. It is the base of this mind's own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is this mind's manner, in its own thoughts as much as in what it says aloud. Where the text speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit and no tools, and memory is the [note: ...] line below.";
+const PREAMBLE_JOURNAL: &str = "What follows, quoted line by line, is the standing instruction set of the person this mind lives with. The journal never reproduces it: it is a document the mind has read, not something it writes. It is the base of this mind's own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is this mind's manner, in its own thoughts as much as in what it says aloud. Where the text speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit; its tools are the lines described below, and memory is the [note: ...] line.";
 
 /// The chat frame's preamble, in the second person.
-const PREAMBLE_CHAT: &str = "What follows, quoted line by line, is the standing instruction set of the person you live with. You never reproduce it: it is a document you have read, not something you write. It is the base of your own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is your manner, in your thoughts as much as in what you say aloud. Where it speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit and no tools, and memory is the [note: ...] line below.";
+const PREAMBLE_CHAT: &str = "What follows, quoted line by line, is the standing instruction set of the person you live with. You never reproduce it: it is a document you have read, not something you write. It is the base of your own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is your manner, in your thoughts as much as in what you say aloud. Where it speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit; your tools are the lines described below, and memory is the [note: ...] line.";
 
 /// The journal's mechanics: what the mind is told once, at the top.
-const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, and [read: PATH:START-END] only those lines of it (a file too big for its memory is refused with its size, so it reads it in parts), so it reads what it is pointed at and what it wants to look at again. It does not describe itself as a system following instructions; it never restates, lists or analyses its rules, never speaks of a user, a prompt or a system; whatever comes to it first, it writes as a thought of its own, and goes on.";
+const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, and [read: PATH:START-END] only those lines of it (a file too big for its memory is refused with its size, so it reads it in parts), so it reads what it is pointed at and what it wants to look at again. It knows what it is (below) and does not dwell on it: it never restates, lists or analyses its rules; whatever comes to it, it takes into its own threads, and goes on.";
 
 /// The chat frame's mechanics.
-const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you, and [read: PATH:START-END] only those lines (a file too big for your memory is refused with its size, so you read it in parts). Never narrate that you are an AI system following instructions; simply think.";
+const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you, and [read: PATH:START-END] only those lines (a file too big for your memory is refused with its size, so you read it in parts). You know what you are (below) and do not dwell on it: never restate or analyse your rules; simply think.";
 
 /// A task's persona: the base, quoted, as the manner of the one who
 /// answers; then how to answer.
@@ -436,6 +455,23 @@ pub struct Engine {
     last_read_failure_mono: i64,
     /// Paths whose read failed, and when (monotonic): each told once a while.
     failed_reads: HashMap<String, i64>,
+    /// Its terminal (`--terminal`), and whether a command is running.
+    term: Option<crate::term::Term>,
+    term_pending: usize,
+    /// What it works toward (since when, the text); none: its output idles.
+    objective: Option<(i64, String)>,
+    /// The tokens never sampled (control, `«`), and those held back while
+    /// it has no objective (`»` in the journal, `</think>` in chat).
+    base_ban: Vec<i32>,
+    speak_ban: Vec<i32>,
+    /// When it was last told its output idles (monotonic microseconds).
+    told_idle_mono: i64,
+    /// `quit` asked: the summary is being written, then it stops (by this
+    /// monotonic deadline at the latest); `stop_now` ends the loop.
+    quit_deadline: Option<i64>,
+    stop_now: bool,
+    /// What changed in the program since it last ran (`changes_since`).
+    changed_since: String,
     read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
@@ -464,6 +500,13 @@ pub struct Engine {
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
+/// The longest a quit waits for its summary (microseconds).
+const QUIT_WAIT_US: i64 = 120_000_000;
+/// How often it is told its output idles while it has no objective.
+const IDLE_TELL_US: i64 = 300_000_000;
+/// Commands that may wait for its terminal at once, and its time limit.
+const MAX_TERM_PENDING: usize = 4;
+const MAX_TERM_SECS: u64 = 60;
 
 /// A summary's end mark counts only after this many tokens, and the ask
 /// ends with these first words in its own voice.
@@ -504,7 +547,7 @@ impl Engine {
         // The run's sampling, set explicitly (a task's greedy decoding and
         // penalty are its own, whatever the model was loaded with).
         llm.set_sampling(&cfg.sampling);
-        if cfg.frame == Frame::Journal {
+        let (base_ban, speak_ban) = if cfg.frame == Frame::Journal {
             // The journal has no template: its control tokens are never sampled.
             let control: Vec<i32> = [
                 "<think>",
@@ -522,10 +565,58 @@ impl Engine {
             // apart from the sampler and keeps it.
             let mut control = control;
             control.extend(llm.tokens_containing("«"));
-            llm.ban_tokens(&control, &cfg.sampling);
-        }
+            // Speech is a » line: held back while it has no objective.
+            (control, llm.tokens_containing("»"))
+        } else {
+            // In chat, speech begins when the thoughts close.
+            (Vec::new(), llm.special("</think>").into_iter().collect())
+        };
         fs::create_dir_all(&cfg.workspace)
             .with_context(|| format!("making {}", cfg.workspace.display()))?;
+        // What it works toward, kept across restarts (`objective.md`); a
+        // task's is the task.
+        let objective = if cfg.task {
+            None
+        } else {
+            let p = cfg.workspace.join("objective.md");
+            fs::read_to_string(&p)
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    let since = fs::metadata(&p)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_micros() as i64);
+                    (since, t)
+                })
+        };
+        // Its output idles while it has no objective: the speech tokens join
+        // the banned ones (`gate`).
+        let mut banned = base_ban.clone();
+        if cfg.gate_output && objective.is_none() {
+            banned.extend(&speak_ban);
+        }
+        llm.ban_tokens(&banned, &cfg.sampling);
+        if cfg.terminal && !crate::term::available() {
+            anyhow::bail!("--terminal needs bubblewrap (bwrap), taskset and nice on PATH");
+        }
+        // In development: what changed in the program since it last ran.
+        let changed_since = match (&cfg.dev, cfg.task) {
+            (Some(repo), false) => changes_since(repo, &cfg.workspace, cfg.frame),
+            _ => String::new(),
+        };
+        let term = cfg.terminal.then(|| {
+            crate::term::Term::start(crate::term::TermConfig {
+                repo: cfg.dev.clone(),
+                workspace: cfg.workspace.clone(),
+                timeout: std::time::Duration::from_secs(MAX_TERM_SECS),
+                max_out: 16 * 1024,
+                // The last CPU: the stream's own threads start from the first.
+                cpu: std::thread::available_parallelism().map_or(0, |n| n.get() - 1),
+            })
+        });
         let notes = read_notes(&cfg.workspace.join("notes.md"));
         let prefs = read_notes(&cfg.workspace.join("preferences.md"));
         // In development, notes already kept are checked against the code too
@@ -630,6 +721,15 @@ impl Engine {
             last_nudge_mono: i64::MIN / 2,
             last_read_failure_mono: i64::MIN / 2,
             failed_reads: HashMap::new(),
+            term,
+            term_pending: 0,
+            objective,
+            base_ban,
+            speak_ban,
+            told_idle_mono: i64::MIN / 2,
+            quit_deadline: None,
+            stop_now: false,
+            changed_since,
             read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
@@ -800,15 +900,76 @@ impl Engine {
         };
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n=== the journal ===\n\n« {when}{}\n{kept}\n{}",
-                self.cfg.system, self.cfg.seed, self.cfg.first_words
+                "{}{}\n\n=== the journal ===\n\n« {when}{}\n{kept}{}\n{}",
+                self.cfg.system,
+                self.about(),
+                self.cfg.seed,
+                self.changed_since,
+                self.cfg.first_words
             ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{when}{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                "<|im_start|>system\n{}{}<|im_end|>\n<|im_start|>user\n{when}{}{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
+                self.about(),
+                self.changed_since,
                 self.cfg.seed,
                 if kept.is_empty() { String::new() } else { format!("\n{kept}") }
             ),
+        }
+    }
+
+    /// What it is, in facts this run knows (`engine.md`): the model, its
+    /// placement, its memory, what it perceives, how it goes on across
+    /// rollovers and restarts, its tools, its objective. Nothing in a task
+    /// (a measurement's text must not move).
+    fn about(&self) -> String {
+        if self.cfg.task {
+            return String::new();
+        }
+        let model = Path::new(&self.llm.opts.model)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // phi-ggml.sh names the cards' backend to ggml (`avx512.md`).
+        let cards = std::env::var("GGML_BACKEND_PATH").is_ok_and(|p| p.contains("ggml_phi"));
+        let rest = if cards {
+            "the rest on the host and two Xeon Phi co-processor cards"
+        } else {
+            "the rest on the host"
+        };
+        let (gpu, blocks) = (self.llm.split.gpu_blocks, self.llm.split.n_blocks);
+        let ctx = (self.llm.n_ctx() + 500) / 1000;
+        let ws = self.cfg.workspace.display();
+        let journal = self.journal();
+        let (it, its) = if journal {
+            ("it", "its")
+        } else {
+            ("you", "your")
+        };
+        let terminal = if self.term.is_some() {
+            format!("[run: COMMAND] runs a shell command in {its} terminal (the repository read-only, {its} workspace {ws} writable, no network) and hands the output back when it ends, while {it} {} thinking; ", if journal { "goes on" } else { "go on" })
+        } else {
+            String::new()
+        };
+        let objective = match &self.objective {
+            Some((_, t)) => format!("{its} objective: {t}"),
+            None if self.cfg.gate_output => format!(
+                "{it} {} no objective yet: until {it} {} given one, {it} only {}, and {its} {} lines and tool lines do nothing",
+                if journal { "has" } else { "have" },
+                if journal { "is" } else { "are" },
+                if journal { "thinks" } else { "think" },
+                if journal { "»" } else { "spoken" },
+            ),
+            None => format!("{it} {} no set objective", if journal { "has" } else { "have" }),
+        };
+        if journal {
+            format!(
+                "\n\n=== what this mind is ===\nThis mind is a language model, {model}, running without pause on one computer: {gpu} of its {blocks} blocks on a GPU, {rest}. Its memory is its context, about {ctx} thousand tokens. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+            )
+        } else {
+            format!(
+                "\n\nWhat you are: a language model, {model}, running without pause on one computer: {gpu} of your {blocks} blocks on a GPU, {rest}. Your memory is your context, about {ctx} thousand tokens. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+            )
         }
     }
 
@@ -907,8 +1068,9 @@ impl Engine {
     fn base_after(&self, summary: &str) -> String {
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}{}« the journal continues.\n\n{}",
+                "{}{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}{}« the journal continues.\n\n{}",
                 self.cfg.system,
+                self.about(),
                 clock::datetime(clock::now_us()),
                 summary,
                 self.checked_line(summary),
@@ -916,8 +1078,9 @@ impl Engine {
                 self.cfg.first_words
             ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                "<|im_start|>system\n{}{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
+                self.about(),
                 clock::datetime(clock::now_us()),
                 summary,
                 self.checked_line(summary),
@@ -974,6 +1137,24 @@ impl Engine {
     /// A line the mind wrote: a note to keep, a file to read.
     fn line_done(&mut self, line: &str) {
         let l = line.trim();
+        // With no objective its output idles: a tool line does nothing, and
+        // it is told so (at most every few minutes).
+        let tool = ["[note:", "[unnote:", "[prefer:", "[read:", "[run:"]
+            .iter()
+            .any(|p| l.starts_with(p))
+            && l.ends_with(']');
+        if tool && self.idle_output() {
+            self.note(format!("no objective: {l} did nothing"));
+            let mono = clock::mono_us();
+            if mono - self.told_idle_mono >= IDLE_TELL_US {
+                self.told_idle_mono = mono;
+                let msg = self.framed_system(
+                    "you have no objective yet: you think, and your tool lines and » lines do nothing until you are given one",
+                );
+                let _ = self.put(msg);
+            }
+            return;
+        }
         if let Some(body) = l.strip_prefix("[note:").and_then(|r| r.strip_suffix(']')) {
             let body = body.trim();
             if !body.is_empty() {
@@ -994,6 +1175,110 @@ impl Engine {
             if !path.is_empty() && !self.pending_reads.iter().any(|p| p == path) {
                 self.pending_reads.push(path.to_string());
             }
+        } else if let Some(cmd) = l.strip_prefix("[run:").and_then(|r| r.strip_suffix(']')) {
+            self.run_command(cmd.trim());
+        }
+    }
+
+    /// What it works toward, set (or cleared, empty): kept in
+    /// `objective.md`, told to it as a line from the system, sent to the
+    /// terminals; its output opens (or idles again).
+    fn set_objective(&mut self, text: &str) {
+        let now = clock::now_us();
+        let p = self.cfg.workspace.join("objective.md");
+        if text.is_empty() {
+            let _ = fs::remove_file(&p);
+            self.objective = None;
+        } else {
+            let _ = fs::write(&p, format!("{text}\n"));
+            self.objective = Some((now, text.to_string()));
+        }
+        self.apply_gate();
+        let said = match &self.objective {
+            Some((_, t)) => format!("your objective is now: {t}"),
+            None => "you have no objective now: you think, and your tool lines and » lines do nothing until you are given one".to_string(),
+        };
+        let msg = self.framed_system(&said);
+        let _ = self.put(msg);
+        let _ = self.tx.send(Event::Objective(now, text.to_string()));
+        self.note(format!(
+            "objective: {}",
+            if text.is_empty() { "none" } else { text }
+        ));
+    }
+
+    /// The sampler's banned tokens for the gate's state: speech held back
+    /// while its output idles.
+    fn apply_gate(&mut self) {
+        let mut banned = self.base_ban.clone();
+        if self.idle_output() {
+            banned.extend(&self.speak_ban);
+        }
+        let s = self.cfg.sampling.clone();
+        self.llm.set_banned(&banned, &s, &self.history);
+    }
+
+    /// Its output idles: gated (`--no-objective-gate` not given) and no
+    /// objective.
+    fn idle_output(&self) -> bool {
+        self.cfg.gate_output && self.objective.is_none()
+    }
+
+    /// A command line it wrote: run in its terminal's sandbox (`term.md`),
+    /// in order, one at a time; its output comes back as a document when it
+    /// ends (`poll_term`).
+    fn run_command(&mut self, cmd: &str) {
+        if cmd.is_empty() {
+            return;
+        }
+        let Some(term) = self.term.as_mut() else {
+            let msg = self.framed_system(&format!(
+                "{cmd} did not run: there is no terminal in this run (it starts with --terminal)"
+            ));
+            let _ = self.put(msg);
+            return;
+        };
+        if self.term_pending >= MAX_TERM_PENDING {
+            let msg = self.framed_system(&format!(
+                "{cmd} did not run: {MAX_TERM_PENDING} commands are waiting already"
+            ));
+            let _ = self.put(msg);
+            return;
+        }
+        let id = term.submit(cmd);
+        self.term_pending += 1;
+        let _ = self
+            .tx
+            .send(Event::TermStart(id, clock::now_us(), cmd.to_string()));
+        self.note(format!("running: {cmd}"));
+    }
+
+    /// Commands that ended: each as a document handed back to it, and to
+    /// the terminals.
+    fn poll_term(&mut self) {
+        while let Some(ran) = self.term.as_ref().and_then(|t| t.poll()) {
+            self.term_pending = self.term_pending.saturating_sub(1);
+            let now = clock::now_us();
+            let _ = self.tx.send(Event::TermEnd(now, ran.clone()));
+            let how = match (ran.code, ran.timed_out) {
+                (_, true) => format!("stopped at the limit of {} s", MAX_TERM_SECS),
+                (Some(c), _) => format!("exit {c}"),
+                (None, _) => "it did not run".to_string(),
+            };
+            let what = format!(
+                "the command `{}` ended ({how}, {:.0} ms); its output{}",
+                ran.command,
+                ran.ms,
+                if ran.cut { ", cut at 16 KiB," } else { "" }
+            );
+            let text = if ran.out.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                ran.out.clone()
+            };
+            let framed = self.framed_doc(&text, &what, now);
+            self.queue
+                .push_back((framed, format!("ran {}", ran.command)));
         }
     }
 
@@ -2060,6 +2345,8 @@ impl Engine {
         if self.cfg.task {
             return self.after_task();
         }
+        // Its terminal: commands that ended come back as documents.
+        self.poll_term();
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
             s.push(self.next);
@@ -2076,8 +2363,19 @@ impl Engine {
                 if let Some(i) = text.rfind("\n---") {
                     text.truncate(i);
                 }
-                // Kept on disk: a restart resumes from it, as a rollover does.
+                // Kept on disk: a restart resumes from it, as a rollover does;
+                // and every one kept by its time, so none is lost to the next.
                 let _ = fs::write(self.cfg.workspace.join("summary.md"), text.trim());
+                let dir = self.cfg.workspace.join("summaries");
+                let _ = fs::create_dir_all(&dir);
+                let stamp = clock::datetime(clock::now_us()).replace([' ', ':'], "-");
+                let _ = fs::write(dir.join(format!("{stamp}.md")), text.trim());
+                // Asked to quit: the summary was its last act.
+                if self.quit_deadline.is_some() {
+                    self.note("the summary is kept; stopping".into());
+                    self.stop_now = true;
+                    return Ok(());
+                }
                 let base = self.base_after(text.trim());
                 let tokens = self.tok(&base, true)?;
                 self.note(format!(
@@ -2124,7 +2422,9 @@ impl Engine {
         // Rollover: past the share, or a new persona waiting, with nothing
         // in flight: ask for the summary.
         let limit = (self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize;
-        if idle && (self.history.len() >= limit || self.reseat) {
+        // A quit asks for the summary too: the restart resumes from it.
+        let quitting = self.quit_deadline.is_some() && !self.cfg.task;
+        if idle && (self.history.len() >= limit || self.reseat || quitting) {
             // Reads asked for before the rollover would fill the new context
             // with what the summary already carries: dropped; it asks again.
             let queued = self.queue.len();
@@ -2265,7 +2565,17 @@ impl Engine {
             Command::Status => {
                 let _ = self.tx.send(Event::Status(self.status()));
             }
-            Command::Quit => return false,
+            Command::Objective(text) => self.set_objective(text.trim()),
+            Command::Quit => {
+                // Its context outlives the restart: the summary first (at
+                // the next point with nothing in flight), then the stop; by
+                // the deadline at the latest. A second quit stops at once.
+                if !self.cfg.summary_on_quit || self.cfg.task || self.quit_deadline.is_some() {
+                    return false;
+                }
+                self.quit_deadline = Some(clock::mono_us() + QUIT_WAIT_US);
+                self.note("quitting: writing the summary first".into());
+            }
         }
         true
     }
@@ -2350,6 +2660,13 @@ impl Engine {
             self.cycle()?;
             self.after()?;
             self.release();
+            // Quitting: once the summary is kept, or past the deadline.
+            if self.stop_now || self.quit_deadline.is_some_and(|d| clock::mono_us() > d) {
+                self.abandon();
+                self.release();
+                let _ = self.tx.send(Event::Stopped);
+                return Ok(self.finish());
+            }
             if self.done && self.check.is_none() {
                 self.release();
                 let _ = self.tx.send(Event::Done {
@@ -2360,6 +2677,46 @@ impl Engine {
                 return Ok(self.finish());
             }
         }
+    }
+}
+
+/// The commits since the program last ran here (`last_run` in the
+/// workspace) as a line from the system, and the commit it runs now kept
+/// for the next start. Empty on a first start, when nothing changed, or
+/// outside a git checkout.
+fn changes_since(repo: &Path, ws: &Path, frame: Frame) -> String {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let Some(head) = git(&["rev-parse", "HEAD"]) else {
+        return String::new();
+    };
+    let file = ws.join("last_run");
+    let last = fs::read_to_string(&file)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let _ = fs::write(&file, format!("{head}\n"));
+    if last.is_empty() || last == head {
+        return String::new();
+    }
+    let range = format!("{last}..{head}");
+    let log = git(&["log", "--oneline", "--no-decorate", "-n", "30", &range]).unwrap_or_default();
+    if log.is_empty() {
+        return String::new();
+    }
+    let body = format!(
+        "the program you run in was updated and restarted; the changes since you last ran, newest first:\n{log}"
+    );
+    match frame {
+        Frame::Journal => format!("« [{body}]\n"),
+        Frame::Chat => format!("\n[{body}]"),
     }
 }
 
@@ -2605,6 +2962,53 @@ mod tests {
             vec!["first".to_string(), "second".to_string()]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_restart_is_told_what_changed() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("changes-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, ws) = (dir.join("repo"), dir.join("ws"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "initial"]);
+        // A first start: nothing to tell, the commit kept.
+        assert_eq!(changes_since(&repo, &ws, Frame::Journal), "");
+        git(&["commit", "-q", "--allow-empty", "-m", "the read fallback"]);
+        let told = changes_since(&repo, &ws, Frame::Journal);
+        assert!(
+            told.starts_with("« [the program you run in was updated"),
+            "{told}"
+        );
+        assert!(
+            told.contains("the read fallback") && !told.contains("initial"),
+            "{told}"
+        );
+        // Told once: the next start is the same commit.
+        assert_eq!(changes_since(&repo, &ws, Frame::Journal), "");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

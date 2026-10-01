@@ -96,6 +96,8 @@ pub enum Msg {
     /// What the stream is working toward, when it changes: its real time
     /// and text.
     Objective(i64, String),
+    /// Its terminal: a command began, or ended with its output.
+    Term(TermLine),
     Ok(String),
     Err(String),
     Bye,
@@ -231,6 +233,11 @@ pub fn parse(line: &str) -> Msg {
                 text: unescape(f.get(2).copied().unwrap_or("")),
             })
         }
+        // term start t=US id=N COMMAND, or term end t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT
+        "term" => match parse_term(rest) {
+            Some(t) => Msg::Term(t),
+            None => Msg::Other(line.to_string()),
+        },
         // objective t=US TEXT
         "objective" => match rest.strip_prefix("t=").and_then(|r| r.split_once(' ')) {
             Some((t, text)) => Msg::Objective(t.parse().unwrap_or(0), unescape(text)),
@@ -241,6 +248,56 @@ pub fn parse(line: &str) -> Msg {
         "bye" => Msg::Bye,
         _ => Msg::Other(line.to_string()),
     }
+}
+
+/// One `term` line: a command began (`end` false), or ended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TermLine {
+    pub end: bool,
+    pub t_us: i64,
+    pub id: u64,
+    /// The exit code, none when it was stopped or did not run.
+    pub code: Option<i32>,
+    pub ms: f32,
+    pub cut: bool,
+    pub timed_out: bool,
+    /// The command (start), or its output (end).
+    pub text: String,
+}
+
+/// A command's end as the service sends it.
+pub fn term_end_line(t_us: i64, r: &crate::term::Ran) -> String {
+    format!(
+        "term end t={t_us} id={} code={} ms={:.0} cut={} timeout={} {}",
+        r.id,
+        r.code.map_or("-".to_string(), |c| c.to_string()),
+        r.ms,
+        r.cut as u8,
+        r.timed_out as u8,
+        escape(&r.out)
+    )
+}
+
+fn parse_term(rest: &str) -> Option<TermLine> {
+    let (kind, rest) = rest.split_once(' ')?;
+    let end = match kind {
+        "start" => false,
+        "end" => true,
+        _ => return None,
+    };
+    let n = if end { 6 } else { 2 };
+    let f: Vec<&str> = rest.splitn(n + 1, ' ').collect();
+    let get = |k: &str| f.iter().take(n).find_map(|x| x.strip_prefix(k));
+    Some(TermLine {
+        end,
+        t_us: get("t=")?.parse().ok()?,
+        id: get("id=")?.parse().ok()?,
+        code: get("code=").and_then(|c| c.parse().ok()),
+        ms: get("ms=").and_then(|m| m.parse().ok()).unwrap_or(0.0),
+        cut: get("cut=") == Some("1"),
+        timed_out: get("timeout=") == Some("1"),
+        text: unescape(f.get(n).copied().unwrap_or("")),
+    })
 }
 
 /// Which part of a deliberation a `delib` line carries.
@@ -447,5 +504,25 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(parse("delib sideways t=1 pos=2 x"), Msg::Other(_)));
+        let r = crate::term::Ran {
+            id: 3,
+            command: "ls".into(),
+            code: Some(0),
+            out: "a b\nc".into(),
+            cut: false,
+            timed_out: false,
+            ms: 12.0,
+        };
+        match parse(&term_end_line(7, &r)) {
+            Msg::Term(t) => {
+                assert!(t.end && t.id == 3 && t.code == Some(0) && t.t_us == 7);
+                assert_eq!(t.text, "a b\nc");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse("term start t=5 id=4 grep -n x src/a.rs") {
+            Msg::Term(t) => assert!(!t.end && t.id == 4 && t.text == "grep -n x src/a.rs"),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -76,3 +76,15 @@ The same rules are in the repository's `CLAUDE.md` for every session:
   until it is stopped (`scripts/phi-stream.sh stop`). Its notes and
   preferences survive the stop and come back at its next start; the
   stream itself begins again.
+
+## Objective and terminal (2026-10-01)
+
+`dev` starts the stream with `--terminal`. Until it has an objective it
+only thinks: give it one with `/objective TEXT` in the terminal or
+`scripts/phi-stream.sh objective TEXT` (kept in `objective.md`, so a
+restart keeps it). Then `[run: COMMAND]` runs in its sandbox (`src/term.md`:
+the repository read-only, its workspace read-write, no network, no Python,
+one CPU at the lowest priority) and the output comes back to it; what it
+writes lands in its workspace, and the repository changes only when Claude
+applies a change. A restart resumes from the summary its quit wrote and
+tells it the commits since it last ran (`src/engine.md`).

@@ -25,6 +25,7 @@ mod screen;
 mod serve;
 mod split;
 mod sys;
+mod term;
 mod torch;
 mod tui;
 mod verify;
@@ -177,6 +178,15 @@ struct StreamArgs {
     /// so, [read: PATH] resolves there, [prefer: ...] lines are kept.
     #[arg(long, value_name = "REPO")]
     dev: Option<String>,
+    /// A terminal for the stream (src/term.md): `[run: COMMAND]` lines run in a
+    /// sandbox (the repository read-only, the workspace read-write, no
+    /// network, one CPU at the lowest priority), their output handed back.
+    #[arg(long)]
+    terminal: bool,
+    /// Do not hold its output until it has an objective (by default it only
+    /// thinks until one is given: `phi-stream objective TEXT`).
+    #[arg(long)]
+    no_objective_gate: bool,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -292,6 +302,12 @@ enum Cmd {
     /// at least P (a write needs 1 - P; reflect.md).
     KeepAt {
         p: f32,
+    },
+    /// What it works toward (none given: it only thinks; its speech and tool
+    /// lines wait). `-` clears it.
+    Objective {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
     },
     /// Tokens read beside the live token each cycle (0 adapts).
     Chunk {
@@ -606,6 +622,9 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         mind,
         reflect,
         dev,
+        terminal: s.terminal,
+        gate_output: !s.no_objective_gate,
+        summary_on_quit: false,
     })
 }
 
@@ -659,7 +678,9 @@ fn load_mind(m: &ModelArgs, a: &MindArgs) -> Result<Llm> {
 /// The service: the engine on its thread, the socket on this one.
 fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     eprintln!("phi-stream: placing the model and loading it; the cards upload their shares at the first multiply");
-    let cfg = config(s, sampling(m))?;
+    let mut cfg = config(s, sampling(m))?;
+    // A restart of the service resumes from the summary its quit writes.
+    cfg.summary_on_quit = true;
     let llm = load_mind(m, &s.mind)?;
     let info = info_line(&llm, &cfg);
     let (etx, erx) = mpsc::channel();
@@ -758,6 +779,9 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
             Ok(Event::Reflect(e)) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
+            Ok(Event::Objective(_, t)) => eprintln!("\x1b[2mobjective: {t}\x1b[0m"),
+            Ok(Event::TermStart(_, _, c)) => eprintln!("\x1b[2m$ {c}\x1b[0m"),
+            Ok(Event::TermEnd(_, r)) => eprintln!("\x1b[2m{}\x1b[0m", r.out),
             Ok(Event::Done { .. }) => {}
             Ok(Event::Stopped) | Err(_) => break,
         }
@@ -981,6 +1005,14 @@ fn main() -> Result<()> {
         Cmd::Listen => listen(&socket),
         Cmd::Feed { path } => ask(&socket, &format!("feed {}", expand_home(&path))),
         Cmd::KeepAt { p } => ask(&socket, &format!("keep-at {p}")),
+        Cmd::Objective { text } => {
+            let t = text.join(" ");
+            let t = t.trim();
+            ask(
+                &socket,
+                &format!("objective {}", if t == "-" { "" } else { t }),
+            )
+        }
         Cmd::Tail { status, mind } => tail(&socket, status, mind),
         Cmd::Status => {
             let mut c = Client::connect(&socket)?;

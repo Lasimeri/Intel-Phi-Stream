@@ -39,7 +39,11 @@ a failure's message outlives the tmux session.
 While the model is loaded and running, a terminal window on the desktop
 shows it: the diagnostics (the placement, the rates, the context, the
 mind strip, the checks) and the input line (`src/tui.md`).
-- `start` (and so `dev`) runs `window --keep`, detached: for as long as
+- `dev` adds `--terminal` (the stream's sandboxed terminal, `src/term.md`).
+`stop` waits up to two minutes for the service to write its summary and
+end (`src/engine.md`) before it ends the session.
+
+`start` (and so `dev`) runs `window --keep`, detached: for as long as
   the service's tmux session lasts, every 3 s, when no window is open and
   the model is running (`status` prints a line; while it loads it prints
   none), it opens one. A window closed by hand opens again while the

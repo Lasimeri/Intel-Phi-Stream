@@ -568,6 +568,10 @@ pub fn stream(
             mind: o.mind.clone(),
             reflect: o.reflect.clone(),
             dev: None,
+            terminal: false,
+            // A task's objective is the task.
+            gate_output: false,
+            summary_on_quit: false,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

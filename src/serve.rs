@@ -27,6 +27,8 @@ const KEEP_CHARS: usize = 400_000;
 const REPLAY_CHARS: usize = 12_000;
 /// Readings of its mind kept and shown to a new `tail`.
 const KEEP_MINDS: usize = 256;
+/// Lines of its terminal replayed to a new tail.
+const KEEP_TERM: usize = 64;
 
 struct Hub {
     recent: VecDeque<(String, Kind, i64)>,
@@ -35,9 +37,20 @@ struct Hub {
     subs: Vec<Sender<String>>,
     /// The last readings of its mind, as lines.
     minds: VecDeque<String>,
+    /// What it works toward (the last `objective` line), and the last
+    /// lines of its terminal, replayed to a new tail.
+    objective: Option<String>,
+    term: VecDeque<String>,
 }
 
 impl Hub {
+    fn push_term(&mut self, line: String) {
+        self.term.push_back(line);
+        while self.term.len() > KEEP_TERM {
+            self.term.pop_front();
+        }
+    }
+
     fn push_text(&mut self, text: &str, kind: Kind, t_us: i64) {
         self.chars += text.chars().count();
         self.recent.push_back((text.to_string(), kind, t_us));
@@ -66,6 +79,8 @@ impl Hub {
             .map(|(t, k, at)| format!("text {} t={at} {}", kind_name(*k), escape(t)))
             .collect();
         out.extend(self.minds.iter().cloned());
+        out.extend(self.objective.iter().cloned());
+        out.extend(self.term.iter().cloned());
         if let Some(s) = &self.last_status {
             out.push(s.clone());
         }
@@ -103,6 +118,8 @@ pub fn serve(
         last_status: None,
         subs: Vec::new(),
         minds: VecDeque::new(),
+        objective: None,
+        term: VecDeque::new(),
     }));
     let stopped = Arc::new(AtomicBool::new(false));
 
@@ -138,6 +155,21 @@ pub fn serve(
                     }
                     Event::Reflect(e) => {
                         let line = format!("reflect {}", crate::reflect::line(&e));
+                        h.broadcast(&line);
+                    }
+                    Event::Objective(t, text) => {
+                        let line = format!("objective t={t} {}", escape(&text));
+                        h.objective = Some(line.clone());
+                        h.broadcast(&line);
+                    }
+                    Event::TermStart(id, t, cmd) => {
+                        let line = format!("term start t={t} id={id} {}", escape(&cmd));
+                        h.push_term(line.clone());
+                        h.broadcast(&line);
+                    }
+                    Event::TermEnd(t, r) => {
+                        let line = crate::client::term_end_line(t, &r);
+                        h.push_term(line.clone());
                         h.broadcast(&line);
                     }
                     Event::Done { .. } => {}
@@ -287,11 +319,15 @@ fn connection(
                 }
                 Ok("tailing".to_string())
             }
+            "objective" => ctx
+                .send(Command::Objective(arg.to_string()))
+                .map(|_| if arg.trim().is_empty() { "objective cleared".to_string() } else { format!("objective set: {}", arg.trim()) })
+                .map_err(|_| "the engine is gone".to_string()),
             "quit" => {
                 ctx.send(Command::Quit).ok();
                 Ok("stopping".to_string())
             }
-            _ => Err(format!("unknown command {cmd}; say, feed, persona, chunk, temp, pause, resume, status, recent, tail, quit")),
+            _ => Err(format!("unknown command {cmd}; say, feed, persona, objective, chunk, temp, pause, resume, status, recent, tail, quit")),
         };
         match reply {
             Ok(m) => writeln!(w, "ok {m}")?,

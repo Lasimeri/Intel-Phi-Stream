@@ -164,8 +164,13 @@ case "$sub" in
             kill "$(cat "$keeppid")" 2> /dev/null || true
         fi
         rm -f "$keeppid"
+        # The service writes its summary before it stops (src/engine.md): up
+        # to two minutes, then the session ends anyway.
         "$bin" quit 2>/dev/null || true
-        sleep 2
+        for _ in $(seq 1 120); do
+            tmux has-session -t "$session" 2>/dev/null || break
+            sleep 1
+        done
         tmux kill-session -t "$session" 2>/dev/null || true
         if alive "$winpid"; then
             kill "$(cat "$winpid")" 2> /dev/null || true
@@ -187,7 +192,7 @@ case "$sub" in
             fi
             rest+=("$a")
         done
-        exec "$0" start --dev "$root" --mind --reflect \
+        exec "$0" start --dev "$root" --mind --reflect --terminal \
             --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev}" "${rest[@]}"
         ;;
     attach)
