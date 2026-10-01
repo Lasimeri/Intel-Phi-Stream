@@ -29,7 +29,9 @@ plus any serve options given after it.
     why), reports what it finds in the code, and disagrees where it
     disagrees.
 - **`[read: PATH]`** resolves PATH relative to the repository, so it reads
-  its own source the way Claude does. `[read: PATH:START-END]` reads
+  its own source the way Claude does, and in the workspace when only the
+  workspace holds it, so `[read: reflect.log]` reads the record of its
+  own checks. `[read: PATH:START-END]` reads
   those lines only. Its memory is about 32 thousand tokens: a file that
   does not fit is refused with its size and a range that would fit
   (`src/engine.md`).
