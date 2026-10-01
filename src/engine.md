@@ -350,7 +350,13 @@ a second chain (`Chain`), which reflects on each line the journal ends.
   the marker or a « line back into the journal. Its tokens are the
   likeliest that the live stream may write (no control token, no « or »
   mark, no end of text), from the 16 likeliest; a reflection that only
-  repeats the frame, or says nothing, is dropped. The marker's first
+  repeats the frame, or says nothing, is dropped; so is one whose opening
+  (60 characters) repeats one of the last 8 inserted. Its tokens are
+  sampled (temperature 0.8 over those 16, its own random state; the live
+  sampler's penalty history is the live chain's): greedy, on the live
+  service, every fork of nearly the same context wrote the same reflection,
+  five times in 30 s, each one making the next likelier. `chain off`
+  also drops a reflection waiting for the journal. The marker's first
   token is decoded alone (the copy
   shares the live sequence's recurrent state until it writes its own, as
   a check's deliberation does), the rest and then each of its own tokens

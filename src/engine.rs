@@ -360,6 +360,10 @@ const CHAIN_EVERY_US: i64 = 1_000_000;
 /// journal's structure, echoing the marker or a « line, on the live
 /// service.
 const CHAIN_PRIMER: &str = "On reflection,";
+/// The second chain's sampling temperature, and how many of its last
+/// reflections a new one must not repeat.
+const CHAIN_TEMP: f32 = 0.8;
+const CHAIN_RECENT: usize = 8;
 
 struct Check {
     why: Why,
@@ -513,6 +517,10 @@ pub struct Engine {
     chain_fork_mono: i64,
     line_ended: bool,
     reflection: Option<String>,
+    /// The second chain's random state, and its last reflections (their
+    /// openings, lowercased), which a new one must not repeat.
+    chain_rng: u64,
+    recent_reflections: VecDeque<String>,
     read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
@@ -778,6 +786,8 @@ impl Engine {
             chain_fork_mono: i64::MIN / 2,
             line_ended: false,
             reflection: None,
+            chain_rng: (clock::now_us() as u64) | 1,
+            recent_reflections: VecDeque::new(),
             read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
@@ -1299,7 +1309,7 @@ impl Engine {
     /// The second chain's next token: the likeliest one that is not banned
     /// for the live stream (control tokens, the « and » marks) nor an end
     /// of text, so a reflection never writes a line from outside or speaks.
-    fn chain_token(&self, row: i32) -> Result<i32> {
+    fn chain_token(&mut self, row: i32) -> Result<i32> {
         // The 16 likeliest in one pass, then the first allowed: a check of
         // every token of the vocabulary against the bans cost too much at
         // every cycle.
@@ -1315,11 +1325,29 @@ impl Engine {
         let allowed = |t: i32| {
             !self.base_ban.contains(&t) && !self.speak_ban.contains(&t) && !self.llm.is_eog(t)
         };
-        Ok(top
+        let top: Vec<(i32, f32)> = top.into_iter().filter(|e| allowed(e.0)).collect();
+        let Some(&(first, m)) = top.first() else {
+            return Ok(self.newline);
+        };
+        // Sampled at temperature `CHAIN_TEMP` with its own random state (the
+        // live sampler's history is the live chain's): greedy, two forks of
+        // nearly the same context wrote the same reflection again and again.
+        let w: Vec<f64> = top
             .iter()
-            .map(|e| e.0)
-            .find(|&t| allowed(t))
-            .unwrap_or(self.newline))
+            .map(|e| (((e.1 - m) / CHAIN_TEMP) as f64).exp())
+            .collect();
+        let total: f64 = w.iter().sum();
+        self.chain_rng ^= self.chain_rng << 13;
+        self.chain_rng ^= self.chain_rng >> 7;
+        self.chain_rng ^= self.chain_rng << 17;
+        let mut u = (self.chain_rng >> 11) as f64 / (1u64 << 53) as f64 * total;
+        for (e, wi) in top.iter().zip(&w) {
+            if u < *wi {
+                return Ok(e.0);
+            }
+            u -= wi;
+        }
+        Ok(first)
     }
 
     /// The second chain's reflection ends: kept for the journal's next
@@ -1337,7 +1365,15 @@ impl Engine {
         let echo = said.is_empty()
             || said.contains("beside the journal")
             || said.contains("on its mind in the line");
-        let outcome = if keep && !echo {
+        let opening: String = said.to_lowercase().chars().take(60).collect();
+        let repeat = self.recent_reflections.iter().any(|r| *r == opening);
+        let outcome = if keep && !echo && repeat {
+            "dropped: it repeats a recent reflection"
+        } else if keep && !echo {
+            self.recent_reflections.push_back(opening);
+            while self.recent_reflections.len() > CHAIN_RECENT {
+                self.recent_reflections.pop_front();
+            }
             self.reflection = Some(text);
             "into the journal at its next line's end"
         } else if keep {
@@ -2835,6 +2871,7 @@ impl Engine {
                 if !self.chain_on {
                     self.end_chain(false);
                     self.line_words.clear();
+                    self.reflection = None;
                 }
                 self.note(format!(
                     "the second chain {}",
