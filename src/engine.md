@@ -264,6 +264,10 @@ Every check is an `Event::Reflect` (an episode: `reflect.md`), a line in
 `reflect.log`, and counts in the status (`checks`, `changes`,
 `unparsed`, `checking`).
 
+**Its code is left alone**: inside a ``` block of its own text (tracked
+across tokens, restored by a rewind) no check fires and no circling
+nudge comes, since code repeats by nature.
+
 **Logs rotate** (`rotlog.md`): `stream.log`, `chain.log`, `mind.log` and
 `reflect.log` each move to `NAME.1` past 64 MiB, the dev stream's own
 audit finding.

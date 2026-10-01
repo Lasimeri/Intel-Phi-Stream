@@ -293,6 +293,8 @@ struct Chase {
 /// question was chosen (a rewind puts it back).
 struct Saved {
     speaking: bool,
+    in_code: bool,
+    fence_tail: String,
     think_tokens: usize,
     think_capped: bool,
     gen_count: usize,
@@ -395,6 +397,11 @@ pub struct Engine {
     notes: Vec<String>,
     /// Its preferences, `[prefer: ...]` lines (`preferences.md`), kept like notes.
     prefs: Vec<String>,
+    /// Inside a ``` fence of its own text (code): no checks there and no
+    /// circling nudges, which would break code (the must-code rule); the
+    /// last two characters placed, to see a fence across tokens.
+    in_code: bool,
+    fence_tail: String,
     chunk: usize,
     /// The last live tokens sampled, for the circling check.
     generated: VecDeque<i32>,
@@ -586,6 +593,8 @@ impl Engine {
             rollovers: 0,
             notes,
             prefs,
+            in_code: false,
+            fence_tail: String::new(),
             chunk,
             generated: VecDeque::new(),
             gen_count: 0,
@@ -901,11 +910,20 @@ impl Engine {
         }
     }
 
+    /// The fence state after token `t`: each ``` in its text (joined to the
+    /// last two characters before it) opens or closes a code block.
+    fn track_fence(&mut self, t: i32) {
+        let (toggle, tail) = fence_step(&self.fence_tail, &self.llm.text(&[t]));
+        self.in_code ^= toggle;
+        self.fence_tail = tail;
+    }
+
     /// A live token placed: the state decisions read (the circling window,
     /// the thinking count, the chat frame's thoughts and speech) now; its
     /// text and side effects into the hold.
     fn emit_token(&mut self, t: i32) {
         self.generated.push_back(t);
+        self.track_fence(t);
         if self.generated.len() > 256 {
             self.generated.pop_front();
         }
@@ -1418,7 +1436,10 @@ impl Engine {
         let mono = clock::mono_us();
         let spent = rf.spent(mono);
         let recovered = rf.recovered(mono);
-        let free = self.check.is_none()
+        // Never inside its code (a check replaced a piece of a token with a
+        // word and broke a #define in the dev session).
+        let free = !self.in_code
+            && self.check.is_none()
             && self.reading.is_none()
             && self.chase.is_none()
             && self.summary.is_none()
@@ -1496,6 +1517,8 @@ impl Engine {
     fn save(&self) -> Saved {
         Saved {
             speaking: self.speaking,
+            in_code: self.in_code,
+            fence_tail: self.fence_tail.clone(),
             think_tokens: self.think_tokens,
             think_capped: self.think_capped,
             gen_count: self.gen_count,
@@ -1507,6 +1530,8 @@ impl Engine {
 
     fn restore(&mut self, s: Saved) {
         self.speaking = s.speaking;
+        self.in_code = s.in_code;
+        self.fence_tail = s.fence_tail;
         self.think_tokens = s.think_tokens;
         self.think_capped = s.think_capped;
         self.gen_count = s.gen_count;
@@ -2083,7 +2108,11 @@ impl Engine {
         }
 
         // Thoughts going round: a nudge, at most once per `nudge_every_us`.
-        if idle && mono - self.last_nudge_mono >= self.cfg.nudge_every_us && self.circling() {
+        if idle
+            && !self.in_code
+            && mono - self.last_nudge_mono >= self.cfg.nudge_every_us
+            && self.circling()
+        {
             self.last_nudge_mono = mono;
             let msg = self.framed_system("your thoughts have been circling the same words; move on to something else, concretely");
             self.put(msg)?;
@@ -2350,6 +2379,22 @@ fn nearest_listing(p: &Path) -> Option<(PathBuf, String)> {
     }
     Some((dir.to_path_buf(), s))
 }
+
+/// One token's piece against the fence state: whether it opens or closes
+/// a ``` block (an odd number of fences in the last two characters before
+/// it and itself), and the new last two characters, emptied after a fence
+/// so it is not counted again with the next piece.
+fn fence_step(tail: &str, piece: &str) -> (bool, String) {
+    let text = format!("{tail}{piece}");
+    let n = text.matches("```").count();
+    let tail = if text.ends_with("```") {
+        String::new()
+    } else {
+        let k = text.chars().count();
+        text.chars().skip(k.saturating_sub(2)).collect()
+    };
+    (n % 2 == 1, tail)
+}
 /// `PATH:START-END` as the path and the lines (1-based, inclusive); a
 /// path with no such suffix whole.
 fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
@@ -2411,6 +2456,26 @@ mod tests {
         std::os::unix::fs::symlink("/etc", repo.join("etc")).unwrap();
         assert!(!inside(&repo.join("etc/passwd"), &roots));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn code_fences_are_seen_across_tokens() {
+        // One piece, the fence whole.
+        let (t, tail) = fence_step("", "```rust\n");
+        assert!(t);
+        assert_eq!(tail, "t\n");
+        // Split across pieces: `` then `.
+        let (t1, tail) = fence_step("", "x ``");
+        assert!(!t1);
+        let (t2, _) = fence_step(&tail, "`\n");
+        assert!(t2);
+        // A fence ending a piece is not counted again with the next one.
+        let (t3, tail) = fence_step("", "```");
+        assert!(t3);
+        let (t4, _) = fence_step(&tail, "`x");
+        assert!(!t4);
+        // Two fences in one piece: open and close.
+        assert!(!fence_step("", "```a```").0);
     }
 
     #[test]

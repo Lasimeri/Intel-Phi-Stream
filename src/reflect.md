@@ -40,6 +40,9 @@ never fires.
   within 10 s of a change (monotonic clock).
 - **Budget**: at most 12 checks and 4 changes in any minute; when spent,
   the loop is read-only (readings go on) and a note says so once.
+- None inside a ``` code block of its own text (the must-code rule: in
+  the dev session a check turned `#define NUM_BUCKETS` into `#define
+  #define NUM_BUCKETS`, a piece of a token replaced with a word).
 - One check at a time, and none while a reading, a chase, a summary or a
   rollover is in flight, or while a changed answer's tokens are still
   being placed.
