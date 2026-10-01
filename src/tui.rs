@@ -1622,7 +1622,10 @@ mod tests {
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.top >= 1 && a.top + a.h <= l.mind, "{w}x{h} {a:?}");
                 assert!(a.left + a.w <= w, "{w}x{h} {a:?}");
-                assert!(a.h >= 5 && a.w >= 13, "{w}x{h} {a:?}: a row inside at least");
+                assert!(
+                    a.h >= 5 && a.w >= 13,
+                    "{w}x{h} {a:?}: a row inside at least"
+                );
                 for b in &rects[i + 1..] {
                     assert!(!a.overlaps(*b), "{w}x{h} {a:?} {b:?}");
                 }
