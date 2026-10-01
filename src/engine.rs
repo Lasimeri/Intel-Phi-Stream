@@ -1723,7 +1723,15 @@ impl Engine {
             });
         let text = match outcome {
             Ok(t) => t,
-            Err(e) => return self.read_failed(&p, &e),
+            Err(e) => {
+                // A wrong path: what is there instead, so it learns the tree
+                // rather than guessing again.
+                let e = match nearest_listing(&p) {
+                    Some((dir, names)) => format!("{e}; {} holds: {names}", dir.display()),
+                    None => e,
+                };
+                return self.read_failed(&p, &e);
+            }
         };
         let what = match range {
             Some((a, b)) => format!("lines {a} to {b} of {} are brought in", p.display()),
@@ -2083,6 +2091,35 @@ fn read_notes(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// For a path that does not exist: its nearest existing directory and up
+/// to 40 of the names in it, sorted, directories with a trailing `/`.
+fn nearest_listing(p: &Path) -> Option<(PathBuf, String)> {
+    if p.exists() {
+        return None;
+    }
+    let dir = p.ancestors().skip(1).find(|a| a.is_dir())?;
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() {
+                format!("{n}/")
+            } else {
+                n
+            }
+        })
+        .collect();
+    names.sort();
+    let more = names.len().saturating_sub(40);
+    names.truncate(40);
+    let mut s = names.join(", ");
+    if more > 0 {
+        s.push_str(&format!(" and {more} more"));
+    }
+    Some((dir.to_path_buf(), s))
+}
 /// `PATH:START-END` as the path and the lines (1-based, inclusive); a
 /// path with no such suffix whole.
 fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
@@ -2112,6 +2149,19 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wrong_path_names_what_is_there() {
+        let dir = std::env::temp_dir().join(format!("phi-stream-listing-{}", std::process::id()));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/reflect.rs"), "").unwrap();
+        fs::write(dir.join("src/engine.rs"), "").unwrap();
+        let (at, names) = nearest_listing(&dir.join("src/reflect/mod.rs")).unwrap();
+        assert_eq!(at, dir.join("src"));
+        assert_eq!(names, "engine.rs, reflect.rs");
+        assert!(nearest_listing(&dir.join("src/engine.rs")).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn reads_take_a_line_range() {
