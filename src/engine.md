@@ -77,10 +77,12 @@ lines the mind writes for itself: `[note: ...]` is kept in the workspace's
 `notes.md` and shown to it again in every new base (a rollover, a new
 persona), and `[read: PATH]` brings the file (a regular file under 1 MiB,
 relative to the workspace or absolute) in as a reading, or tells it why
-not: at most one failure line per `--nudge-every` interval goes into the
-chain (a failure prompts another guess, and guesses would feed on their
-own failures; seen live with invented paths), the rest are notes outside
-it, counted in the status as `reads_quiet`. The workspace (`--workspace`) holds `persona.md` (written at start,
+not: each failing path goes into the chain once, with what its nearest
+directory holds, and the same path asked again within five minutes is
+dropped quietly (a note outside the chain, counted in the status as
+`reads_quiet`). A first version let one failure line a minute in,
+whatever the path; it hid most failures and their listings, and the dev
+stream asked for the same missing file every few seconds. The workspace (`--workspace`) holds `persona.md` (written at start,
 reloaded by `persona`, edited in place between runs), `notes.md` and
 `stream.log` (everything shown, appended).
 

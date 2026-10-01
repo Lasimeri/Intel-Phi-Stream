@@ -428,6 +428,8 @@ pub struct Engine {
     /// When a failed read was last put into the chain, and how many have
     /// been kept out of it since the start.
     last_read_failure_mono: i64,
+    /// Paths whose read failed, and when (monotonic): each told once a while.
+    failed_reads: HashMap<String, i64>,
     read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
@@ -614,6 +616,7 @@ impl Engine {
             last_anchor_mono: clock::mono_us(),
             last_nudge_mono: i64::MIN / 2,
             last_read_failure_mono: i64::MIN / 2,
+            failed_reads: HashMap::new(),
             read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
@@ -1994,24 +1997,27 @@ impl Engine {
         Ok(())
     }
 
-    /// A read that could not happen: at most one failure line in the chain
-    /// per nudge interval (a failure line prompts another guess, and guesses
-    /// would feed on their own failures); the rest are notes outside it.
+    /// A read that could not happen. Each failing path is told to it once
+    /// (with what is there instead), so it learns; the same path asked again
+    /// within five minutes is dropped quietly, so a guess repeated is not a
+    /// line in the chain each time. (A limit of one failure line a minute,
+    /// whatever the path, hid most failures and their listings: in the dev
+    /// session it asked for the same missing log.txt every few seconds.)
     fn read_failed(&mut self, p: &Path, e: &str) -> Result<()> {
         let mono = clock::mono_us();
-        if mono - self.last_read_failure_mono >= self.cfg.nudge_every_us {
-            self.last_read_failure_mono = mono;
-            let msg = self.framed_system(&format!("{} could not be read: {e}", p.display()));
-            self.put(msg)?;
-        } else {
+        let key = p.display().to_string();
+        self.failed_reads.retain(|_, t| mono - *t < 300_000_000);
+        if self.failed_reads.contains_key(&key) {
             self.read_failures_quiet += 1;
             self.note(format!(
-                "{} could not be read: {e} (not put into the chain: one failure per {} s)",
-                p.display(),
-                self.cfg.nudge_every_us / 1_000_000
+                "{key} asked again: still could not be read: {e} (not put in again)"
             ));
+            return Ok(());
         }
-        Ok(())
+        self.failed_reads.insert(key.clone(), mono);
+        self.last_read_failure_mono = mono;
+        let msg = self.framed_system(&format!("{key} could not be read: {e}"));
+        self.put(msg)
     }
 
     /// After a cycle: the summary's end, the turn's end, the mind's own
