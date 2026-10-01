@@ -22,6 +22,7 @@ use crossterm::{cursor, execute, queue, terminal};
 use crate::client::{escape, parse, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
 use crate::mind::Reading;
+use crate::reflect::{Episode, Outcome};
 use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
@@ -99,9 +100,12 @@ struct View {
     minds: VecDeque<Reading>,
     /// The main area shows the readings token by token instead of the stream.
     mind_view: bool,
+    /// The last checks of its tokens (`reflect.rs`), newest last.
+    episodes: VecDeque<Episode>,
 }
 
 const KEEP_MINDS: usize = 400;
+const KEEP_EPISODES: usize = 64;
 
 /// A token as shown in the mind's rows: newlines and tabs visible.
 fn shown(token: &str) -> String {
@@ -123,6 +127,22 @@ fn mind_row(r: &Reading) -> String {
         crate::clock::hms(r.t_us),
         shown(&r.token),
         blocks.join("  ·  ")
+    )
+}
+
+/// A check in a few words: why, the token, what became of it.
+fn episode_short(e: &Episode) -> String {
+    let what = match e.outcome {
+        Outcome::Changed => format!("wrote {:?}", e.to.trim()),
+        Outcome::Dry => format!("would write {:?}", e.to.trim()),
+        o => o.name().to_string(),
+    };
+    format!(
+        "check {} {:?} (p {:.2}): {what}, {:.0} ms",
+        e.why.name(),
+        e.chosen.trim(),
+        e.p_chosen,
+        e.ms
     )
 }
 
@@ -233,7 +253,16 @@ fn mode_line(s: &Status, tick: u64) -> (String, String) {
         } else {
             String::new()
         }
-    );
+    ) + &if s.checks > 0 || s.checking {
+        format!(
+            " · checks {} changed {}{}",
+            s.checks,
+            s.changes,
+            if s.checking { " (one now)" } else { "" }
+        )
+    } else {
+        String::new()
+    };
     (m, rates)
 }
 
@@ -288,7 +317,17 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         let end = v.minds.len().saturating_sub(v.scroll);
         let start = end.saturating_sub(body_h);
         for r in 0..body_h {
-            let text = v.minds.get(start + r).map(mind_row).unwrap_or_default();
+            let text = v
+                .minds
+                .get(start + r)
+                .map(|m| {
+                    // The reading a check was asked from is the one before its token.
+                    match v.episodes.iter().rev().find(|e| e.pos == m.pos + 1) {
+                        Some(e) => format!("{}   [{}]", mind_row(m), episode_short(e)),
+                        None => mind_row(m),
+                    }
+                })
+                .unwrap_or_default();
             queue!(
                 out,
                 cursor::MoveTo(0, (1 + r) as u16),
@@ -352,7 +391,12 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
     }
     // The mind strip: what was on its mind at the last token it placed.
     if let Some(r) = v.minds.back() {
-        let strip = format!(" mind  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms);
+        let mut strip = format!(" mind  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms);
+        if let Some(e) = v.episodes.back() {
+            if v.last_t_us - e.t_us < 8_000_000 {
+                strip = format!(" {}   ·{strip}", episode_short(e));
+            }
+        }
         queue!(
             out,
             cursor::MoveTo(0, (h - 4) as u16),
@@ -490,6 +534,7 @@ pub fn run(socket: &Path) -> Result<()> {
             last_t_us: 0,
             minds: VecDeque::new(),
             mind_view: false,
+            episodes: VecDeque::new(),
         };
         let mut tick = 0u64;
         let mut dirty = true;
@@ -528,6 +573,13 @@ pub fn run(socket: &Path) -> Result<()> {
                         v.minds.push_back(r);
                         while v.minds.len() > KEEP_MINDS {
                             v.minds.pop_front();
+                        }
+                        dirty = true;
+                    }
+                    Ok(Msg::Reflect(e)) => {
+                        v.episodes.push_back(e);
+                        while v.episodes.len() > KEEP_EPISODES {
+                            v.episodes.pop_front();
                         }
                         dirty = true;
                     }

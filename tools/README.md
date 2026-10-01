@@ -5,3 +5,4 @@ Helpers with their own builds, kept out of the stream's binary.
 | path | what |
 | --- | --- |
 | `parquet-jsonl` | one parquet file to JSON lines (MultiPL-E's coding evaluation is distributed only as parquet); `scripts/fetch-code-eval.sh` builds and runs it |
+| `stamp.c` | how evenly text arrives on a pipe: gaps between reads (median, percentiles, largest); measures the playout on `phi-stream run`. `tcc -run tools/stamp.c` |

@@ -10,8 +10,8 @@ running mind and the 40-second load happens once.
   connection on a thread of its own: the `info` line first, then a reply
   (`ok` or `err`) to each command line.
 - `tail` subscribes the connection: it gets the last 12k characters of
-  text as `text` lines and the last status, then every `text`, `status`
-  and `note` as it happens, written by a thread per subscriber, until the
+  text as `text` lines and the last status, then every `text`, `status`,
+  `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
 - `say TEXT` and `feed PATH` queue what is said or handed over (the file
   is read here, in the service's own file system); `persona PATH` reads

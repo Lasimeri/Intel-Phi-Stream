@@ -53,8 +53,14 @@ a throwaway workspace per task), greedy, the repetition penalty an
 explicit setting (`--penalty`, 1 off), a thinking budget after which
 `</think>` is placed (`--think-budget`, 2048), the persona's base the
 user's `~/CLAUDE.md` (`--base claude-md`, as the stream runs), a neutral
-paragraph (`--base neutral`) or a file; `--mind` reads the mind at
-every token while answering. The user turn asks for the complete
+paragraph (`--base neutral`) or a file; `--mind` reads the mind at every token
+while answering, `--reflect` checks the tokens (`reflect.md`) and
+`--reflect-dry` deliberates without changing any (the same options as
+the service: `--lens`, `--mind-layers`, `--mind-k`). The arm (plain,
+mind, reflect, reflect-dry) is in `run.json`; each task's episodes are
+in its `results.jsonl` record and counted on its line. Episodes on these
+tasks are evaluation output under the dataset's licence: never training
+data. The user turn asks for the complete
 function in one rust code block, no `main`, no tests.
 
 The extraction rule, fixed before the first run: the answer is what

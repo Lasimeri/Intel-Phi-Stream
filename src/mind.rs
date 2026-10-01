@@ -26,6 +26,9 @@ pub struct MindConfig {
     pub layers: Vec<i32>,
     /// Words shown per block.
     pub k: usize,
+    /// Also read the final block as it is (the model's own next-token
+    /// distribution, its top 64), for the reflection loop's doubt.
+    pub final_block: Option<i32>,
 }
 
 /// One token's reading.
@@ -38,6 +41,9 @@ pub struct Reading {
     /// Per block, the word-like tokens on its mind, best first, with
     /// log-probabilities under the lens's distribution.
     pub layers: Vec<(i32, Vec<(String, f32)>)>,
+    /// The model's own next-token distribution at this token, its top 64
+    /// (token, log-probability), when the final block is read.
+    pub model_top: Vec<(i32, f32)>,
     /// The readout's own time, milliseconds.
     pub ms: f32,
     /// When the token existed (its decode done), microseconds of real time.
@@ -118,7 +124,9 @@ impl Mind {
     }
 
     /// The reading of the token just decoded at `pos`, from the capture's
-    /// output row; none when the decode asked for no token.
+    /// first output row (the live lane comes first in every batch, so its
+    /// row is the first: `gate --reflect` checks it); none when the decode
+    /// asked for no token.
     pub fn read(&mut self, llm: &mut Llm, pos: i32, token: &str) -> Result<Option<Reading>> {
         let t_us = crate::clock::now_us();
         let t0 = Instant::now();
@@ -127,7 +135,7 @@ impl Mind {
             bail!("the capture failed: {e}");
         }
         let (outputs, _) = cap.take();
-        let Some(o) = outputs.last() else {
+        let Some(o) = outputs.first() else {
             return Ok(None);
         };
         let groups: Vec<Group> = o
@@ -140,7 +148,28 @@ impl Mind {
                 columns: h.as_slice(),
             })
             .collect();
-        let tops = self.readout.top(&groups, FETCH)?;
+        let mut groups = groups;
+        let final_col = match self.cfg.final_block {
+            Some(f) => match o.layers.iter().find(|(l, _)| *l == f) {
+                Some((_, h)) => {
+                    groups.push(Group {
+                        transport: None,
+                        normed: false,
+                        columns: h.as_slice(),
+                    });
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        let mut tops = self.readout.top(&groups, FETCH)?;
+        let model_top = if final_col {
+            groups.pop();
+            tops.pop().map(|r| r.top).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut layers = Vec::new();
         for (g, r) in groups.iter().zip(&tops) {
             let words: Vec<(String, f32)> = r
@@ -156,6 +185,7 @@ impl Mind {
             pos,
             token: token.to_string(),
             layers,
+            model_top,
             ms: t0.elapsed().as_secs_f32() * 1000.0,
             t_us,
         };
@@ -219,6 +249,7 @@ pub fn parse_line(s: &str) -> Option<Reading> {
         pos: pos?,
         token,
         layers,
+        model_top: Vec::new(),
         ms,
         t_us,
     })
@@ -255,6 +286,7 @@ mod tests {
                 (20, vec![("grief".into(), -1.25), ("loss".into(), -2.5)]),
                 (26, vec![]),
             ],
+            model_top: Vec::new(),
             ms: 0.75,
             t_us: 1_790_000_000_123_456,
         };

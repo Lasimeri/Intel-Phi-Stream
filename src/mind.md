@@ -12,8 +12,10 @@ done once).
   then seen the model's unembedding and output norm): it loads the
   lens's transports for the chosen blocks onto the GPU and computes the
   vocabulary's display mask.
-- `Mind::read` takes the capture's output row of the decode that just
-  happened (the token placed at `pos`), transports, norms, unembeds and
+- `Mind::read` takes the capture's first output row of the decode that
+  just happened (the token placed at `pos`; the live lane comes first in
+  every batch, so with a deliberation beside it its row is still the
+  first, which `gate --reflect` checks), transports, norms, unembeds and
   takes the top 64 per block on the GPU, then keeps the first `k`
   word-like ones for display. Ranks are over the whole vocabulary; only
   the display is filtered, by the reference's rule (`is_wordlike`,
@@ -23,6 +25,11 @@ done once).
 - Each reading goes to `mind.log` in the workspace and out as
   `Event::Mind`: one line, `pos=P ms=M tok=TEXT l20=w:logp,... l26=...`
   (`line`, `parse_line`; the token escaped, spaces as `\s`).
+- With `final_block` set (the engine sets it to the last block when it
+  reflects, `reflect.md`), the final block's residual is read too, as it
+  is (no transport): the model's own next-token distribution, its top 64
+  in `model_top`, for the doubt trigger. The capture asks for the blocks
+  the mind reads when the engine starts.
 
 **In the engine** (`engine.md`): `mind_step` runs right after every
 decode that asked for a token (the opening, every live token, the last

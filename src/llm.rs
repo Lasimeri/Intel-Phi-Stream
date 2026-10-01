@@ -162,6 +162,9 @@ impl Llm {
                 + 512 * (1 << 20)
                 + opts.batch as u64 * 2 * (1 << 20)
                 + 768 * (1 << 20)
+                // Every sequence slot's recurrent state (62.8 MiB each
+                // for this model), which the K and V term does not count.
+                + sizes.recurrent_per_seq * opts.n_seq as u64
                 + opts.extra_reserve;
             let budget = (free as u64).saturating_sub(reserve);
             let plan = split::plan(&sizes, budget, opts.gpu_blocks, &opts.keep_on_gpu);
@@ -481,6 +484,34 @@ impl Llm {
     pub fn seq_rm(&mut self, seq: i32, p0: i32, p1: i32) -> bool {
         // SAFETY: plain calls on this context's memory.
         unsafe { sys::llama_memory_seq_rm(self.mem(), seq, p0, p1) }
+    }
+
+    /// The highest position `seq` holds; -1 when it holds none.
+    pub fn seq_pos_max(&self, seq: i32) -> i32 {
+        // SAFETY: a plain query of this context's memory.
+        unsafe { sys::llama_memory_seq_pos_max(self.mem(), seq) }
+    }
+
+    /// Put `token` into the sampler chain's history as if the chain had
+    /// chosen it (a forced token: the penalties count it).
+    pub fn accept(&mut self, token: i32) {
+        // SAFETY: the chain lives as long as `self`.
+        unsafe { sys::llama_sampler_accept(self.sampler, token) }
+    }
+
+    /// A fresh chain with seed `seed` whose history is `recent` (after a
+    /// rewind the tokens taken back no longer count toward the penalties).
+    pub fn reset_sampler(&mut self, s: &Sampling, seed: u32, recent: &[i32]) {
+        let s = Sampling { seed, ..s.clone() };
+        self.set_sampling(&s);
+        let n = if s.repeat_last_n < 0 {
+            recent.len()
+        } else {
+            recent.len().min(s.repeat_last_n as usize)
+        };
+        for &t in &recent[recent.len() - n..] {
+            self.accept(t);
+        }
     }
 
     pub fn clear(&mut self) {

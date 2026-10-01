@@ -6,8 +6,8 @@ One model split three ways and one context over llama.cpp's C API.
   (`ggml_backend_load_all_from_path`: CUDA and the CPU variants of the
   build, then `GGML_BACKEND_PATH`, the cards' `libggml_phi.so`), asks the
   CUDA device its free memory, plans the split (`split.rs`: the budget is
-  the free memory less the cells' K and V, the cycle's compute buffers and
-  a margin), loads the model with the device list `{CUDA0}` and the one
+  the free memory less the cells' K and V, every sequence slot's
+  recurrent state, the cycle's compute buffers and a margin), loads the model with the device list `{CUDA0}` and the one
   tensor override, repacking off (a repacked weight is never offered to
   the cards), and makes the context: a unified KV cache (`kv_unified`, so
   a range of one sequence's cells is given to another by metadata alone),

@@ -9,7 +9,11 @@ memory, never from a table.
   norms), and from the header the attention K and V bytes per token at
   float16 (`head_count_kv` x (`key_length` + `value_length`) x 2 x the
   attention layers: every `full_attention_interval`-th block of a hybrid
-  model, all of a plain one). For Qwen3.8-35B-A3B at Q6_K: 41 blocks of
+  model, all of a plain one), and the recurrent state one sequence slot
+  holds (for each recurrent block of the main pass, llama.cpp's f32
+  convolution state, `(d_conv - 1) x (d_inner + 2 n_group d_state)`, and
+  state matrix, `d_state^2 x dt_rank`: 62.8 MiB for this model's 30
+  recurrent blocks). For Qwen3.8-35B-A3B at Q6_K: 41 blocks of
   661 MiB, 630 MiB of experts each, 0.78 GiB outside, 20 KiB of K and V
   per token (10 of 40 blocks attend; the 41st is the extra prediction
   block).

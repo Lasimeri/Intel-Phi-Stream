@@ -87,6 +87,8 @@ pub enum Msg {
     Note(String),
     /// What was on its mind at one token (`mind.rs`).
     Mind(crate::mind::Reading),
+    /// A check of a token, start to end (`reflect.rs`).
+    Reflect(crate::reflect::Episode),
     Ok(String),
     Err(String),
     Bye,
@@ -184,11 +186,19 @@ pub fn parse(line: &str) -> Msg {
                 mind_ms: field(&f, "mind_ms").parse().unwrap_or(0.0),
                 t_us: field(&f, "t").parse().unwrap_or(0),
                 reads_quiet: field(&f, "reads_quiet").parse().unwrap_or(0),
+                checks: field(&f, "checks").parse().unwrap_or(0),
+                changes: field(&f, "changes").parse().unwrap_or(0),
+                unparsed: field(&f, "unparsed").parse().unwrap_or(0),
+                checking: field(&f, "checking") == "1",
             })
         }
         "note" => Msg::Note(unescape(rest)),
         "mind" => match crate::mind::parse_line(rest) {
             Some(r) => Msg::Mind(r),
+            None => Msg::Other(line.to_string()),
+        },
+        "reflect" => match crate::reflect::parse_line(rest) {
+            Some(e) => Msg::Reflect(e),
             None => Msg::Other(line.to_string()),
         },
         "ok" => Msg::Ok(rest.to_string()),
@@ -209,8 +219,8 @@ pub fn status_line(s: &Status) -> String {
         Mode::Paused => "paused".to_string(),
     };
     format!(
-        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2} t={} reads_quiet={}",
-        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks, s.mind_ms, s.t_us, s.reads_quiet
+        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2} t={} reads_quiet={} checks={} changes={} unparsed={} checking={}",
+        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks, s.mind_ms, s.t_us, s.reads_quiet, s.checks, s.changes, s.unparsed, u8::from(s.checking)
     )
 }
 
@@ -315,6 +325,10 @@ mod tests {
             mind_ms: 0.0,
             t_us: 0,
             reads_quiet: 0,
+            checks: 12,
+            changes: 3,
+            unparsed: 1,
+            checking: true,
         };
         match parse(&status_line(&st)) {
             Msg::Status(s) => {
@@ -322,6 +336,10 @@ mod tests {
                 assert_eq!(s.pos, 1234);
                 assert_eq!(s.notes, 4);
                 assert_eq!(s.frame, "journal");
+                assert_eq!(
+                    (s.checks, s.changes, s.unparsed, s.checking),
+                    (12, 3, 1, true)
+                );
             }
             other => panic!("{other:?}"),
         }

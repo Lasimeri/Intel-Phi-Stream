@@ -17,12 +17,13 @@ host_gib=X n_ctx=N frame=journal|chat workspace=PATH` once on connect;
 `ok MESSAGE` or `err MESSAGE` for each command; to a subscriber `text
 think|speak|given t=MICROSECONDS TEXT` (the real time the piece exists
 at, `clock.md`), `status mode=... stream=... beside=... cycle=...
-pos=... ctx=... queued=... chunk=... rollovers=... notes=... frame=... leaks=... mind_ms=... t=MICROSECONDS`
+pos=... ctx=... queued=... chunk=... rollovers=... notes=... frame=... leaks=... mind_ms=... t=MICROSECONDS reads_quiet=N checks=N changes=N unparsed=N checking=0|1`
 (mode is `thinking`, `speaking`, `reading:DONE/TOTAL`,
 `catching:DONE/TOTAL`, `summarizing:N` or `paused`), `note TEXT`, and
 `bye` when the service stops; `mind pos=... ms=... tok=... lN=w:logp,...`
 when the service reads its mind (`mind.md`); the last 256 are shown to
-a new `tail`. `leaks` in the status counts the lines
+a new `tail`. `reflect t=... pos=... why=... outcome=...` for every
+check of a token when it reflects (`reflect.md`: the episode line). `leaks` in the status counts the lines
 beginning with `«` that the mind wrote itself (the journal frame's one
 known leak: a line in someone else's voice).
 

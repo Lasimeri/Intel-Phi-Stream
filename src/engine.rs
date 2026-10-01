@@ -25,6 +25,8 @@ use anyhow::{bail, Context as _, Result};
 use crate::clock;
 use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
+use crate::playout::Playout;
+use crate::reflect::{self, Decision, Episode, Outcome, ReflectConfig, Reflector, Why};
 
 /// What a piece of the stream is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,12 @@ pub struct Status {
     pub t_us: i64,
     /// Failed reads kept out of the chain (one failure per nudge interval goes in).
     pub reads_quiet: u32,
+    /// The reflection loop's checks, changed tokens and unparsed answers
+    /// since the start, and whether a check is in flight.
+    pub checks: u64,
+    pub changes: u64,
+    pub unparsed: u64,
+    pub checking: bool,
 }
 
 pub enum Event {
@@ -82,6 +90,8 @@ pub enum Event {
     Note(String),
     /// What was on its mind at a token it placed (`mind.rs`).
     Mind(MindReading),
+    /// A check of a token ended (`reflect.rs`).
+    Reflect(Episode),
     /// A task ended: its thinking tokens, and whether the budget closed them.
     Done {
         think_tokens: usize,
@@ -153,6 +163,10 @@ pub struct Config {
     pub time_every_us: i64,
     /// Nudge circling thoughts at most this often (microseconds).
     pub nudge_every_us: i64,
+    /// How far the shown text runs behind its placement: the playout's
+    /// target lag (`playout.md`, microseconds; 0: shown at once). Whatever it
+    /// is, nothing a check holds is shown before the check ends.
+    pub horizon_us: i64,
     /// A task, not a stream (`code.md`): stop at the end of the first
     /// answer, and put nothing into the chain on the engine's own account
     /// (no clock lines, nudges, reads, rollover).
@@ -164,6 +178,9 @@ pub struct Config {
     /// Read what is on its mind at every token it places (`mind.rs`);
     /// none: not read (and no eval callback installed).
     pub mind: Option<MindConfig>,
+    /// Check the tokens it places, per token, beside the live one
+    /// (`reflect.rs`; needs `mind`); none: no checks.
+    pub reflect: Option<ReflectConfig>,
 }
 
 /// The base of the personality when no file gives one.
@@ -204,6 +221,22 @@ pub fn compose(base: &str, frame: Frame) -> String {
     }
 }
 
+/// A piece of the stream placed and not yet out (a check holds it).
+struct Held {
+    piece: Piece,
+    /// When it came to exist: microseconds of real time (what it carries out).
+    t_us: i64,
+}
+
+enum Piece {
+    Text(String, Kind),
+    /// A placed token; in the chat frame whether it was placed while speaking.
+    Token {
+        t: i32,
+        chat_speaking: bool,
+    },
+}
+
 struct Reading {
     seq: i32,
     tokens: Vec<i32>,
@@ -227,6 +260,53 @@ struct Chase {
     label: String,
 }
 
+/// What placing tokens changed in the engine, as it was when the token in
+/// question was chosen (a rewind puts it back).
+struct Saved {
+    speaking: bool,
+    think_tokens: usize,
+    think_capped: bool,
+    gen_count: usize,
+    generated: VecDeque<i32>,
+    eog_streak: u32,
+    done: bool,
+}
+
+/// A check in flight (reflect.md): the token in question, the two copies
+/// made before it, and the deliberation's lane.
+struct Check {
+    why: Why,
+    /// The position of the token in question, its text, the model's
+    /// probability of it, the smoothed flag score, the words shown.
+    at: usize,
+    chosen_text: String,
+    p: f32,
+    flag: f32,
+    words: Vec<String>,
+    /// The snapshot (the live state before the token) and the deliberation.
+    snap: i32,
+    seq: i32,
+    /// The question, its tokens D has decoded, D's tokens after `at` so
+    /// far, the answer sampled (its last one not yet decoded).
+    question: Vec<i32>,
+    fed: usize,
+    d_len: usize,
+    answer: Vec<i32>,
+    /// The choice read at `Decision:` (keep's share of keep and write, and
+    /// the two's share of everything), whether it chose to write, and what
+    /// D is fed next (the write's prefix).
+    keep: f32,
+    fmt: f32,
+    writing: bool,
+    lane_next: Vec<i32>,
+    /// The held index of the first piece at or after the token: nothing
+    /// from it on goes out until the check ends.
+    hold_from: u64,
+    saved: Saved,
+    t_us: i64,
+    t0_mono: i64,
+}
+
 struct Ema {
     v: f64,
     n: u32,
@@ -246,7 +326,8 @@ impl Ema {
 pub struct Engine {
     llm: Llm,
     cfg: Config,
-    tx: Sender<Event>,
+    /// Events out, text paced by the display's own clock (`playout.md`).
+    tx: Playout,
     rx: Receiver<Command>,
     live: i32,
     /// The live sequence's tokens, index = position.
@@ -307,6 +388,22 @@ pub struct Engine {
     pub think_tokens: usize,
     pub think_capped: bool,
     done: bool,
+    /// Pieces placed, not yet out (`release`).
+    held: VecDeque<Held>,
+    /// Pieces released since the start: with `held.len()`, a held piece's index.
+    released: u64,
+    /// The reflection loop: its controls, the check in flight, the tokens
+    /// a changed answer still has to place, its log, the reading at the
+    /// last live token, whether the spent budget has been noted.
+    reflector: Option<Reflector>,
+    check: Option<Check>,
+    forced: VecDeque<i32>,
+    reflect_log: Option<File>,
+    last_reading: Option<MindReading>,
+    spent_noted: bool,
+    /// The choice's tokens: the one-token forms of keep and of write, and
+    /// ` write:`.
+    choice: Option<(Vec<i32>, Vec<i32>, Vec<i32>)>,
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
@@ -319,6 +416,22 @@ impl Engine {
         let newline = llm.tokenize("\n", false)?.first().copied().unwrap_or(-1);
         let chunk = cfg.chunk;
         let mut llm = llm;
+        let mut cfg = cfg;
+        if cfg.reflect.is_some() {
+            let Some(m) = cfg.mind.as_mut() else {
+                bail!("the reflection loop reads the mind: --reflect needs --mind");
+            };
+            // The model's own distribution: the final block, read as it is.
+            m.final_block = Some(llm.n_layer() - 1);
+        }
+        // The capture asks for the blocks the mind reads.
+        if let (Some(m), Some(cap)) = (&cfg.mind, llm.capture()) {
+            for l in m.layers.iter().chain(m.final_block.iter()) {
+                if !cap.cfg.layers.contains(l) {
+                    cap.cfg.layers.push(*l);
+                }
+            }
+        }
         // The run's sampling, set explicitly (a task's greedy decoding and
         // penalty are its own, whatever the model was loaded with).
         llm.set_sampling(&cfg.sampling);
@@ -345,6 +458,37 @@ impl Engine {
             .open(cfg.workspace.join("stream.log"))
             .ok();
         let cfg_chain_path = cfg.workspace.join("chain.log");
+        let tx = Playout::start(cfg.horizon_us, tx);
+        let reflector = cfg.reflect.clone().map(Reflector::new);
+        let choice = match &cfg.reflect {
+            Some(_) => {
+                let forms = |words: &[&str]| -> Result<Vec<i32>> {
+                    let mut v = Vec::new();
+                    for w in words {
+                        if let [t] = llm.tokenize(w, false)?.as_slice() {
+                            if !v.contains(t) {
+                                v.push(*t);
+                            }
+                        }
+                    }
+                    Ok(v)
+                };
+                let k = forms(reflect::KEEP_FORMS)?;
+                let w = forms(reflect::WRITE_FORMS)?;
+                if k.is_empty() || w.is_empty() || k.iter().any(|t| w.contains(t)) {
+                    bail!("keep and write have no separate one-token forms in this vocabulary");
+                }
+                Some((k, w, llm.tokenize(reflect::WRITE_PREFIX, false)?))
+            }
+            None => None,
+        };
+        let reflect_log = cfg.reflect.as_ref().and_then(|_| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(cfg.workspace.join("reflect.log"))
+                .ok()
+        });
         Ok(Self {
             llm,
             cfg,
@@ -396,14 +540,30 @@ impl Engine {
             think_tokens: 0,
             think_capped: false,
             done: false,
+            held: VecDeque::new(),
+            released: 0,
+            reflector,
+            check: None,
+            forced: VecDeque::new(),
+            reflect_log,
+            last_reading: None,
+            spent_noted: false,
+            choice,
         })
     }
 
-    /// Out with a piece of the stream, stamped with the real time it exists
-    /// at: to `stream.log` (the text), `chain.log` (each piece with its
-    /// microseconds) and the clients.
+    /// A piece of the stream into the hold, stamped with the real time it
+    /// exists at; it goes out `horizon_us` later (`release`).
     fn say(&mut self, text: String, kind: Kind) {
-        let t = clock::now_us();
+        self.held.push_back(Held {
+            piece: Piece::Text(text, kind),
+            t_us: clock::now_us(),
+        });
+    }
+
+    /// Out with a piece: `stream.log` (the text), `chain.log` (each piece
+    /// with the microsecond it came to exist) and the clients.
+    fn out(&mut self, text: String, kind: Kind, t: i64) {
         if let Some(f) = &mut self.log {
             let _ = f.write_all(text.as_bytes());
         }
@@ -416,6 +576,83 @@ impl Engine {
             let _ = writeln!(f, "{t}\t{k}\t{}", crate::client::escape(&text));
         }
         let _ = self.tx.send(Event::Text(text, kind, t));
+    }
+
+    /// Out with every held piece a check does not hold: a check in flight
+    /// holds its token and everything after it, which can still be taken
+    /// back unseen. A token's side effects happen here, not when it was
+    /// placed: its text, its kind in the journal, the lines it completes
+    /// (`[note: ...]`, `[read: ...]`), the leak count. When the text is shown
+    /// is the playout's (`playout.md`: the display's own clock, `horizon_us`
+    /// behind).
+    fn release(&mut self) {
+        while !self.held.is_empty() {
+            // A check holds everything from its token on.
+            if self
+                .check
+                .as_ref()
+                .is_some_and(|c| self.released >= c.hold_from)
+            {
+                break;
+            }
+            let h = self.held.pop_front().unwrap();
+            self.released += 1;
+            match h.piece {
+                Piece::Text(text, kind) => {
+                    if kind == Kind::Given {
+                        // Something put in starts a fresh line.
+                        self.line_buf.clear();
+                        self.line_start = true;
+                        self.speaking_line = false;
+                    }
+                    self.out(text, kind, h.t_us);
+                }
+                Piece::Token { t, chat_speaking } => self.release_token(t, chat_speaking, h.t_us),
+            }
+        }
+    }
+
+    /// A placed token going out: its text, its kind, its lines.
+    fn release_token(&mut self, t: i32, chat_speaking: bool, t_us: i64) {
+        let mut bytes = Vec::new();
+        self.llm.piece(t, false, &mut bytes);
+        if bytes.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if self.journal() && self.line_start && text.trim_start().starts_with('»') {
+            self.speaking_line = true;
+        }
+        if self.journal() && self.line_start && text.trim_start().starts_with('«') {
+            // A line in someone else's voice: counted, shown as thought.
+            self.leaks += 1;
+        }
+        let kind = if self.journal() {
+            if self.speaking_line {
+                Kind::Speak
+            } else {
+                Kind::Think
+            }
+        } else if chat_speaking {
+            Kind::Speak
+        } else {
+            Kind::Think
+        };
+        self.out(text.clone(), kind, t_us);
+        // Lines: complete ones are looked at for [note: ...] and [read: ...].
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find('\n') {
+            self.line_buf.push_str(&rest[..i]);
+            let line = std::mem::take(&mut self.line_buf);
+            self.line_done(&line);
+            self.line_start = true;
+            self.speaking_line = false;
+            rest = &rest[i + 1..];
+        }
+        if !rest.is_empty() {
+            self.line_buf.push_str(rest);
+            self.line_start = false;
+        }
     }
 
     fn note(&self, text: String) {
@@ -516,7 +753,9 @@ impl Engine {
         }
     }
 
-    /// Emit a live token's text, keep the line for the mind's own lines.
+    /// A live token placed: the state decisions read (the circling window,
+    /// the thinking count, the chat frame's thoughts and speech) now; its
+    /// text and side effects into the hold.
     fn emit_token(&mut self, t: i32) {
         self.generated.push_back(t);
         if self.generated.len() > 256 {
@@ -540,45 +779,14 @@ impl Engine {
         if t == self.eot || self.llm.is_eog(t) {
             return;
         }
-        let mut bytes = Vec::new();
-        self.llm.piece(t, false, &mut bytes);
-        if bytes.is_empty() {
-            return;
-        }
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        if self.journal() && self.line_start && text.trim_start().starts_with('»') {
-            self.speaking_line = true;
-        }
-        if self.journal() && self.line_start && text.trim_start().starts_with('«') {
-            // A line in someone else's voice: counted, shown as thought.
-            self.leaks += 1;
-        }
-        let kind = if self.journal() {
-            if self.speaking_line {
-                Kind::Speak
-            } else {
-                Kind::Think
-            }
-        } else if self.speaking {
-            Kind::Speak
-        } else {
-            Kind::Think
-        };
-        self.say(text.clone(), kind);
-        // Lines: complete ones are looked at for [note: ...] and [read: ...].
-        let mut rest = text.as_str();
-        while let Some(i) = rest.find('\n') {
-            self.line_buf.push_str(&rest[..i]);
-            let line = std::mem::take(&mut self.line_buf);
-            self.line_done(&line);
-            self.line_start = true;
-            self.speaking_line = false;
-            rest = &rest[i + 1..];
-        }
-        if !rest.is_empty() {
-            self.line_buf.push_str(rest);
-            self.line_start = false;
-        }
+        // Held: it goes out (text, kind, lines) when the horizon passes.
+        self.held.push_back(Held {
+            piece: Piece::Token {
+                t,
+                chat_speaking: self.speaking,
+            },
+            t_us: clock::now_us(),
+        });
     }
 
     /// A line the mind wrote: a note to keep, a file to read.
@@ -641,8 +849,13 @@ impl Engine {
         }
         let text = self.llm.text(&[token]);
         let m = self.mind.as_mut().unwrap();
-        if let Some(r) = m.read(&mut self.llm, pos, &text)? {
+        let r = m.read(&mut self.llm, pos, &text)?;
+        self.last_reading = None;
+        if let Some(r) = r {
             self.mind_ms.push(r.ms as f64);
+            if self.reflector.is_some() {
+                self.last_reading = Some(r.clone());
+            }
             let _ = self.tx.send(Event::Mind(r));
         }
         Ok(())
@@ -671,9 +884,6 @@ impl Engine {
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         self.next = self.llm.sample(row);
-        self.line_buf.clear();
-        self.line_start = true;
-        self.speaking_line = false;
         Ok(())
     }
 
@@ -741,6 +951,10 @@ impl Engine {
             },
             t_us: clock::now_us(),
             reads_quiet: self.read_failures_quiet,
+            checks: self.reflector.as_ref().map_or(0, |r| r.n_checks),
+            changes: self.reflector.as_ref().map_or(0, |r| r.n_changes),
+            unparsed: self.reflector.as_ref().map_or(0, |r| r.n_unparsed),
+            checking: self.check.is_some(),
         }
     }
 
@@ -817,6 +1031,9 @@ impl Engine {
     /// One cycle: the live token and whatever runs beside it.
     fn cycle(&mut self) -> Result<()> {
         let t0 = Instant::now();
+        if self.check.is_some() {
+            return self.check_cycle(t0);
+        }
         let mut side_tokens = 0usize;
         let mut live_advanced = false;
 
@@ -920,11 +1137,20 @@ impl Engine {
         Ok(())
     }
 
-    /// The pending token is decoded: keep it, sample the next, show it.
+    /// The pending token is decoded: keep it, choose the next (the
+    /// sampler's choice, or the next token of a changed answer), consider
+    /// checking it, show it.
     fn advance(&mut self, row: i32) -> Result<()> {
         self.mind_step(self.pos(), self.next)?;
         self.history.push(self.next);
-        let mut t = self.llm.sample(row);
+        let forced = self.forced.pop_front();
+        let mut t = match forced {
+            Some(f) => {
+                self.llm.accept(f);
+                f
+            }
+            None => self.llm.sample(row),
+        };
         if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
             // The journal has no end: a newline stands in for it.
             self.eog_streak += 1;
@@ -932,9 +1158,362 @@ impl Engine {
         } else {
             self.eog_streak = 0;
         }
+        if forced.is_none() && self.forced.is_empty() {
+            self.consider(t)?;
+        }
         self.next = t;
         self.emit_token(t);
         Ok(())
+    }
+
+    /// The token just chosen for the next position: its signals, at every
+    /// token; and a check, when a trigger fires with nothing else beside
+    /// the live sequence: the snapshot and the deliberation are copied
+    /// from the live sequence now, before the token is decoded (reflect.md).
+    fn consider(&mut self, t: i32) -> Result<()> {
+        let (Some(rf), Some(r)) = (self.reflector.as_mut(), self.last_reading.as_ref()) else {
+            return Ok(());
+        };
+        // The model's own probability of the token, from its top 64; a
+        // token below them has less than the 64th.
+        let p = match r.model_top.iter().find(|(tok, _)| *tok == t) {
+            Some((_, lp)) => lp.exp(),
+            None => r.model_top.last().map_or(1.0, |(_, lp)| lp.exp()),
+        };
+        let text = self.llm.text(&[t]);
+        let control =
+            t == self.think_open || t == self.think_close || t == self.eot || self.llm.is_eog(t);
+        let s = rf.signals(r, p, &text, control);
+        let mono = clock::mono_us();
+        let spent = rf.spent(mono);
+        let free = self.check.is_none()
+            && self.reading.is_none()
+            && self.chase.is_none()
+            && self.summary.is_none()
+            && !self.reseat
+            && !self.done
+            && self.free_seqs.len() >= 2
+            && self.history.len() + 512 < self.llm.n_ctx() as usize;
+        let why = if free {
+            rf.should_check(&s, mono)
+        } else {
+            None
+        };
+        let words = if why.is_some() {
+            rf.band_words(r)
+        } else {
+            Vec::new()
+        };
+        if spent != self.spent_noted {
+            self.spent_noted = spent;
+            if spent {
+                self.note(
+                    "the checks' budget for this minute is spent: no checks until it frees".into(),
+                );
+            }
+        }
+        let Some(why) = why else {
+            return Ok(());
+        };
+        let t_us = clock::now_us();
+        let shown: Vec<&str> = words.iter().map(String::as_str).collect();
+        let question = self.tok(
+            &reflect::question(self.cfg.frame, t_us, &text, &shown),
+            false,
+        )?;
+        let snap = self.free_seqs.pop().unwrap();
+        let seq = self.free_seqs.pop().unwrap();
+        for q in [snap, seq] {
+            self.llm.seq_rm(q, -1, -1);
+        }
+        self.llm.seq_cp(self.live, snap, -1, -1);
+        self.llm.seq_cp(self.live, seq, -1, -1);
+        self.check = Some(Check {
+            why,
+            at: self.history.len(),
+            chosen_text: text,
+            p,
+            flag: s.flag_smoothed,
+            words,
+            snap,
+            seq,
+            question,
+            fed: 0,
+            d_len: 0,
+            answer: Vec::new(),
+            keep: 0.0,
+            fmt: 0.0,
+            writing: false,
+            lane_next: Vec::new(),
+            hold_from: self.released + self.held.len() as u64,
+            saved: self.save(),
+            t_us,
+            t0_mono: mono,
+        });
+        Ok(())
+    }
+
+    fn save(&self) -> Saved {
+        Saved {
+            speaking: self.speaking,
+            think_tokens: self.think_tokens,
+            think_capped: self.think_capped,
+            gen_count: self.gen_count,
+            generated: self.generated.clone(),
+            eog_streak: self.eog_streak,
+            done: self.done,
+        }
+    }
+
+    fn restore(&mut self, s: Saved) {
+        self.speaking = s.speaking;
+        self.think_tokens = s.think_tokens;
+        self.think_capped = s.think_capped;
+        self.gen_count = s.gen_count;
+        self.generated = s.generated;
+        self.eog_streak = s.eog_streak;
+        self.done = s.done;
+    }
+
+    /// A cycle while a check is in flight: the deliberation's lane beside
+    /// the live token, the live lane first (so its captured row is the
+    /// first). D's first token goes alone (it shares the live sequence's
+    /// recurrent state until it writes its own), and so does every D token
+    /// once a task's answer has ended. D's lane: the question in one chunk
+    /// after that first token, ending on `Decision:`, whose next-token
+    /// distribution is read as the choice between ` keep` and ` write`
+    /// (probabilities, not a sample); a keep ends the check there, a write
+    /// feeds ` write:` and the word follows, greedy, to its first break or
+    /// its cap.
+    fn check_cycle(&mut self, t0: Instant) -> Result<()> {
+        let c = self.check.as_ref().unwrap();
+        let cap = self.llm.batch_cap().saturating_sub(1).max(1);
+        let d_pos = (c.at + c.d_len) as i32;
+        let in_question = c.fed < c.question.len();
+        let (lane, ask) = if in_question {
+            let n = if c.fed == 0 {
+                1
+            } else {
+                (c.question.len() - c.fed).min(cap)
+            };
+            let end = c.fed + n;
+            (c.question[c.fed..end].to_vec(), end == c.question.len())
+        } else if !c.lane_next.is_empty() {
+            (c.lane_next.clone(), true)
+        } else {
+            (vec![*c.answer.last().unwrap()], true)
+        };
+        let seq = c.seq;
+        let alone = c.fed == 0 || self.done;
+        let d = Lane {
+            seq,
+            tokens: &lane,
+            pos0: d_pos,
+            logits: ask,
+        };
+        let rows = if alone {
+            self.llm.decode(&[d])?
+        } else {
+            self.llm.decode(&[
+                Lane {
+                    seq: self.live,
+                    tokens: &[self.next],
+                    pos0: self.pos(),
+                    logits: true,
+                },
+                d,
+            ])?
+        };
+        // D's row: at the decision line the choice, else the word's next
+        // token (greedy, outside the live sampler's history).
+        let mut choice = None;
+        let mut d_tok = None;
+        if ask {
+            let row = *rows.last().unwrap();
+            if in_question {
+                let (k, w, _) = self.choice.as_ref().unwrap();
+                let l = self.llm.logits(row)?;
+                let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+                let z = l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>();
+                let mass = |ts: &[i32]| {
+                    ts.iter()
+                        .map(|&t| (l[t as usize] as f64 - m).exp())
+                        .sum::<f64>()
+                        / z
+                };
+                let (pk, pw) = (mass(k), mass(w));
+                choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32));
+            } else {
+                d_tok = Some(self.llm.greedy(row, true)?);
+            }
+        }
+        if alone {
+            // Nobody reads D's captured row.
+            if let Some(cap) = self.llm.capture() {
+                cap.take();
+            }
+        } else {
+            self.advance(rows[0])?;
+        }
+        let prefix = self
+            .choice
+            .as_ref()
+            .map(|c| c.2.clone())
+            .unwrap_or_default();
+        let limit = self.reflector.as_ref().map_or(8, |r| r.cfg.answer_tokens);
+        let c = self.check.as_mut().unwrap();
+        if in_question {
+            c.fed += lane.len();
+        } else {
+            c.lane_next.clear();
+        }
+        c.d_len += lane.len();
+        let mut ended = false;
+        if let Some((keep, fmt)) = choice {
+            c.keep = keep;
+            c.fmt = fmt;
+            if keep >= 0.5 {
+                ended = true;
+            } else {
+                c.writing = true;
+                c.lane_next = prefix;
+            }
+        }
+        if let Some(t) = d_tok {
+            c.answer.push(t);
+        }
+        self.finish_cycle(t0, lane.len(), !alone);
+        if !ended {
+            // The word ends at its first break after something, or its cap.
+            let c = self.check.as_ref().unwrap();
+            let text = self.llm.text(&c.answer);
+            let t = text.trim_start();
+            ended = c.writing
+                && !c.answer.is_empty()
+                && ((!t.is_empty() && t.contains(char::is_whitespace)) || c.answer.len() >= limit);
+        }
+        if ended {
+            let c = self.check.take().unwrap();
+            self.end_check(c, false)?;
+        }
+        Ok(())
+    }
+
+    /// A check's end: keep the token, or rewind onto the snapshot and place
+    /// the answer's word (its first token next, the rest forced); drop the
+    /// copies; record the episode.
+    fn end_check(&mut self, c: Check, abandoned: bool) -> Result<()> {
+        let answer = if c.writing {
+            format!("write:{}", self.llm.text(&c.answer))
+        } else {
+            "keep".to_string()
+        };
+        let dry = self.reflector.as_ref().is_some_and(|r| r.cfg.dry);
+        let placed = self.history.len() - c.at;
+        let mut to = String::new();
+        let mut replacement = None;
+        let outcome = if abandoned {
+            Outcome::Abandoned
+        } else {
+            let decision = if c.writing {
+                reflect::parse_answer(&answer)
+            } else {
+                Decision::Keep
+            };
+            match decision {
+                Decision::Keep => Outcome::Kept,
+                Decision::Unparsed => Outcome::Unparsed,
+                Decision::Write(w) if w == c.chosen_text.trim() => Outcome::Same,
+                Decision::Write(w) => {
+                    to = reflect::replacement_text(&c.chosen_text, &w);
+                    let tokens = self.tok(&to, false)?;
+                    if tokens.is_empty() {
+                        Outcome::Unparsed
+                    } else if dry {
+                        Outcome::Dry
+                    } else {
+                        replacement = Some(tokens);
+                        Outcome::Changed
+                    }
+                }
+            }
+        };
+        if let Some(rf) = self.reflector.as_mut() {
+            if outcome == Outcome::Unparsed {
+                rf.n_unparsed += 1;
+            }
+        }
+        let mut back = None;
+        match replacement {
+            Some(tokens) => {
+                back = Some((c.at as i32, self.history.len() as i32));
+                // The pieces from the token on were never shown: gone.
+                self.held.truncate((c.hold_from - self.released) as usize);
+                self.history.truncate(c.at);
+                self.restore(c.saved);
+                let old = self.live;
+                self.llm.seq_rm(old, -1, -1);
+                self.llm.seq_rm(c.seq, -1, -1);
+                self.free_seqs.push(old);
+                self.free_seqs.push(c.seq);
+                self.live = c.snap;
+                // The sampler's history: the live text as it now stands.
+                let rf = self.reflector.as_mut().unwrap();
+                rf.changed(clock::mono_us());
+                let seed = self.cfg.sampling.seed.wrapping_add(rf.n_changes as u32);
+                let s = self.cfg.sampling.clone();
+                self.llm.reset_sampler(&s, seed, &self.history);
+                self.llm.accept(tokens[0]);
+                self.forced = tokens[1..].iter().copied().collect();
+                self.next = tokens[0];
+                self.emit_token(tokens[0]);
+            }
+            None => {
+                self.llm.seq_rm(c.seq, -1, -1);
+                self.llm.seq_rm(c.snap, -1, -1);
+                self.free_seqs.push(c.seq);
+                self.free_seqs.push(c.snap);
+            }
+        }
+        let e = Episode {
+            t_us: c.t_us,
+            pos: c.at as i32,
+            why: c.why,
+            chosen: c.chosen_text,
+            p_chosen: c.p,
+            flag: c.flag,
+            words: c.words,
+            keep: c.keep,
+            fmt: c.fmt,
+            answer,
+            outcome,
+            to,
+            ms: (clock::mono_us() - c.t0_mono) as f32 / 1000.0,
+            placed,
+            back,
+        };
+        if let Some(f) = &mut self.reflect_log {
+            let _ = writeln!(f, "{}", reflect::line(&e));
+        }
+        if outcome == Outcome::Changed {
+            self.note(format!(
+                "checked {:?} at {} ({}): wrote {:?} instead",
+                e.chosen,
+                e.pos,
+                e.why.name(),
+                e.to
+            ));
+        }
+        let _ = self.tx.send(Event::Reflect(e));
+        Ok(())
+    }
+
+    /// Everything held must go out, or the run ends: the check in flight
+    /// is dropped and its token stays.
+    fn abandon(&mut self) {
+        if let Some(c) = self.check.take() {
+            let _ = self.end_check(c, true);
+        }
     }
 
     fn finish_cycle(&mut self, t0: Instant, side_tokens: usize, live_advanced: bool) {
@@ -1054,7 +1633,7 @@ impl Engine {
             return Ok(());
         }
 
-        let idle = self.reading.is_none() && self.chase.is_none();
+        let idle = self.reading.is_none() && self.chase.is_none() && self.check.is_none();
 
         // Files the mind asked for.
         if idle && !self.pending_reads.is_empty() {
@@ -1184,7 +1763,10 @@ impl Engine {
 
     /// The model back, when the engine is done with it.
     fn finish(self) -> Llm {
-        self.llm
+        let Self { llm, tx, .. } = self;
+        // Every event out before the model goes back.
+        tx.finish();
+        llm
     }
 
     /// Run until told to quit (a stream) or until the answer ends (a task);
@@ -1217,6 +1799,7 @@ impl Engine {
         self.mind_step(tokens.len() as i32 - 1, *tokens.last().unwrap())?;
         self.next = self.llm.sample(row);
         self.say(opening.clone(), Kind::Given);
+        self.release();
         let _ = self.tx.send(Event::Status(self.status()));
         loop {
             // Commands: all that are waiting; when paused, wait for one.
@@ -1224,26 +1807,42 @@ impl Engine {
                 let cmd = if self.paused {
                     match self.rx.recv() {
                         Ok(c) => c,
-                        Err(_) => return Ok(self.finish()),
+                        Err(_) => {
+                            self.abandon();
+                            self.release();
+                            return Ok(self.finish());
+                        }
                     }
                 } else {
                     match self.rx.try_recv() {
                         Ok(c) => c,
                         Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => return Ok(self.finish()),
+                        Err(TryRecvError::Disconnected) => {
+                            self.abandon();
+                            self.release();
+                            return Ok(self.finish());
+                        }
                     }
                 };
                 if !self.handle(cmd) {
+                    self.abandon();
+                    self.release();
                     let _ = self.tx.send(Event::Stopped);
                     return Ok(self.finish());
                 }
                 if self.paused {
+                    // Paused: what is held goes out now, nothing waits behind it.
+                    self.abandon();
+                    self.release();
+                    self.tx.flush();
                     let _ = self.tx.send(Event::Status(self.status()));
                 }
             }
             self.cycle()?;
             self.after()?;
-            if self.done {
+            self.release();
+            if self.done && self.check.is_none() {
+                self.release();
                 let _ = self.tx.send(Event::Done {
                     think_tokens: self.think_tokens,
                     capped: self.think_capped,

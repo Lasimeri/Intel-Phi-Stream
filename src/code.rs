@@ -446,6 +446,8 @@ pub struct StreamOpts {
     pub repeat_penalty: f32,
     /// Read the mind at every token (`mind.md`), when set.
     pub mind: Option<crate::mind::MindConfig>,
+    /// Check the tokens it places (`reflect.md`; needs `mind`), when set.
+    pub reflect: Option<crate::reflect::ReflectConfig>,
 }
 
 /// The user turn of a task.
@@ -559,10 +561,12 @@ pub fn stream(
             status_every: 1_000_000,
             time_every_us: 0,
             nudge_every_us: i64::MAX,
+            horizon_us: 0,
             task: true,
             think_budget: o.think_budget,
             workspace: tdir.join("ws"),
             mind: o.mind.clone(),
+            reflect: o.reflect.clone(),
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();
@@ -571,6 +575,7 @@ pub fn stream(
         drop(ctx);
         let (mut answer, mut think_tokens, mut capped, mut thoughts) =
             (String::new(), 0usize, false, String::new());
+        let mut episodes: Vec<crate::reflect::Episode> = Vec::new();
         for ev in erx.try_iter() {
             match ev {
                 Event::Text(s, Kind::Speak, _) => answer.push_str(&s),
@@ -582,6 +587,7 @@ pub fn stream(
                     think_tokens = n;
                     capped = c;
                 }
+                Event::Reflect(e) => episodes.push(e),
                 _ => {}
             }
         }
@@ -601,10 +607,20 @@ pub fn stream(
             log,
             "{}",
             serde_json::json!({"name": t.name, "verdict": verdict.name(), "think_tokens": think_tokens, "think_capped": capped,
-                "answer_tokens": answer_tokens, "secs": secs, "code": code, "answer": answer, "output": output, "thoughts": thoughts})
+                "answer_tokens": answer_tokens, "secs": secs, "code": code, "answer": answer, "output": output, "thoughts": thoughts,
+                "episodes": episodes.iter().map(crate::reflect::line).collect::<Vec<_>>()})
         )?;
+        let checks = if o.reflect.is_some() {
+            let changed = episodes
+                .iter()
+                .filter(|e| e.outcome == crate::reflect::Outcome::Changed)
+                .count();
+            format!(" checks {:>2} changed {changed}", episodes.len())
+        } else {
+            String::new()
+        };
         println!(
-            "{:>3}/{} {:<44} {:<13} think {:>5}{} answer {:>4} {:>6.1} s",
+            "{:>3}/{} {:<44} {:<13} think {:>5}{} answer {:>4} {:>6.1} s{checks}",
             i + 1,
             tasks.len(),
             t.name,

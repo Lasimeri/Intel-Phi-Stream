@@ -22,6 +22,11 @@ pub struct Sizes {
     pub other: u64,
     /// Attention K and V bytes per token at float16 (the KV cache's growth).
     pub kv_per_token_f16: u64,
+    /// The recurrent state one sequence slot holds, f32: for each recurrent
+    /// block the convolution state (kernel - 1 times the convolution's
+    /// channels) and the state matrix (state size squared times the value
+    /// heads). 0 for a model with no recurrent blocks.
+    pub recurrent_per_seq: u64,
     /// The architecture's name, for the report.
     pub arch: String,
 }
@@ -68,6 +73,32 @@ pub fn sizes(path: &str) -> Result<Sizes> {
             _ => n_block as u64,
         };
         let kv_per_token_f16 = attn_layers * n_kv * (klen + vlen) * 2;
+        // llama.cpp's recurrent cache for a gated delta net block (the
+        // tensors cache_r_l<N> and cache_s_l<N>, f32): conv state
+        // (d_conv - 1) x (d_inner + 2 n_group d_state), ssm state
+        // d_state x d_state x dt_rank.
+        // Only the main pass's blocks keep a recurrent cache (llama.cpp:
+        // is_recr_impl is false past hparams.n_layer(), which leaves out the
+        // extra prediction blocks).
+        let nextn = key_u32(g, &format!("{arch}.nextn_predict_layers")).unwrap_or(0) as u64;
+        let recurrent_layers = (n_block as u64)
+            .saturating_sub(nextn)
+            .saturating_sub(attn_layers);
+        let ssm = |k: &str| key_u32(g, &format!("{arch}.ssm.{k}")).unwrap_or(0) as u64;
+        let (d_conv, d_inner, d_state, n_group, dt_rank) = (
+            ssm("conv_kernel"),
+            ssm("inner_size"),
+            ssm("state_size"),
+            ssm("group_count"),
+            ssm("time_step_rank"),
+        );
+        let recurrent_per_seq = if interval.is_some() && d_state > 0 {
+            let conv = d_conv.saturating_sub(1) * (d_inner + 2 * n_group * d_state);
+            let state = d_state * d_state * dt_rank;
+            recurrent_layers * (conv + state) * 4
+        } else {
+            0
+        };
 
         let n = sys::gguf_get_n_tensors(g);
         let mut s = Sizes {
@@ -75,6 +106,7 @@ pub fn sizes(path: &str) -> Result<Sizes> {
             experts: Vec::new(),
             other: 0,
             kv_per_token_f16,
+            recurrent_per_seq,
             arch,
         };
         for i in 0..n {
@@ -215,6 +247,7 @@ mod tests {
             experts: vec![90; 5],
             other: 50,
             kv_per_token_f16: 0,
+            recurrent_per_seq: 0,
             arch: "test".into(),
         }
     }

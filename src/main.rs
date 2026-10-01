@@ -15,8 +15,10 @@ mod gate;
 mod lens;
 mod llm;
 mod mind;
+mod playout;
 mod probe;
 mod readout;
+mod reflect;
 mod serve;
 mod split;
 mod sys;
@@ -159,9 +161,22 @@ struct StreamArgs {
     /// Nudge circling thoughts at most once in this many seconds.
     #[arg(long, default_value_t = 60.0)]
     nudge_every: f64,
+    /// Show the text this many seconds behind its placement, at an even pace
+    /// (the playout absorbs the placement's jumps; 0: as placed; default 0,
+    /// or 1 with --reflect).
+    #[arg(long)]
+    horizon: Option<f64>,
     /// Hand over a file at the start.
     #[arg(long)]
     feed: Option<String>,
+    #[command(flatten)]
+    mind: MindArgs,
+}
+
+/// The mind and the reflection loop, the same for the service and for
+/// `code stream` (so a measurement runs what the stream runs).
+#[derive(Args, Clone)]
+struct MindArgs {
     /// Read what is on its mind at every token it places, through the
     /// Jacobian lens (mind.md); off: no eval callback is installed.
     #[arg(long)]
@@ -175,6 +190,36 @@ struct StreamArgs {
     /// Words shown per block.
     #[arg(long, default_value_t = 6)]
     mind_k: usize,
+    /// Check the tokens it places: where it doubts a word or its mind
+    /// lights words of error, a deliberation beside the live token decides
+    /// keep or write another, and a change rewinds onto a copy made before
+    /// the token (reflect.md; needs --mind; sets --horizon 1 unless given).
+    #[arg(long)]
+    reflect: bool,
+    /// As --reflect, read-only: every deliberation runs, no token changes.
+    #[arg(long, conflicts_with = "reflect")]
+    reflect_dry: bool,
+}
+
+impl MindArgs {
+    /// The mind's and the loop's settings.
+    fn configs(&self) -> Result<(Option<mind::MindConfig>, Option<reflect::ReflectConfig>)> {
+        let reflecting = self.reflect || self.reflect_dry;
+        if reflecting && !self.mind {
+            anyhow::bail!("--reflect reads the mind: add --mind");
+        }
+        let m = self.mind.then(|| mind::MindConfig {
+            lens: expand_home(&self.lens),
+            layers: self.mind_layers.clone(),
+            k: self.mind_k,
+            final_block: None,
+        });
+        let r = reflecting.then(|| reflect::ReflectConfig {
+            dry: self.reflect_dry,
+            ..Default::default()
+        });
+        Ok((m, r))
+    }
 }
 
 #[derive(Subcommand)]
@@ -249,6 +294,18 @@ enum Cmd {
         /// Greedy tokens compared after the composition.
         #[arg(long, default_value_t = 32)]
         compare: usize,
+        /// Instead: whether a sequence copied from the live one keeps its
+        /// state while the live one goes on (gate.md).
+        #[arg(long)]
+        snapshot: bool,
+        /// Instead: whether the reflection loop's lanes (a snapshot and a
+        /// deliberation beside the live sequence, kept or rewound) keep
+        /// every state, every captured row its own lane's (gate.md).
+        #[arg(long)]
+        reflect: bool,
+        /// Episodes of `--reflect`, kept and rewound in turn.
+        #[arg(long, default_value_t = 8)]
+        episodes: usize,
     },
     /// Whether the stream writes code that works: MultiPL-E's HumanEval in
     /// Rust, compiled and tested in a sandbox (code.md; no service).
@@ -308,9 +365,8 @@ enum CodeCmd {
         /// The repetition penalty (1: off).
         #[arg(long, default_value_t = 1.0)]
         penalty: f32,
-        /// Read the mind at every token while answering.
-        #[arg(long)]
-        mind: bool,
+        #[command(flatten)]
+        mind: MindArgs,
     },
 }
 
@@ -469,6 +525,12 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
             compose(&base, frame)
         }
     };
+    let (mind, reflect) = s.mind.configs()?;
+    // A check needs its token held while it deliberates: a second by
+    // default, so a kept token never shows as a stall.
+    let horizon = s
+        .horizon
+        .unwrap_or(if reflect.is_some() { 1.0 } else { 0.0 });
     let seed = s.seed_text.clone().unwrap_or_else(|| match frame {
         Frame::Journal => "(the room is quiet; nothing has been said. The journal goes on from wherever its thoughts were.)".to_string(),
         Frame::Chat => "[The stream begins. Nobody has spoken yet.]".to_string(),
@@ -486,14 +548,12 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         status_every: 8,
         time_every_us: (s.time_every * 1e6) as i64,
         nudge_every_us: (s.nudge_every * 1e6) as i64,
+        horizon_us: (horizon * 1e6) as i64,
         task: false,
         think_budget: 0,
         workspace,
-        mind: s.mind.then(|| mind::MindConfig {
-            lens: expand_home(&s.lens),
-            layers: s.mind_layers.clone(),
-            k: s.mind_k,
-        }),
+        mind,
+        reflect,
     })
 }
 
@@ -516,16 +576,14 @@ fn info_line(llm: &Llm, cfg: &Config) -> String {
     )
 }
 
-/// The service: the engine on its thread, the socket on this one.
 /// The model as a stream loads it: with the capture and the readout's
 /// GPU memory set aside when the mind is read.
-fn load_stream(m: &ModelArgs, s: &StreamArgs) -> Result<Llm> {
-    if !s.mind {
+fn load_mind(m: &ModelArgs, a: &MindArgs) -> Result<Llm> {
+    if !a.mind {
         return load(m);
     }
-    let lens_path = expand_home(&s.lens);
-    let lens = lens::Lens::open(&lens_path)?;
-    for l in &s.mind_layers {
+    let lens = lens::Lens::open(&expand_home(&a.lens))?;
+    for l in &a.mind_layers {
         if !lens.header.layers.contains(l) {
             anyhow::bail!(
                 "the lens has no block {l} (it has {:?})",
@@ -534,11 +592,11 @@ fn load_stream(m: &ModelArgs, s: &StreamArgs) -> Result<Llm> {
         }
     }
     let d = lens.header.d_model as u64;
-    let extra = READOUT_RESERVE + s.mind_layers.len() as u64 * d * d * 2;
+    let extra = READOUT_RESERVE + a.mind_layers.len() as u64 * d * d * 2;
     load_with(
         m,
         Some(capture::CaptureConfig {
-            layers: s.mind_layers.clone(),
+            layers: a.mind_layers.clone(),
             all_rows: false,
             keep_logits: false,
         }),
@@ -546,10 +604,11 @@ fn load_stream(m: &ModelArgs, s: &StreamArgs) -> Result<Llm> {
     )
 }
 
+/// The service: the engine on its thread, the socket on this one.
 fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     eprintln!("phi-stream: placing the model and loading it; the cards upload their shares at the first multiply");
-    let llm = load_stream(m, s)?;
     let cfg = config(s, sampling(m))?;
+    let llm = load_mind(m, &s.mind)?;
     let info = info_line(&llm, &cfg);
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
@@ -575,8 +634,8 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
 
 /// The stream on stdout, status and notes on stderr, stdin lines said to it.
 fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
-    let llm = load_stream(m, s)?;
     let cfg = config(s, sampling(m))?;
+    let llm = load_mind(m, &s.mind)?;
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
     if let Some(f) = &s.feed {
@@ -646,6 +705,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st)),
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
+            Ok(Event::Reflect(e)) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
             Ok(Event::Done { .. }) => {}
             Ok(Event::Stopped) | Err(_) => break,
         }
@@ -665,8 +725,19 @@ fn status_text(st: &engine::Status) -> String {
         Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
         Mode::Paused => "paused".to_string(),
     };
+    let checks = if st.checks > 0 || st.checking {
+        format!(
+            "; checks {} (changed {}, unparsed {}){}",
+            st.checks,
+            st.changes,
+            st.unparsed,
+            if st.checking { ", one in flight" } else { "" }
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}; notes {}; {} frame",
+        "{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}; notes {}; {} frame{checks}",
         st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued, st.notes, st.frame
     )
 }
@@ -700,6 +771,7 @@ fn tail(socket: &Path, with_status: bool, with_mind: bool) -> Result<()> {
                     eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r));
                 }
             }
+            Msg::Reflect(e) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
             Msg::Bye => break,
             _ => {}
         }
@@ -773,8 +845,46 @@ fn main() -> Result<()> {
             thoughts,
             chunk,
             compare,
+            snapshot,
+            reflect,
+            episodes,
         } => {
+            if reflect {
+                // The capture as the engine has it when it reflects: the
+                // band's blocks and the final one.
+                let mut llm = load_with(
+                    &cli.model,
+                    Some(capture::CaptureConfig {
+                        layers: Vec::new(),
+                        all_rows: false,
+                        keep_logits: false,
+                    }),
+                    READOUT_RESERVE,
+                )?;
+                let last = llm.n_layer() - 1;
+                if let Some(c) = llm.capture() {
+                    c.cfg.layers = vec![27, 29, 31, last];
+                }
+                let a = format!(
+                    "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                    PARAGRAPH.repeat(3)
+                );
+                let q = reflect::question(
+                    Frame::Chat,
+                    clock::now_us(),
+                    " scheduler",
+                    &["backend", "graph", "split"],
+                );
+                return gate::gate_reflect(&mut llm, &a, &q, episodes, 12, 16);
+            }
             let mut llm = load(&cli.model)?;
+            if snapshot {
+                let a = format!(
+                    "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                    PARAGRAPH.repeat(3)
+                );
+                return gate::gate_snapshot(&mut llm, &a, 24, 24);
+            }
             let a = format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[The stream begins.]<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 compose(DEFAULT_BASE, Frame::Chat)
@@ -807,40 +917,30 @@ fn main() -> Result<()> {
                         f.to_string(),
                     ),
                 };
+                let (mind_cfg, reflect_cfg) = mind.configs()?;
                 let dir = code::run_dir(&format!("stream-{}", label.replace('/', "_")))?;
+                let arm = if mind.reflect {
+                    "reflect"
+                } else if mind.reflect_dry {
+                    "reflect-dry"
+                } else if mind.mind {
+                    "mind"
+                } else {
+                    "plain"
+                };
                 std::fs::write(
                     dir.join("run.json"),
-                    serde_json::json!({"base": label, "think_budget": think_budget, "repeat_penalty": penalty, "mind": mind, "temp": 0, "frame": "chat", "tasks": sel.len(), "model": cli.model.model}).to_string(),
+                    serde_json::json!({"base": label, "think_budget": think_budget, "repeat_penalty": penalty, "arm": arm, "mind_layers": if mind.mind { mind.mind_layers.clone() } else { Vec::new() }, "temp": 0, "frame": "chat", "tasks": sel.len(), "model": cli.model.model}).to_string(),
                 )?;
-                println!("{} tasks through the stream's engine: base {label}, thinking budget {think_budget}, penalty {penalty}, greedy{}; run directory {}", sel.len(), if mind { ", the mind read" } else { "" }, dir.display());
-                let mind_cfg = mind.then(|| mind::MindConfig {
-                    lens: expand_home("~/models/jlens/qwen3.6-35B-A3B/lens.jlens"),
-                    layers: vec![27, 29, 31],
-                    k: 6,
-                });
-                let llm = if mind {
-                    let lens = lens::Lens::open(&expand_home(
-                        "~/models/jlens/qwen3.6-35B-A3B/lens.jlens",
-                    ))?;
-                    let d = lens.header.d_model as u64;
-                    load_with(
-                        &cli.model,
-                        Some(capture::CaptureConfig {
-                            layers: vec![27, 29, 31],
-                            all_rows: false,
-                            keep_logits: false,
-                        }),
-                        READOUT_RESERVE + 3 * d * d * 2,
-                    )?
-                } else {
-                    load(&cli.model)?
-                };
+                println!("{} tasks through the stream's engine: base {label}, thinking budget {think_budget}, penalty {penalty}, greedy, {arm}; run directory {}", sel.len(), dir.display());
+                let llm = load_mind(&cli.model, &mind)?;
                 let opts = code::StreamOpts {
                     base: base_text,
                     base_label: label,
                     think_budget,
                     repeat_penalty: penalty,
                     mind: mind_cfg,
+                    reflect: reflect_cfg,
                 };
                 let (out, _llm) = code::stream(llm, &sel, &opts, &dir)?;
                 let s = code::summary(&out);

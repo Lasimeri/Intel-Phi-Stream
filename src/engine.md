@@ -118,14 +118,6 @@ move on) is decoded straight in, at most once in 256 tokens. A document
 is framed with an opening and a closing line so the join reads as its
 end.
 
-**Keeping it moving.** The sampler carries a repetition penalty (1.05
-over the last 256 tokens by default, llama.cpp's penalties sampler),
-and the engine watches the last 192 live tokens: a 6-gram seen five
-times is circling, and a nudge (a bracketed line asking the thoughts to
-move on) is decoded straight in, at most once in 256 tokens. A document
-is framed with an opening and a closing line so the join reads as its
-end.
-
 **Real time** (`clock.md`). The chain is placed on the wall clock, not
 the cycles: the opening carries its date and time to the microsecond,
 every line from outside the time it was heard or handed over (`« [HH:MM:SS.uuuuuu] ...`),
@@ -151,6 +143,72 @@ starts.
 token, the residual of that token at the chosen blocks is read through
 the Jacobian lens, synchronously, and sent out as `Event::Mind`; the
 readout's time is `mind_ms` in the status.
+
+**The hold and the playout.** Every piece of the stream (a token's
+text, a line from outside, a mark) goes into a hold stamped with the
+real time it came to exist. It goes out at the end of the cycle unless a
+check holds it (`release`): a check holds its token and everything
+after it, which can then be taken back without anyone having seen it. A
+token's side effects happen when it goes out, not when it is placed:
+- its text in `stream.log` and `chain.log`;
+- its kind;
+- the lines it completes (notes, reads);
+- the leak count.
+
+The events then pass through the playout (`playout.md`, `--horizon
+SECS`, `Config::horizon_us`). That is the display's own clock on its
+own thread, which shows the text about `horizon` behind its placement
+at an even pace, absorbing the placement's jumps. The default is 0 (as
+placed), or 1 s with `--reflect`. Pausing flushes it, and the end of a
+run drains it before the model goes back.
+
+**Checks** (`--reflect`, `reflect.md`). The loop starts after the
+sampler chooses a live token and before that token is decoded:
+
+1. The token's signals are read from the reading at the position
+   before it.
+2. If a trigger fires with nothing else beside the live sequence, two
+   sequences are copied from the live one: the snapshot S (the state
+   before the token, never decoded unless the token changes) and the
+   deliberation D.
+3. The token is placed and held as usual. A check holds that piece, and
+   every piece after it, until the check ends.
+4. The next cycle decodes D's first question token alone. D shares the
+   live recurrent state until it writes its own, so this costs one
+   cycle without a live token, about one token's time.
+5. Every following cycle decodes the live token and D's lane in one
+   batch, the live lane first, so the captured row the mind reads is
+   the first one (`gate --reflect` proves this). D's lane is the rest
+   of the question as one chunk, ending on `Decision:`. D's row there is
+   read as the choice between keep and write (summed probabilities, not
+   a sample, `reflect.md`). A keep ends the check. A write feeds
+   ` write:`, and the word follows one token a cycle, greedy and outside
+   the live sampler's history, to its first break or 8 tokens.
+6. Then the check ends:
+   - **Kept**: D and S are dropped, and the hold goes on.
+   - **Changed**: the live sequence rewinds onto S. The held pieces
+     from the token on are dropped unseen and the history is cut at the
+     token. The placement state is restored (speaking, the thinking
+     count and budget, the circling window, a task's end). The old live
+     sequence and D are dropped, and S becomes live. The first token of
+     the answer's word comes next; its other tokens are forced (accepted
+     into the sampler's history, never sampled). The sampler's chain is
+     rebuilt from the live history as it now stands, its seed advanced
+     per change.
+
+While a check is in flight:
+- Nothing from outside goes into the live sequence. Said things,
+  documents, reads, the clock line, nudges and rollovers wait for it,
+  about half a second.
+- A task's end waits for it, with D running alone and the live sequence
+  stopped.
+- Pausing or stopping abandons it.
+
+When no check is in flight, nothing of this runs. During one, each
+cycle carries the live token beside D's lane, plus the one solo cycle.
+Every check is an `Event::Reflect` (an episode: `reflect.md`), a line in
+`reflect.log`, and counts in the status (`checks`, `changes`,
+`unparsed`, `checking`).
 
 Rates: exponential averages over recent cycles (`stream_tps` over cycles
 that carried a live token, `side_tps` over those that read or caught up,

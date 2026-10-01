@@ -140,9 +140,10 @@ pub fn probe(
         gib(p.host_bytes)
     );
     println!(
-        "context: {} cells, {} KiB of K and V per token at float16, batch {}",
+        "context: {} cells, {} KiB of K and V per token at float16, {:.1} MiB of recurrent state per sequence slot, batch {}",
         llm.n_ctx(),
         s.kv_per_token_f16 / 1024,
+        s.recurrent_per_seq as f64 / (1u64 << 20) as f64,
         llm.batch_cap()
     );
 

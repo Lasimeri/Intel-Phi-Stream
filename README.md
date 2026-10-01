@@ -108,11 +108,30 @@ gated steps, each usable and recorded:
   (`scripts/phi-stream.sh code anchor`), and the stream itself is
   measured the same way (`code stream`)
   ([`docs/results/2026-10-01-code.md`](docs/results/2026-10-01-code.md)).
-- Next: the reflection loop (the stream reasoning on what is on its mind
-  at the token it is placing, beside the live token, within a commit
-  horizon so shown text never changes), real time as the reference
-  frame for every token and control, and coding tasks with tests as the
-  measure.
+- **Usable now, being measured: the reflection loop**
+  (`scripts/phi-stream.sh start --mind --reflect`, [`src/reflect.md`](src/reflect.md)).
+  - **Triggers**: where the stream doubts a word it chose (its own
+    probability low and its workspace holding other words), or its mind
+    lights words of error, a deliberation runs beside the live token.
+  - **The choice**: it reads keep or write from the model's own
+    distribution, and a write rewinds onto a copy made before the token
+    and places another, before anyone saw it.
+  - **Stability**: smoothing, hysteresis, habituation, refractory
+    periods and a budget keep it from running away or locking up.
+  - **The gate**: `gate --reflect` shows the copies and the lanes beside
+    the live token change no state, to the bit.
+  - **Checks show** in the terminal (`/mind`, the mind strip),
+    `tail`, `reflect.log`, and `code stream --reflect`.
+- **Seamless on screen**: the text is shown on the display's own clock
+  (`--horizon`, [`src/playout.md`](src/playout.md), after BF++'s scene
+  oracle), a second behind its placement at an even pace. With the loop
+  on, the largest gap a reader saw in the live stream fell from 419 ms to
+  53 ms ([`docs/results/2026-10-01-reflect.md`](docs/results/2026-10-01-reflect.md)).
+- Next:
+  - the code measurement of the loop;
+  - the sweep that sets its balance;
+  - a diff-based terminal;
+  - the stream's state checkpointed across restarts.
 
 ## Measured (2026-10-01, [`docs/results/2026-10-01-phi-stream.md`](docs/results/2026-10-01-phi-stream.md))
 
@@ -160,10 +179,11 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/engine.rs` | the stream: hearing, reading beside, the join, the rollover, the nudges |
 | `src/serve.rs`, `src/client.rs` | the service that owns the model and its socket; the wire and the client side |
 | `src/tui.rs` | the terminal, a client of the service |
-| `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence |
+| `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence, and the reflection loop's lanes against the same decodes without a snapshot |
 | `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
 | `src/clock.rs` | the wall clock the stream is kept against, to the microsecond |
 | `src/torch.rs`, `src/lens.rs`, `src/eval.rs`, `src/mind.rs` | the reference's lens file read without Python; the `.jlens` format; the lens against the logit lens on the reference's sets; what is on its mind at every token |
+| `src/reflect.rs`, `src/playout.rs` | the reflection loop's triggers, controls, question, choice and episodes; the display's own clock |
 | `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
 | `src/code.rs`, `scripts/fetch-code-eval.sh`, `tools/parquet-jsonl` | whether it writes working code: MultiPL-E's HumanEval in Rust, fetched pinned, compiled and tested in a sandbox |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |

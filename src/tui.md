@@ -24,7 +24,12 @@ is. Closing the terminal leaves the stream running.
   at each block, with the readout's time; `/mind` switches the main area
   to the readings token by token (PgUp and PgDn scroll them), `/mind`
   again back to the stream.
-- The input line: Enter says the line to the stream (heard at once when
+- When it reflects (`--reflect`, `reflect.md`), the newest check shows
+  at the head of the mind strip for eight seconds of the stream's clock
+  (why, the token, its probability, what became of it, how long it
+  took), the status counts the checks and changes (and says when one is
+  in flight), and in `/mind` the reading a check was asked from carries
+  the check beside it.- The input line: Enter says the line to the stream (heard at once when
   short, read beside the thoughts when long); `/feed FILE` hands a file
   over; `/persona FILE` gives it a new persona (the context rolls over
   onto it after a summary); `/pause`, `/resume`; `/chunk N` (0 adapts);

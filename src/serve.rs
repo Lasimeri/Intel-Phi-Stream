@@ -136,6 +136,10 @@ pub fn serve(
                         }
                         h.broadcast(&line);
                     }
+                    Event::Reflect(e) => {
+                        let line = format!("reflect {}", crate::reflect::line(&e));
+                        h.broadcast(&line);
+                    }
                     Event::Done { .. } => {}
                     Event::Stopped => {
                         h.broadcast("bye");
