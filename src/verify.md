@@ -36,6 +36,12 @@ it read a file of the real lines.
 
 Nothing is inferred: a name is missing only when no file holds it.
 
+**Summaries too.** A summary it carries forward (into the base of a
+rollover, or into the opening after a restart) is checked the same way,
+and a line `[checked against the code: ...]` follows it when it names
+what the repository does not hold. In the dev session its summary
+carried "two gates" and a "mirror gate" through a rollover.
+
 **In the engine** (`add_note`):
 - **A note with a missing name or a bad reference is kept**, marked
   `[unverified: ...]`, and the stream is told (a system line through the

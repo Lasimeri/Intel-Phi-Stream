@@ -762,7 +762,7 @@ impl Engine {
             let summary = fs::read_to_string(self.cfg.workspace.join("summary.md"))
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
-            let summary = match (summary.is_empty(), self.cfg.frame) {
+            let shown = match (summary.is_empty(), self.cfg.frame) {
                 (true, _) => String::new(),
                 (false, Frame::Journal) => {
                     format!("« [your own summary, written before you were restarted:]\n{summary}\n")
@@ -770,6 +770,12 @@ impl Engine {
                 (false, Frame::Chat) => {
                     format!("Your own summary, written before you were restarted:\n{summary}\n")
                 }
+            };
+            // Checked against the code like its notes (`verify.md`).
+            let summary = if summary.is_empty() {
+                shown
+            } else {
+                format!("{shown}{}", self.checked_line(&summary))
             };
             format!("{summary}{}", self.notes_block())
         };
@@ -845,23 +851,50 @@ impl Engine {
         )
     }
 
+    /// In development, a text it carries forward (a summary) checked
+    /// against the code (`verify.md`): a line naming what the repository
+    /// does not hold, empty when it names nothing false.
+    fn checked_line(&self, text: &str) -> String {
+        let Some(root) = &self.cfg.dev else {
+            return String::new();
+        };
+        let f = verify::Repo::load(root).check(text);
+        if f.clean() {
+            return String::new();
+        }
+        let mut why = Vec::new();
+        if !f.missing.is_empty() {
+            why.push(format!(
+                "{} nowhere in the repository",
+                f.missing.join(", ")
+            ));
+        }
+        why.extend(f.bad_refs);
+        match self.cfg.frame {
+            Frame::Journal => format!("« [checked against the code: {}]\n", why.join("; ")),
+            Frame::Chat => format!("[checked against the code: {}]\n", why.join("; ")),
+        }
+    }
+
     /// The base of a new context after a rollover: the persona, the
     /// summary, the notes.
     fn base_after(&self, summary: &str) -> String {
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}« the journal continues.\n\n{}",
+                "{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}{}« the journal continues.\n\n{}",
                 self.cfg.system,
                 clock::datetime(clock::now_us()),
                 summary,
+                self.checked_line(summary),
                 self.notes_block(),
                 self.cfg.first_words
             ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
                 clock::datetime(clock::now_us()),
                 summary,
+                self.checked_line(summary),
                 self.notes_block()
             ),
         }
