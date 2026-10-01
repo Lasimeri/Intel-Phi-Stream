@@ -344,7 +344,14 @@ a second chain (`Chain`), which reflects on each line the journal ends.
 - It is opened with a marker, not a question: the line's J-space words
   (each word's lens probability summed over the line's tokens and blocks,
   the six likeliest), `« [beside the journal; on its mind in the line
-  above: ...]`. The marker's first token is decoded alone (the copy
+  above: ...]`, then its first words in its own voice, `On reflection,`
+  (as a summary begins "What I was working on: "): without them, on the
+  live service, the copy went on with the journal's structure and echoed
+  the marker or a « line back into the journal. Its tokens are the
+  likeliest that the live stream may write (no control token, no « or »
+  mark, no end of text), from the 16 likeliest; a reflection that only
+  repeats the frame, or says nothing, is dropped. The marker's first
+  token is decoded alone (the copy
   shares the live sequence's recurrent state until it writes its own, as
   a check's deliberation does), the rest and then each of its own tokens
   (greedy) in the live token's batch, until a newline after some text,

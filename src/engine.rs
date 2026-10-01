@@ -355,6 +355,11 @@ struct Chain {
 /// The longest reflection, and the least time between two.
 const CHAIN_MAX: usize = 64;
 const CHAIN_EVERY_US: i64 = 1_000_000;
+/// The reflection's first words, in its own voice (as a summary begins
+/// "What I was working on: "): without them the copy went on with the
+/// journal's structure, echoing the marker or a « line, on the live
+/// service.
+const CHAIN_PRIMER: &str = "On reflection,";
 
 struct Check {
     why: Why,
@@ -1258,11 +1263,11 @@ impl Engine {
         let shown: Vec<String> = words.into_iter().take(6).map(|w| w.0).collect();
         let marker = match self.cfg.frame {
             Frame::Journal => format!(
-                "\n« [beside the journal; on its mind in the line above: {}]\n",
+                "\n« [beside the journal; on its mind in the line above: {}]\n{CHAIN_PRIMER}",
                 shown.join(", ")
             ),
             Frame::Chat => format!(
-                "\n[beside your thoughts; on your mind in the line above: {}]\n",
+                "\n[beside your thoughts; on your mind in the line above: {}]\n{CHAIN_PRIMER}",
                 shown.join(", ")
             ),
         };
@@ -1291,6 +1296,32 @@ impl Engine {
         Ok(())
     }
 
+    /// The second chain's next token: the likeliest one that is not banned
+    /// for the live stream (control tokens, the « and » marks) nor an end
+    /// of text, so a reflection never writes a line from outside or speaks.
+    fn chain_token(&self, row: i32) -> Result<i32> {
+        // The 16 likeliest in one pass, then the first allowed: a check of
+        // every token of the vocabulary against the bans cost too much at
+        // every cycle.
+        let l = self.llm.logits(row)?;
+        let mut top: Vec<(i32, f32)> = Vec::with_capacity(17);
+        for (t, &x) in l.iter().enumerate() {
+            if top.len() < 16 || x > top[15].1 {
+                let at = top.iter().position(|e| x > e.1).unwrap_or(top.len());
+                top.insert(at, (t as i32, x));
+                top.truncate(16);
+            }
+        }
+        let allowed = |t: i32| {
+            !self.base_ban.contains(&t) && !self.speak_ban.contains(&t) && !self.llm.is_eog(t)
+        };
+        Ok(top
+            .iter()
+            .map(|e| e.0)
+            .find(|&t| allowed(t))
+            .unwrap_or(self.newline))
+    }
+
     /// The second chain's reflection ends: kept for the journal's next
     /// line (`keep`), or dropped (the journal moved under it: a rollover,
     /// a word written over); its sequence freed.
@@ -1300,8 +1331,13 @@ impl Engine {
         };
         self.llm.seq_rm(c.seq, -1, -1);
         self.free_seqs.push(c.seq);
-        let text = self.llm.text(&c.out).trim().to_string();
-        let outcome = if keep && !text.is_empty() {
+        let said = self.llm.text(&c.out).trim().to_string();
+        let text = format!("{CHAIN_PRIMER} {said}");
+        // What only repeats the journal's frame is no reflection.
+        let echo = said.is_empty()
+            || said.contains("beside the journal")
+            || said.contains("on its mind in the line");
+        let outcome = if keep && !echo {
             self.reflection = Some(text);
             "into the journal at its next line's end"
         } else if keep {
@@ -1881,7 +1917,7 @@ impl Engine {
             ])?;
             c.pos += lane.len() as i32;
             c.fed = c.prompt.len();
-            let t = self.llm.greedy(rows[1], true)?;
+            let t = self.chain_token(rows[1])?;
             let piece = self.llm.text(&[t]);
             c.out.push(t);
             let done = self.llm.is_eog(t)
