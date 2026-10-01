@@ -60,12 +60,18 @@ between nudges), `--feed FILE` at the start; `--mind` (read what is
 on its mind at every token, `src/mind.md`) with `--lens`,
 `--mind-layers`, `--mind-k`; `--reflect` (needs `--mind`: check the
 tokens it places, `src/reflect.md`) or `--reflect-dry` (deliberate, never
-change); `--horizon SECS` (show the text that far behind its placement at
+change), `--reflect-keep-at P` (keep's share of the choice at which a
+check keeps, 0.5; above 1 every check writes, a test of the rewind); `--horizon SECS` (show the text that far behind its placement at
 an even pace, `src/playout.md`; 0 by default, 1 with `--reflect`). The mind's and the loop's options are
 one group (`MindArgs`), the same for `serve`, `run` and `code stream`, so
 a measurement runs what the stream runs; the configuration is checked
 before the model is loaded. `tail --mind` prints the readings too;
-`tail` and `run` print every check's episode on stderr.
+`tail` and `run` print every check's episode on stderr. `--dev REPO`
+(`docs/dev.md`): develop that repository with Claude: the persona says
+so, `[read: PATH]` resolves there, `[prefer: ...]` lines are kept.
+`say --as NAME` names the speaker; `ask` says and waits for the next
+spoken line; `listen` prints spoken lines, notes, preferences, what was
+heard and changed words, one line each, for a monitor.
 
 The cards' backend is named by `GGML_BACKEND_PATH` (the sibling
 repository's `scripts/phi-ggml.sh` sets it and starts the workers, which

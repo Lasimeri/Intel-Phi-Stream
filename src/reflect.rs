@@ -40,6 +40,9 @@ pub struct ReflectConfig {
     pub answer_tokens: usize,
     /// Words on the mind shown in a question.
     pub words: usize,
+    /// A check keeps when keep's share of the choice is at least this (above
+    /// 1: every check writes, which tests the rewind).
+    pub keep_at: f32,
     /// Read-only: deliberate fully, never change a token (the measurement's
     /// third arm: the lanes' cost and numerics without the loop's effect).
     pub dry: bool,
@@ -58,6 +61,7 @@ impl Default for ReflectConfig {
             checks_per_min: 12,
             changes_per_min: 4,
             answer_tokens: 8,
+            keep_at: 0.5,
             words: 8,
             dry: false,
         }
@@ -304,16 +308,20 @@ impl Reflector {
 /// The question put to the deliberation, in the frame's own style, placed
 /// exactly where the token in question would go: the time, the token, the
 /// words on the mind there.
-pub fn question(frame: Frame, t_us: i64, chosen: &str, words: &[&str]) -> String {
+pub fn question(frame: Frame, t_us: Option<i64>, chosen: &str, words: &[&str]) -> String {
     let c = chosen.trim().replace('"', "'");
     let on = if words.is_empty() {
         "nothing in particular".to_string()
     } else {
         words.join(", ")
     };
+    // The time to the microsecond in the stream; none in a task (a
+    // measurement gives the same answer on every run).
+    let at = t_us
+        .map(|t| format!("at {}, ", clock::hms(t)))
+        .unwrap_or_default();
     let body = format!(
-        "at {}, a check on the next word: you were about to write \"{c}\" here; on your mind here: {on}. Is \"{c}\" right at this place? Keep it, or write the word to use instead.",
-        clock::hms(t_us)
+        "{at}a check on the next word: you were about to write \"{c}\" here; on your mind here: {on}. Is \"{c}\" right at this place? Keep it, or write the word to use instead."
     );
     match frame {
         Frame::Journal => format!("\n« [{body}]\n{DECISION}"),
@@ -477,6 +485,9 @@ pub struct Episode {
     /// model was not answering the question).
     pub keep: f32,
     pub fmt: f32,
+    /// The three likeliest next tokens of the deliberation at `Decision:`,
+    /// with their probabilities (where the mass `fmt` misses went).
+    pub top: Vec<(String, f32)>,
     /// The deliberation's answer as it wrote it.
     pub answer: String,
     pub outcome: Outcome,
@@ -518,6 +529,9 @@ pub fn line(e: &Episode) -> String {
         s.push_str(&format!(" back={a}-{b}"));
     }
     let words: Vec<String> = e.words.iter().map(|w| field(&w.replace(',', ""))).collect();
+    for (i, (t, p)) in e.top.iter().enumerate() {
+        s.push_str(&format!(" top{n}={} top{n}p={p:.4}", field(t), n = i + 1));
+    }
     s.push_str(&format!(
         " chosen={} to={} words={} answer={}",
         field(&e.chosen),
@@ -540,6 +554,7 @@ pub fn parse_line(s: &str) -> Option<Episode> {
         words: Vec::new(),
         keep: 0.0,
         fmt: 0.0,
+        top: Vec::new(),
         answer: String::new(),
         outcome: Outcome::Kept,
         to: String::new(),
@@ -578,6 +593,24 @@ pub fn parse_line(s: &str) -> Option<Episode> {
                     .collect()
             }
             "answer" => e.answer = unfield(v),
+            k if k.starts_with("top") => {
+                let (n, prob) = match k[3..].strip_suffix('p') {
+                    Some(n) => (n, true),
+                    None => (&k[3..], false),
+                };
+                let i: usize = n.parse().ok()?;
+                if i == 0 || i > 16 {
+                    return None;
+                }
+                while e.top.len() < i {
+                    e.top.push((String::new(), 0.0));
+                }
+                if prob {
+                    e.top[i - 1].1 = v.parse().ok()?;
+                } else {
+                    e.top[i - 1].0 = unfield(v);
+                }
+            }
             _ => {}
         }
     }
@@ -643,13 +676,21 @@ mod tests {
 
     #[test]
     fn the_question_carries_the_time_the_token_and_the_words() {
-        let q = question(Frame::Chat, clock::now_us(), " sort", &["order", "stable"]);
+        let q = question(
+            Frame::Chat,
+            Some(clock::now_us()),
+            " sort",
+            &["order", "stable"],
+        );
         assert!(
             q.starts_with("\n[at ") && q.ends_with("]\nDecision:"),
             "{q}"
         );
         assert!(q.contains("\"sort\"") && q.contains("order, stable"), "{q}");
-        assert!(question(Frame::Journal, 0, "x", &[]).starts_with("\n« [at "));
+        assert!(question(Frame::Journal, Some(0), "x", &[]).starts_with("\n« [at "));
+        // A task's question carries no time.
+        let t = question(Frame::Chat, None, " sort", &[]);
+        assert!(t.starts_with("\n[a check on the next word"), "{t}");
     }
 
     #[test]
@@ -771,6 +812,11 @@ mod tests {
             words: vec!["usize".into(), "index".into()],
             keep: 0.1875,
             fmt: 0.9312,
+            top: vec![
+                (" write".into(), 0.7),
+                ("\n".into(), 0.05),
+                (" a b".into(), 0.01),
+            ],
             answer: " write: usize, since it indexes\n".into(),
             outcome: Outcome::Changed,
             to: " usize".into(),

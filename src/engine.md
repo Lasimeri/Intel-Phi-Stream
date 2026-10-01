@@ -134,10 +134,27 @@ clock.
 **A task** (`Config::task`, `code.md`): the same engine stopped at the end
 of its first answer (`Event::Done` with its thinking tokens, then
 `Stopped`), with nothing put into the chain on the engine's account (no
-clock lines, nudges, reads, rollover), and a thinking budget after which
+clock lines, nudges, reads, rollover), no wall clock in its opening or in a
+check's question (a task is a measurement: greedy on a deterministic
+backend it gives the same answer on every run, which a time to the
+microsecond in the prompt prevented), and a thinking budget after which
 `</think>` is placed; `run` hands the model back, so one load serves a
 whole set of tasks. The run's sampling is set explicitly when the engine
 starts.
+
+**Development** (`--dev REPO`, `docs/dev.md`). The persona gains a
+paragraph after the person's instructions and the frame's mechanics: the
+stream develops REPO (the program it runs in) as a peer with Claude.
+- `[read: PATH]` resolves PATH in REPO.
+- `[prefer: ...]` lines are its preferences: kept in `preferences.md`,
+  announced as `prefers: ...`, and shown back with its notes. Claude
+  follows them within the person's instructions.
+- What is said can name its speaker (`Command::SayAs`): `« [time] Claude:
+  ...`.
+
+Its notes and preferences are shown to it in the opening as well as at a
+rollover, so a restarted stream starts from what it kept (not in a
+task).
 
 **The mind** (`--mind`, `mind.md`): after every decode that asked for a
 token, the residual of that token at the chosen blocks is read through

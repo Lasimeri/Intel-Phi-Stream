@@ -42,7 +42,9 @@ is. Closing the terminal leaves the stream running.
   the microsecond (`clock.md`). The mind view shows each reading's time
   the same way.
 
-Nothing is drawn with ratatui or any widget library: rows of styled runs
-are queued and flushed, the screen redrawn when something changed or
-every quarter second for the pulse. The service's lines are read on a
+Nothing is drawn with ratatui or any widget library: each frame is drawn
+into a fresh screen of styled cells, and only the cells that differ from
+the frame the terminal shows are written (`screen.md`, after BF++'s
+double-buffered TUI runtime). A frame is drawn when something changed or
+every quarter second for the pulse, and in full after a resize. The service's lines are read on a
 thread and handed to the drawing loop through a channel.

@@ -13,7 +13,8 @@ running mind and the 40-second load happens once.
   text as `text` lines and the last status, then every `text`, `status`,
   `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
-- `say TEXT` and `feed PATH` queue what is said or handed over (the file
+- `say TEXT`, `say-as NAME TEXT` (the speaker named, `docs/dev.md`) and
+  `feed PATH` queue what is said or handed over (the file
   is read here, in the service's own file system); `persona PATH` reads
   the file and hands the new persona to the engine, which rolls its
   context over onto it after a summary; `chunk N`, `temp T`, `pause`,

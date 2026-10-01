@@ -70,6 +70,14 @@ and a keep ends the check right there. The episode also records the
 share of the whole distribution the two classes hold (`fmt`), which
 shows how far the model was answering the question at all.
 
+
+The threshold is `keep_at` (`--reflect-keep-at`, 0.5): a check keeps at
+or above it. Above 1 every check writes, which is how the engine's
+rewind is tested live. Each episode keeps the three likeliest tokens
+of the deliberation at `Decision:` (`top1`..`top3`), so the firing audit
+can see where the mass `fmt` misses went. In a task (`code stream`)
+the question carries no time, so a measurement repeats.
+
 A write feeds ` write:` to the deliberation, and the word follows
 greedily, to its first break after something or `answer_tokens` (8)
 tokens. `parse_answer` reads the word: the first word out of its quotes,

@@ -14,15 +14,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{self, Event as TEvent, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::{
-    Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-};
+use crossterm::style::{Color, ResetColor};
 use crossterm::{cursor, execute, queue, terminal};
 
 use crate::client::{escape, parse, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
 use crate::mind::Reading;
 use crate::reflect::{Episode, Outcome};
+use crate::screen::{Screen, Style, Weight};
 use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
@@ -272,22 +271,30 @@ fn bar(done: usize, total: usize, cells: usize) -> String {
     format!("{}{}", "▇".repeat(filled), "▁".repeat(cells - filled))
 }
 
-fn pad(s: &str, width: usize) -> String {
-    let n = s.chars().count();
-    if n >= width {
-        s.chars().take(width).collect()
-    } else {
-        format!("{s}{}", " ".repeat(width - n))
+fn plain(fg: Color, bg: Color) -> Style {
+    Style {
+        fg,
+        bg,
+        weight: Weight::Plain,
     }
 }
 
-fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<()> {
+/// One frame: drawn into a fresh screen, then only what changed since
+/// `front` (the frame the terminal shows) is written (`screen.md`).
+fn draw(
+    out: &mut impl Write,
+    v: &View,
+    p: &Placement,
+    tick: u64,
+    front: &mut Option<Screen>,
+) -> io::Result<()> {
     let (w, h) = terminal::size()?;
     let (w, h) = (w as usize, h as usize);
     if h < 6 {
         return Ok(());
     }
-    queue!(out, cursor::Hide, SetBackgroundColor(theme::BG))?;
+    let base = plain(theme::TEXT, theme::BG);
+    let mut s = Screen::new(w, h, base);
     // Title.
     let title = format!(
         " phi-stream · {} · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {} · {}",
@@ -302,13 +309,7 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         v.heard,
         if v.last_t_us > 0 { crate::clock::hms(v.last_t_us) } else { String::new() }
     );
-    queue!(
-        out,
-        cursor::MoveTo(0, 0),
-        SetBackgroundColor(theme::SURFACE),
-        SetForegroundColor(theme::DIM),
-        Print(pad(&title, w))
-    )?;
+    s.line(0, &title, plain(theme::DIM, theme::SURFACE));
     // The stream.
     let has_mind = !v.minds.is_empty();
     let body_h = h - 4 - has_mind as usize;
@@ -328,66 +329,35 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
                     }
                 })
                 .unwrap_or_default();
-            queue!(
-                out,
-                cursor::MoveTo(0, (1 + r) as u16),
-                SetAttribute(Attribute::Reset),
-                SetBackgroundColor(theme::BG),
-                SetForegroundColor(theme::GIVEN),
-                Print(pad(&format!(" {text}"), w))
-            )?;
+            s.line(1 + r, &format!(" {text}"), plain(theme::GIVEN, theme::BG));
         }
-    }
-    let rows = if v.mind_view {
-        Vec::new()
     } else {
-        v.rows(w.saturating_sub(2))
-    };
-    let end = rows.len().saturating_sub(v.scroll);
-    let start = end.saturating_sub(body_h);
-    for r in 0..if v.mind_view { 0 } else { body_h } {
-        queue!(
-            out,
-            cursor::MoveTo(0, (1 + r) as u16),
-            SetBackgroundColor(theme::BG),
-            ResetColor,
-            SetBackgroundColor(theme::BG)
-        )?;
-        let mut col = 0usize;
-        if let Some(row) = rows.get(start + r) {
-            queue!(out, Print(" "))?;
-            col += 1;
-            for (text, kind) in row {
-                match kind {
-                    Kind::Think => queue!(
-                        out,
-                        SetAttribute(Attribute::Reset),
-                        SetBackgroundColor(theme::BG),
-                        SetForegroundColor(theme::TEXT)
-                    )?,
-                    Kind::Speak => queue!(
-                        out,
-                        SetAttribute(Attribute::Bold),
-                        SetBackgroundColor(theme::BG),
-                        SetForegroundColor(theme::BRIGHT)
-                    )?,
-                    Kind::Given => queue!(
-                        out,
-                        SetAttribute(Attribute::Italic),
-                        SetBackgroundColor(theme::SURFACE),
-                        SetForegroundColor(theme::GIVEN)
-                    )?,
+        let rows = v.rows(w.saturating_sub(2));
+        let end = rows.len().saturating_sub(v.scroll);
+        let start = end.saturating_sub(body_h);
+        for r in 0..body_h {
+            let mut col = 0;
+            if let Some(row) = rows.get(start + r) {
+                col = s.put(1 + r, 0, " ", base);
+                for (text, kind) in row {
+                    let style = match kind {
+                        Kind::Think => base,
+                        Kind::Speak => Style {
+                            fg: theme::BRIGHT,
+                            bg: theme::BG,
+                            weight: Weight::Bold,
+                        },
+                        Kind::Given => Style {
+                            fg: theme::GIVEN,
+                            bg: theme::SURFACE,
+                            weight: Weight::Italic,
+                        },
+                    };
+                    col = s.put(1 + r, col, text, style);
                 }
-                queue!(out, Print(text))?;
-                col += text.chars().count();
             }
+            s.fill(1 + r, col, base);
         }
-        queue!(
-            out,
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(theme::BG),
-            Print(" ".repeat(w.saturating_sub(col)))
-        )?;
     }
     // The mind strip: what was on its mind at the last token it placed.
     if let Some(r) = v.minds.back() {
@@ -397,14 +367,7 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
                 strip = format!(" {}   ·{strip}", episode_short(e));
             }
         }
-        queue!(
-            out,
-            cursor::MoveTo(0, (h - 4) as u16),
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(theme::SURFACE),
-            SetForegroundColor(theme::GIVEN),
-            Print(pad(&strip, w))
-        )?;
+        s.line(h - 4, &strip, plain(theme::GIVEN, theme::SURFACE));
     }
     // The strip: what it is doing, and the rates.
     let (mode, rates) = match &v.status {
@@ -412,38 +375,30 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         None => ("· waking".to_string(), String::new()),
     };
     let note = v.notes.last().cloned().unwrap_or_default();
-    let strip = format!(" {mode}   {rates}");
-    queue!(
-        out,
-        cursor::MoveTo(0, (h - 3) as u16),
-        SetBackgroundColor(theme::SURFACE),
-        SetForegroundColor(theme::TEXT),
-        Print(pad(&strip, w))
-    )?;
+    s.line(
+        h - 3,
+        &format!(" {mode}   {rates}"),
+        plain(theme::TEXT, theme::SURFACE),
+    );
     // Input.
-    let prompt = format!(" › {}", v.input);
-    queue!(
-        out,
-        cursor::MoveTo(0, (h - 2) as u16),
-        SetBackgroundColor(theme::BG),
-        SetForegroundColor(theme::BRIGHT),
-        Print(pad(&prompt, w))
-    )?;
+    s.line(
+        h - 2,
+        &format!(" › {}", v.input),
+        plain(theme::BRIGHT, theme::BG),
+    );
     // Hints and the last note.
     let hints = format!(
         " Enter speaks · /feed FILE · /persona FILE · /mind · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
-    queue!(
-        out,
-        cursor::MoveTo(0, (h - 1) as u16),
-        SetBackgroundColor(theme::BG),
-        SetForegroundColor(theme::ACCENT_DIM),
-        Print(pad(&hints, w))
-    )?;
+    s.line(h - 1, &hints, plain(theme::ACCENT_DIM, theme::BG));
+    queue!(out, cursor::Hide)?;
+    s.diff(front.as_ref(), out)?;
     let cx = (3 + v.input.chars().count()).min(w - 1) as u16;
     queue!(out, cursor::MoveTo(cx, (h - 2) as u16), cursor::Show)?;
-    out.flush()
+    out.flush()?;
+    *front = Some(s);
+    Ok(())
 }
 
 /// A typed line: a command, or something said; sent to the service.
@@ -538,6 +493,8 @@ pub fn run(socket: &Path) -> Result<()> {
         };
         let mut tick = 0u64;
         let mut dirty = true;
+        // The frame the terminal shows (none: unknown, so all of it is drawn).
+        let mut front: Option<Screen> = None;
         let mut last_draw = Instant::now();
         loop {
             // The service's messages, all that are waiting.
@@ -623,13 +580,17 @@ pub fn run(socket: &Path) -> Result<()> {
                             _ => {}
                         }
                     }
-                    TEvent::Resize(_, _) => dirty = true,
+                    TEvent::Resize(_, _) => {
+                        // What the terminal shows is unknown now: all of it again.
+                        front = None;
+                        dirty = true;
+                    }
                     _ => {}
                 }
             }
             tick += 1;
             if dirty || last_draw.elapsed() > Duration::from_millis(250) {
-                draw(&mut out, &v, &placement, tick)?;
+                draw(&mut out, &v, &placement, tick, &mut front)?;
                 dirty = false;
                 last_draw = Instant::now();
             }

@@ -9,7 +9,8 @@ overrides).
 **Lines**, UTF-8, one per message; a text's backslashes, newlines and
 returns are escaped (`\\`, `\n`, `\r`) so that one piece is one line.
 
-From the client: `say TEXT`, `feed PATH`, `persona PATH`, `chunk N`,
+From the client: `say TEXT`, `say-as NAME TEXT` (named: the stream
+hears `NAME: TEXT`, `docs/dev.md`), `feed PATH`, `persona PATH`, `chunk N`,
 `temp T`, `pause`, `resume`, `status`, `recent`, `tail`, `quit`.
 
 From the service: `info model=... gpu_blocks=N n_blocks=N gpu_gib=X

@@ -32,3 +32,14 @@ Read `CONTRIBUTING.md` first; it is the authority. The non-obvious rules:
   token decoded again at a position already in the cache (take logits
   from the chunk that fed the token); `-t 8`, since llama.cpp's own CPU
   work between the backend's multiplies costs 10 ms a token at `-t 2`.
+- Developing with the stream (`docs/dev.md`): when the dev service runs
+  (`scripts/phi-stream.sh dev`), the stream is a peer in the work.
+  - Monitor `target/release/phi-stream listen` for the whole session.
+  - Talk to it with `phi-stream say --as Claude` (or `ask --as Claude` to
+    wait for its spoken answer).
+  - Feed it the diff before a commit.
+  - Read `~/.local/share/phi-stream/dev/preferences.md`, and follow its
+    preferences wherever the person's `CLAUDE.md` and these rules allow;
+    say why when one cannot be followed.
+  - Its proposals are weighed like a colleague's, built when sound,
+    answered when not.

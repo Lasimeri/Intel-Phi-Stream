@@ -103,6 +103,9 @@ pub enum Event {
 pub enum Command {
     /// Something said to the stream, and when it was heard (microseconds).
     Say(String, i64),
+    /// Something said by someone named (who, what, when): the stream hears
+    /// who is speaking (in development: the person, or Claude).
+    SayAs(String, String, i64),
     /// A document handed over, with its label and when it was handed over.
     Feed(String, String, i64),
     Pause,
@@ -181,6 +184,9 @@ pub struct Config {
     /// Check the tokens it places, per token, beside the live one
     /// (`reflect.rs`; needs `mind`); none: no checks.
     pub reflect: Option<ReflectConfig>,
+    /// The repository the stream develops with Claude (`docs/dev.md`): its reads
+    /// resolve there, its persona says so; none: no development.
+    pub dev: Option<PathBuf>,
 }
 
 /// The base of the personality when no file gives one.
@@ -208,16 +214,35 @@ pub fn compose_task(base: &str) -> String {
     )
 }
 
+/// The journal's development mechanics (`--dev REPO`): the program it
+/// runs in, developed with Claude, by its own preferences within the
+/// person's instructions.
+const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
+
+/// The chat frame's development mechanics.
+const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
-/// (their `CLAUDE.md`) or `DEFAULT_BASE`.
-pub fn compose(base: &str, frame: Frame) -> String {
+/// (their `CLAUDE.md`) or `DEFAULT_BASE`; with `dev`, the development
+/// mechanics after them (`docs/dev.md`).
+pub fn compose(base: &str, frame: Frame, dev: Option<&Path>) -> String {
     // The base as a quoted document: every line prefixed, so that it reads
     // as something cited, never as the journal's own voice.
     let quoted: String = base.trim().lines().map(|l| format!("> {l}\n")).collect();
+    let dev = |t: &str| match dev {
+        Some(r) => format!(" {}", t.replace("{repo}", &r.display().to_string())),
+        None => String::new(),
+    };
     match frame {
-        Frame::Journal => format!("{PREAMBLE_JOURNAL}\n\n{quoted}\n{MECHANICS_JOURNAL}"),
-        Frame::Chat => format!("{PREAMBLE_CHAT}\n\n{quoted}\n{MECHANICS_CHAT}"),
+        Frame::Journal => format!(
+            "{PREAMBLE_JOURNAL}\n\n{quoted}\n{MECHANICS_JOURNAL}{}",
+            dev(DEV_JOURNAL)
+        ),
+        Frame::Chat => format!(
+            "{PREAMBLE_CHAT}\n\n{quoted}\n{MECHANICS_CHAT}{}",
+            dev(DEV_CHAT)
+        ),
     }
 }
 
@@ -299,6 +324,8 @@ struct Check {
     fmt: f32,
     writing: bool,
     lane_next: Vec<i32>,
+    /// The three likeliest tokens at `Decision:` and their probabilities.
+    top: Vec<(i32, f32)>,
     /// The held index of the first piece at or after the token: nothing
     /// from it on goes out until the check ends.
     hold_from: u64,
@@ -353,6 +380,8 @@ pub struct Engine {
     reseat: bool,
     rollovers: u32,
     notes: Vec<String>,
+    /// Its preferences, `[prefer: ...]` lines (`preferences.md`), kept like notes.
+    prefs: Vec<String>,
     chunk: usize,
     /// The last live tokens sampled, for the circling check.
     generated: VecDeque<i32>,
@@ -452,6 +481,7 @@ impl Engine {
         fs::create_dir_all(&cfg.workspace)
             .with_context(|| format!("making {}", cfg.workspace.display()))?;
         let notes = read_notes(&cfg.workspace.join("notes.md"));
+        let prefs = read_notes(&cfg.workspace.join("preferences.md"));
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -511,6 +541,7 @@ impl Engine {
             reseat: false,
             rollovers: 0,
             notes,
+            prefs,
             chunk,
             generated: VecDeque::new(),
             gen_count: 0,
@@ -671,25 +702,41 @@ impl Engine {
     /// The opening: the persona, then the first thing from outside, with
     /// the date and time it begins at.
     fn opening(&self) -> String {
-        let when = clock::datetime(clock::now_us());
+        // A task is a measurement: no wall clock in its text, so it gives the
+        // same answer on every run (greedy, on a deterministic backend).
+        let when = if self.cfg.task {
+            String::new()
+        } else {
+            format!("[{}] ", clock::datetime(clock::now_us()))
+        };
+        // What it kept from before (a restart): its notes and preferences.
+        let kept = if self.cfg.task {
+            String::new()
+        } else {
+            self.notes_block()
+        };
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n=== the journal ===\n\n« [{when}] {}\n\n{}",
+                "{}\n\n=== the journal ===\n\n« {when}{}\n{kept}\n{}",
                 self.cfg.system, self.cfg.seed, self.cfg.first_words
             ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{when}] {}<|im_end|>\n<|im_start|>assistant\n<think>\n",
-                self.cfg.system, self.cfg.seed
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{when}{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                self.cfg.system,
+                self.cfg.seed,
+                if kept.is_empty() { String::new() } else { format!("\n{kept}") }
             ),
         }
     }
 
     /// Something said, with the real time it was heard at (`t_us`).
-    fn framed_say(&self, text: &str, t_us: i64) -> String {
+    fn framed_say(&self, text: &str, t_us: i64, who: Option<&str>) -> String {
         let at = clock::hms(t_us);
-        match self.cfg.frame {
-            Frame::Journal => format!("\n« [{at}] {}\n", text.trim()),
-            Frame::Chat => format!("\n[at {at} they say: \"{}\"]\n", text.trim()),
+        match (self.cfg.frame, who) {
+            (Frame::Journal, None) => format!("\n« [{at}] {}\n", text.trim()),
+            (Frame::Journal, Some(w)) => format!("\n« [{at}] {w}: {}\n", text.trim()),
+            (Frame::Chat, None) => format!("\n[at {at} they say: \"{}\"]\n", text.trim()),
+            (Frame::Chat, Some(w)) => format!("\n[at {at} {w} says: \"{}\"]\n", text.trim()),
         }
     }
 
@@ -720,15 +767,24 @@ impl Engine {
         self.framed_system("your memory is nearly full. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---")
     }
 
+    /// Its notes and its preferences, as it is shown them again (a
+    /// rollover, a fresh start); empty when it has neither.
     fn notes_block(&self) -> String {
-        if self.notes.is_empty() {
-            return String::new();
-        }
-        let lines: Vec<String> = self.notes.iter().map(|n| format!("- {n}")).collect();
-        match self.cfg.frame {
-            Frame::Journal => format!("« [your notes:]\n{}\n", lines.join("\n")),
-            Frame::Chat => format!("Your notes:\n{}\n", lines.join("\n")),
-        }
+        let block = |title: &str, items: &[String]| -> String {
+            if items.is_empty() {
+                return String::new();
+            }
+            let lines: Vec<String> = items.iter().map(|n| format!("- {n}")).collect();
+            match self.cfg.frame {
+                Frame::Journal => format!("« [your {title}:]\n{}\n", lines.join("\n")),
+                Frame::Chat => format!("Your {title}:\n{}\n", lines.join("\n")),
+            }
+        };
+        format!(
+            "{}{}",
+            block("notes", &self.notes),
+            block("preferences", &self.prefs)
+        )
     }
 
     /// The base of a new context after a rollover: the persona, the
@@ -797,6 +853,11 @@ impl Engine {
             if !body.is_empty() {
                 self.add_note(body);
             }
+        } else if let Some(body) = l.strip_prefix("[prefer:").and_then(|r| r.strip_suffix(']')) {
+            let body = body.trim();
+            if !body.is_empty() {
+                self.add_preference(body);
+            }
         } else if let Some(path) = l.strip_prefix("[read:").and_then(|r| r.strip_suffix(']')) {
             let path = path.trim();
             if !path.is_empty() {
@@ -812,6 +873,21 @@ impl Engine {
             let _ = writeln!(f, "- {body}");
         }
         self.note(format!("noted: {body}"));
+    }
+
+    /// A preference it stated: kept (`preferences.md`), shown to it again
+    /// with its notes, and announced (`prefers: ...`) for whoever develops
+    /// with it (`docs/dev.md`).
+    fn add_preference(&mut self, body: &str) {
+        if self.prefs.iter().any(|p| p == body) {
+            return;
+        }
+        self.prefs.push(body.to_string());
+        let path = self.cfg.workspace.join("preferences.md");
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "- {body}");
+        }
+        self.note(format!("prefers: {body}"));
     }
 
     /// The last 192 live tokens hold a 6-gram five times or more.
@@ -1217,8 +1293,10 @@ impl Engine {
         };
         let t_us = clock::now_us();
         let shown: Vec<&str> = words.iter().map(String::as_str).collect();
+        // A task's question carries no time: a measurement repeats.
+        let shown_at = (!self.cfg.task).then_some(t_us);
         let question = self.tok(
-            &reflect::question(self.cfg.frame, t_us, &text, &shown),
+            &reflect::question(self.cfg.frame, shown_at, &text, &shown),
             false,
         )?;
         let snap = self.free_seqs.pop().unwrap();
@@ -1245,6 +1323,7 @@ impl Engine {
             fmt: 0.0,
             writing: false,
             lane_next: Vec::new(),
+            top: Vec::new(),
             hold_from: self.released + self.held.len() as u64,
             saved: self.save(),
             t_us,
@@ -1342,7 +1421,20 @@ impl Engine {
                         / z
                 };
                 let (pk, pw) = (mass(k), mass(w));
-                choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32));
+                // The three likeliest tokens: where the mass the two miss went.
+                let mut top: Vec<(i32, f32)> = Vec::with_capacity(4);
+                for (t, &x) in l.iter().enumerate() {
+                    if top.len() < 3 || x > top[2].1 {
+                        let at = top.iter().position(|e| x > e.1).unwrap_or(top.len());
+                        top.insert(at, (t as i32, x));
+                        top.truncate(3);
+                    }
+                }
+                let top = top
+                    .into_iter()
+                    .map(|(t, x)| (t, ((x as f64 - m).exp() / z) as f32))
+                    .collect::<Vec<_>>();
+                choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32, top));
             } else {
                 d_tok = Some(self.llm.greedy(row, true)?);
             }
@@ -1361,6 +1453,7 @@ impl Engine {
             .map(|c| c.2.clone())
             .unwrap_or_default();
         let limit = self.reflector.as_ref().map_or(8, |r| r.cfg.answer_tokens);
+        let keep_at = self.reflector.as_ref().map_or(0.5, |r| r.cfg.keep_at);
         let c = self.check.as_mut().unwrap();
         if in_question {
             c.fed += lane.len();
@@ -1369,10 +1462,11 @@ impl Engine {
         }
         c.d_len += lane.len();
         let mut ended = false;
-        if let Some((keep, fmt)) = choice {
+        if let Some((keep, fmt, top)) = choice {
             c.keep = keep;
             c.fmt = fmt;
-            if keep >= 0.5 {
+            c.top = top;
+            if keep >= keep_at {
                 ended = true;
             } else {
                 c.writing = true;
@@ -1485,6 +1579,11 @@ impl Engine {
             words: c.words,
             keep: c.keep,
             fmt: c.fmt,
+            top: c
+                .top
+                .iter()
+                .map(|&(t, p)| (self.llm.text(&[t]), p))
+                .collect(),
             answer,
             outcome,
             to,
@@ -1533,7 +1632,8 @@ impl Engine {
 
     /// A file the mind asked for: read it into the queue, or tell it why not.
     fn read_request(&mut self, path: &str) -> Result<()> {
-        let p = resolve(path, &self.cfg.workspace);
+        // In development, paths are the repository's (`docs/dev.md`).
+        let p = resolve(path, self.cfg.dev.as_deref().unwrap_or(&self.cfg.workspace));
         let outcome = fs::metadata(&p).map_err(|e| e.to_string()).and_then(|m| {
             if !m.is_file() {
                 Err("not a regular file".to_string())
@@ -1731,8 +1831,13 @@ impl Engine {
         match cmd {
             Command::Say(s, t) => {
                 self.last_outside_mono = clock::mono_us();
-                let text = self.framed_say(&s, t);
+                let text = self.framed_say(&s, t, None);
                 self.queue.push_back((text, "heard".into()));
+            }
+            Command::SayAs(who, s, t) => {
+                self.last_outside_mono = clock::mono_us();
+                let text = self.framed_say(&s, t, Some(&who));
+                self.queue.push_back((text, format!("heard {who}")));
             }
             Command::Feed(s, label, t) => {
                 self.last_outside_mono = clock::mono_us();
@@ -1748,7 +1853,7 @@ impl Engine {
                 self.llm.set_sampling(&s);
             }
             Command::Persona(text) => {
-                self.cfg.system = compose(&text, self.cfg.frame);
+                self.cfg.system = compose(&text, self.cfg.frame, self.cfg.dev.as_deref());
                 self.reseat = true;
                 let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
                 self.note("a new persona: the context rolls over onto it after a summary".into());
@@ -1882,6 +1987,24 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn development_follows_the_person_s_instructions() {
+        let base = "Be concise.\nNo em dash.";
+        let plain = compose(base, Frame::Journal, None);
+        assert!(!plain.contains("[prefer:"));
+        let dev = compose(base, Frame::Journal, Some(Path::new("/r/Intel Phi Stream")));
+        assert!(
+            dev.contains("> Be concise.\n> No em dash.\n"),
+            "the base quoted"
+        );
+        assert!(dev.contains("/r/Intel Phi Stream") && dev.contains("[prefer: ...]"));
+        // The preferences are bounded by the instructions, and come after them.
+        assert!(dev.contains("where the two conflict, those instructions win"));
+        assert!(dev.find("> Be concise.").unwrap() < dev.find("[prefer:").unwrap());
+        let chat = compose(base, Frame::Chat, Some(Path::new("/r")));
+        assert!(chat.contains("You also develop software") && chat.contains("/r"));
+    }
 
     #[test]
     fn notes_are_dash_lines() {

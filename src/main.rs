@@ -19,6 +19,7 @@ mod playout;
 mod probe;
 mod readout;
 mod reflect;
+mod screen;
 mod serve;
 mod split;
 mod sys;
@@ -169,6 +170,10 @@ struct StreamArgs {
     /// Hand over a file at the start.
     #[arg(long)]
     feed: Option<String>,
+    /// Develop the repository at REPO with Claude (docs/dev.md): the persona says
+    /// so, [read: PATH] resolves there, [prefer: ...] lines are kept.
+    #[arg(long, value_name = "REPO")]
+    dev: Option<String>,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -199,6 +204,10 @@ struct MindArgs {
     /// As --reflect, read-only: every deliberation runs, no token changes.
     #[arg(long, conflicts_with = "reflect")]
     reflect_dry: bool,
+    /// A check keeps when keep's share of its choice is at least this (0.5;
+    /// above 1 every check writes: a test of the rewind, reflect.md).
+    #[arg(long, default_value_t = 0.5)]
+    reflect_keep_at: f32,
 }
 
 impl MindArgs {
@@ -216,6 +225,7 @@ impl MindArgs {
         });
         let r = reflecting.then(|| reflect::ReflectConfig {
             dry: self.reflect_dry,
+            keep_at: self.reflect_keep_at,
             ..Default::default()
         });
         Ok((m, r))
@@ -233,8 +243,27 @@ enum Cmd {
     Tui,
     /// Say something to the stream.
     Say {
+        /// Who is speaking (the stream hears the name; default: no name).
+        #[arg(long = "as", value_name = "NAME")]
+        who: Option<String>,
         text: Vec<String>,
     },
+    /// Say something and wait for what the stream says aloud next (its
+    /// spoken line), printed on stdout (docs/dev.md).
+    Ask {
+        #[arg(long = "as", value_name = "NAME")]
+        who: Option<String>,
+        /// Give up after this many seconds.
+        #[arg(long, default_value_t = 180)]
+        timeout: u64,
+        /// Also print its thoughts since the message (on stderr).
+        #[arg(long)]
+        thoughts: bool,
+        text: Vec<String>,
+    },
+    /// What it says aloud, notes, prefers, and the checks that changed a
+    /// word, one line each as it happens (for a monitor; docs/dev.md).
+    Listen,
     /// Hand a file over.
     Feed {
         path: String,
@@ -503,6 +532,14 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         FrameArg::Chat => Frame::Chat,
     };
     let workspace = PathBuf::from(expand_home(&s.workspace));
+    // The repository it develops with Claude (docs/dev.md), checked now.
+    let dev = match &s.dev {
+        Some(r) => Some(
+            std::fs::canonicalize(expand_home(r))
+                .with_context(|| format!("--dev {r}: no such directory"))?,
+        ),
+        None => None,
+    };
     let system = match &s.system {
         Some(p) => {
             std::fs::read_to_string(expand_home(p)).with_context(|| format!("reading {p}"))?
@@ -522,7 +559,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
                     }
                 }
             };
-            compose(&base, frame)
+            compose(&base, frame, dev.as_deref())
         }
     };
     let (mind, reflect) = s.mind.configs()?;
@@ -554,6 +591,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         workspace,
         mind,
         reflect,
+        dev,
     })
 }
 
@@ -780,13 +818,153 @@ fn tail(socket: &Path, with_status: bool, with_mind: bool) -> Result<()> {
     Ok(())
 }
 
+/// The socket line that says `text`, named when `who` is given (`docs/dev.md`).
+fn say_line(who: Option<&str>, text: &str) -> String {
+    match who {
+        Some(w) => format!(
+            "say-as {} {}",
+            w.split_whitespace().collect::<Vec<_>>().join("_"),
+            escape(text)
+        ),
+        None => format!("say {}", escape(text)),
+    }
+}
+
+/// The service's lines, on a thread, into a channel (so the caller can
+/// stop at a deadline).
+fn lines_of(mut c: Client) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(Some(l)) = c.line() {
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// `ask`: say `text`, then print the next line the stream says aloud
+/// (what it placed after the message was heard, its spoken pieces up to
+/// the end of their line). Its thoughts meanwhile go to stderr when asked.
+fn converse(
+    socket: &Path,
+    who: Option<&str>,
+    text: &str,
+    timeout: u64,
+    thoughts: bool,
+) -> Result<()> {
+    let mut c = Client::connect(socket)?;
+    let t0 = clock::now_us();
+    c.ask(&say_line(who, text))?;
+    c.send("tail")?;
+    let rx = lines_of(c);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let mut speech = String::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match rx.recv_timeout(left) {
+            Ok(l) => l,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("it did not speak within {timeout} s (it went on thinking)")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("the service closed the connection")
+            }
+        };
+        match parse(&line) {
+            Msg::Text(t, Kind::Speak, at) if at >= t0 => {
+                speech.push_str(&t);
+                if let Some(i) = speech.find('\n') {
+                    let said = speech[..i].trim().trim_start_matches('»').trim();
+                    if !said.is_empty() {
+                        println!("{said}");
+                        return Ok(());
+                    }
+                    speech = speech[i + 1..].to_string();
+                }
+            }
+            Msg::Text(t, Kind::Think, at) if at >= t0 && thoughts => eprint!("{t}"),
+            Msg::Bye => anyhow::bail!("the service stopped"),
+            _ => {}
+        }
+    }
+}
+
+/// `listen`: from now on, what it says aloud, its notes and preferences,
+/// what it hears, and the checks that changed a word, one line each with
+/// the time, flushed line by line (a monitor's events).
+fn listen(socket: &Path) -> Result<()> {
+    let mut c = Client::connect(socket)?;
+    let t0 = clock::now_us();
+    c.send("tail")?;
+    let mut out = std::io::stdout();
+    let (mut speech, mut speech_t) = (String::new(), 0i64);
+    let (mut heard, mut heard_t) = (String::new(), 0i64);
+    while let Some(line) = c.line()? {
+        match parse(&line) {
+            Msg::Text(t, Kind::Speak, at) if at >= t0 => {
+                if speech.is_empty() {
+                    speech_t = at;
+                }
+                speech.push_str(&t);
+                while let Some(i) = speech.find('\n') {
+                    let said = speech[..i]
+                        .trim()
+                        .trim_start_matches('»')
+                        .trim()
+                        .to_string();
+                    if !said.is_empty() {
+                        writeln!(out, "{} said: {said}", clock::hms(speech_t))?;
+                    }
+                    speech = speech[i + 1..].to_string();
+                    speech_t = at;
+                }
+            }
+            Msg::Text(t, Kind::Given, at) if at >= t0 => {
+                // What it heard or was handed: its first line.
+                if heard.is_empty() {
+                    heard_t = at;
+                }
+                heard.push_str(&t);
+                if let Some(l) = heard.lines().map(str::trim).find(|l| !l.is_empty()) {
+                    let l: String = l.chars().take(200).collect();
+                    writeln!(out, "{} heard: {l}", clock::hms(heard_t))?;
+                }
+                heard.clear();
+            }
+            Msg::Note(n) => writeln!(out, "{} {n}", clock::hms(clock::now_us()))?,
+            Msg::Reflect(e) if e.outcome == reflect::Outcome::Changed => writeln!(
+                out,
+                "{} changed {:?} to {:?} at position {} ({})",
+                clock::hms(e.t_us),
+                e.chosen.trim(),
+                e.to.trim(),
+                e.pos,
+                e.why.name()
+            )?,
+            Msg::Bye => break,
+            _ => {}
+        }
+        out.flush()?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let socket = cli.socket.clone().unwrap_or_else(default_socket);
     match cli.cmd {
         Cmd::Serve { stream } => serve_cmd(&cli.model, &stream, socket),
         Cmd::Tui => tui::run(&socket),
-        Cmd::Say { text } => ask(&socket, &format!("say {}", escape(&text.join(" ")))),
+        Cmd::Say { who, text } => ask(&socket, &say_line(who.as_deref(), &text.join(" "))),
+        Cmd::Ask {
+            who,
+            timeout,
+            thoughts,
+            text,
+        } => converse(&socket, who.as_deref(), &text.join(" "), timeout, thoughts),
+        Cmd::Listen => listen(&socket),
         Cmd::Feed { path } => ask(&socket, &format!("feed {}", expand_home(&path))),
         Cmd::Tail { status, mind } => tail(&socket, status, mind),
         Cmd::Status => {
@@ -871,7 +1049,7 @@ fn main() -> Result<()> {
                 );
                 let q = reflect::question(
                     Frame::Chat,
-                    clock::now_us(),
+                    Some(clock::now_us()),
                     " scheduler",
                     &["backend", "graph", "split"],
                 );
@@ -887,7 +1065,7 @@ fn main() -> Result<()> {
             }
             let a = format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[The stream begins.]<|im_end|>\n<|im_start|>assistant\n<think>\n",
-                compose(DEFAULT_BASE, Frame::Chat)
+                compose(DEFAULT_BASE, Frame::Chat, None)
             );
             let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
             gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)

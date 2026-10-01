@@ -8,6 +8,7 @@
 # `gate`, `run`, `serve` in the foreground). See phi-stream.md.
 #
 #   scripts/phi-stream.sh start [serve options]   # the service, in tmux session phi-stream
+#   scripts/phi-stream.sh dev [serve options]     # the service developing this repo with Claude
 #   scripts/phi-stream.sh attach                  # the terminal (Ctrl-C leaves it running)
 #   scripts/phi-stream.sh say "hello"             # a line to it
 #   scripts/phi-stream.sh tail                    # the stream on stdout
@@ -80,6 +81,23 @@ case "$sub" in
         tmux kill-session -t "$session" 2>/dev/null || true
         echo "stopped"
         ;;
+    dev)
+        # The service developing this repository with Claude (docs/dev.md):
+        # its persona says so, its reads resolve here, its notes and
+        # preferences live in their own workspace; the mind read and its
+        # words checked. Everything but the word `dev` goes to `start`.
+        rest=()
+        dropped=0
+        for a in "$@"; do
+            if [ "$dropped" = 0 ] && [ "$a" = dev ]; then
+                dropped=1
+                continue
+            fi
+            rest+=("$a")
+        done
+        exec "$0" start --dev "$root" --mind --reflect \
+            --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev}" "${rest[@]}"
+        ;;
     attach)
         exec "$bin" tui
         ;;
@@ -87,7 +105,7 @@ case "$sub" in
         launch "$@"
         ;;
     "")
-        echo "usage: $0 start|stop|attach|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
+        echo "usage: $0 start|dev|stop|attach|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
         exit 2
         ;;
     *)

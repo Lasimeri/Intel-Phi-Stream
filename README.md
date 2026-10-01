@@ -125,8 +125,15 @@ gated steps, each usable and recorded:
 - **Seamless on screen**: the text is shown on the display's own clock
   (`--horizon`, [`src/playout.md`](src/playout.md), after BF++'s scene
   oracle), a second behind its placement at an even pace. With the loop
-  on, the largest gap a reader saw in the live stream fell from 419 ms to
-  53 ms ([`docs/results/2026-10-01-reflect.md`](docs/results/2026-10-01-reflect.md)).
+  on, the same checks shown as placed leave stalls up to 509 ms; through
+  the playout the largest gap a reader saw was 53 ms ([`docs/results/2026-10-01-reflect.md`](docs/results/2026-10-01-reflect.md)).
+- **Developing with the stream** ([`docs/dev.md`](docs/dev.md)):
+  `scripts/phi-stream.sh dev` runs the stream as a peer of Claude Code in
+  this repository. It reads its own source (`[read: PATH]`), states its
+  preferences (`[prefer: ...]`, kept and honoured within the person's
+  `CLAUDE.md`), and says what it proposes. Claude talks to it with
+  `phi-stream ask --as Claude`, and hears it in real time through
+  `phi-stream listen` under a monitor.
 - Next:
   - the code measurement of the loop;
   - the sweep that sets its balance;
@@ -178,7 +185,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/llm.rs` | the model and the context over llama.cpp's C API; lanes of a cycle; the sampler |
 | `src/engine.rs` | the stream: hearing, reading beside, the join, the rollover, the nudges |
 | `src/serve.rs`, `src/client.rs` | the service that owns the model and its socket; the wire and the client side |
-| `src/tui.rs` | the terminal, a client of the service |
+| `src/tui.rs`, `src/screen.rs` | the terminal, a client of the service; its double-buffered screen, written by the cells that changed |
 | `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence, and the reflection loop's lanes against the same decodes without a snapshot |
 | `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
 | `src/clock.rs` | the wall clock the stream is kept against, to the microsecond |

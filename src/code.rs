@@ -567,6 +567,7 @@ pub fn stream(
             workspace: tdir.join("ws"),
             mind: o.mind.clone(),
             reflect: o.reflect.clone(),
+            dev: None,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

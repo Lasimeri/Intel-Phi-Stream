@@ -4,6 +4,7 @@ The launcher: the service and its clients.
 
 ```
 scripts/phi-stream.sh start [serve options]   # the service in tmux session phi-stream (PHI_STREAM_SESSION)
+scripts/phi-stream.sh dev [serve options]     # the same, developing this repository with Claude: start --dev <repo> --mind --reflect --workspace ~/.local/share/phi-stream/dev (docs/dev.md)
 scripts/phi-stream.sh attach                  # the terminal (src/tui.md); Ctrl-C leaves it running
 scripts/phi-stream.sh say "hello"             # and feed, tail, status, persona, chunk, temp, pause, resume, quit
 scripts/phi-stream.sh stop                    # quit the service, end the session

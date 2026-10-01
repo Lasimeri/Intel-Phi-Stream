@@ -210,6 +210,13 @@ fn connection(
                     ctx.send(Command::Say(crate::client::unescape(arg), crate::clock::now_us())).map(|_| "heard".to_string()).map_err(|_| "the engine is gone".to_string())
                 }
             }
+            "say-as" => match arg.split_once(' ') {
+                Some((who, text)) if !text.trim().is_empty() => ctx
+                    .send(Command::SayAs(who.to_string(), crate::client::unescape(text.trim()), crate::clock::now_us()))
+                    .map(|_| format!("heard {who}"))
+                    .map_err(|_| "the engine is gone".to_string()),
+                _ => Err("say-as NAME TEXT".to_string()),
+            },
             "feed" => match read_file(arg) {
                 Ok((text, label)) => ctx
                     .send(Command::Feed(text, label.clone(), crate::clock::now_us()))
