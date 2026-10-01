@@ -6,8 +6,10 @@
 //! rates and how full its context is. crossterm only, the family's
 //! palette. See tui.md.
 
-use std::io::{self, Write};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::io::{self, BufRead, Write};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,7 +19,8 @@ use crossterm::style::{
 };
 use crossterm::{cursor, execute, queue, terminal};
 
-use crate::engine::{Command, Event, Kind, Mode, Status};
+use crate::client::{escape, parse, Client, Msg};
+use crate::engine::{Kind, Mode, Status};
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
 mod theme {
@@ -61,7 +64,7 @@ mod theme {
     };
 }
 
-/// What the title line says about the placement.
+/// What the title line says about the placement (the service's `info`).
 pub struct Placement {
     pub model: String,
     pub gpu_blocks: usize,
@@ -69,6 +72,8 @@ pub struct Placement {
     pub gpu_gib: f64,
     pub host_gib: f64,
     pub n_ctx: u32,
+    pub frame: String,
+    pub workspace: String,
 }
 
 struct Piece {
@@ -223,8 +228,9 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
     queue!(out, cursor::Hide, SetBackgroundColor(theme::BG))?;
     // Title.
     let title = format!(
-        " phi-stream · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {}",
+        " phi-stream · {} · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {}",
         p.model,
+        p.frame,
         p.gpu_blocks,
         p.n_blocks,
         p.gpu_gib,
@@ -313,7 +319,10 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         Print(pad(&prompt, w))
     )?;
     // Hints and the last note.
-    let hints = format!(" Enter speaks · /feed FILE · /pause /resume · /chunk N · /temp T · PgUp PgDn End · ^C leaves   {note}");
+    let hints = format!(
+        " Enter speaks · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        p.workspace
+    );
     queue!(
         out,
         cursor::MoveTo(0, (h - 1) as u16),
@@ -326,50 +335,65 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
     out.flush()
 }
 
-/// A typed line: a command, or something said.
-fn submit(line: &str, tx: &Sender<Command>, v: &mut View) {
+/// A typed line: a command, or something said; sent to the service.
+fn submit(line: &str, w: &mut UnixStream, v: &mut View) {
     let line = line.trim();
     if line.is_empty() {
         return;
     }
-    if let Some(p) = line.strip_prefix("/feed ") {
-        let path = crate::expand_home(p.trim());
-        match std::fs::read_to_string(&path) {
-            Ok(t) => {
-                v.notes
-                    .push(format!("handing over {path} ({} bytes)", t.len()));
-                tx.send(Command::Feed(t)).ok();
-            }
-            Err(e) => v.notes.push(format!("{path}: {e}")),
-        }
+    let msg = if let Some(p) = line.strip_prefix("/feed ") {
+        v.notes.push(format!("handing over {}", p.trim()));
+        format!("feed {}", crate::expand_home(p.trim()))
+    } else if let Some(p) = line.strip_prefix("/persona ") {
+        format!("persona {}", crate::expand_home(p.trim()))
     } else if line == "/pause" {
-        tx.send(Command::Pause).ok();
+        "pause".to_string()
     } else if line == "/resume" {
-        tx.send(Command::Resume).ok();
+        "resume".to_string()
     } else if let Some(c) = line.strip_prefix("/chunk ") {
-        match c.trim().parse() {
-            Ok(n) => {
-                tx.send(Command::Chunk(n)).ok();
-            }
-            Err(_) => v.notes.push("/chunk takes a number (0 adapts)".into()),
-        }
+        format!("chunk {}", c.trim())
     } else if let Some(t) = line.strip_prefix("/temp ") {
-        match t.trim().parse::<f32>() {
-            Ok(temp) => {
-                tx.send(Command::Temp(temp)).ok();
-                v.notes.push(format!("temperature {temp}"));
-            }
-            Err(_) => v.notes.push("/temp takes a number".into()),
-        }
+        format!("temp {}", t.trim())
+    } else if line == "/quit" {
+        "quit".to_string()
     } else if line.starts_with('/') {
         v.notes.push(format!("unknown command {line}"));
+        return;
     } else {
         v.heard += 1;
-        tx.send(Command::Say(line.to_string())).ok();
+        format!("say {}", escape(line))
+    };
+    if writeln!(w, "{msg}").is_err() {
+        v.notes.push("the service is gone".into());
     }
 }
 
-pub fn run(erx: Receiver<Event>, ctx: Sender<Command>, placement: Placement) -> Result<()> {
+/// The terminal, as a client of the service at `socket`.
+pub fn run(socket: &Path) -> Result<()> {
+    let mut c = Client::connect(socket)?;
+    c.send("tail")?;
+    let (reader, mut w) = c.split();
+    // The service's lines, read on a thread of their own.
+    let (tx, rx) = mpsc::channel::<Msg>();
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if tx.send(parse(&line)).is_err() {
+                break;
+            }
+        }
+        tx.send(Msg::Bye).ok();
+    });
+    let mut placement = Placement {
+        model: String::new(),
+        gpu_blocks: 0,
+        n_blocks: 0,
+        gpu_gib: 0.0,
+        host_gib: 0.0,
+        n_ctx: 0,
+        frame: String::new(),
+        workspace: String::new(),
+    };
     let mut out = io::stdout();
     terminal::enable_raw_mode()?;
     execute!(
@@ -392,22 +416,44 @@ pub fn run(erx: Receiver<Event>, ctx: Sender<Command>, placement: Placement) -> 
         let mut dirty = true;
         let mut last_draw = Instant::now();
         loop {
-            // The engine's events, all that are waiting.
+            // The service's messages, all that are waiting.
             loop {
-                match erx.try_recv() {
-                    Ok(Event::Text(t, k)) => {
+                match rx.try_recv() {
+                    Ok(Msg::Info(i)) => {
+                        placement = Placement {
+                            model: i.model,
+                            gpu_blocks: i.gpu_blocks,
+                            n_blocks: i.n_blocks,
+                            gpu_gib: i.gpu_gib,
+                            host_gib: i.host_gib,
+                            n_ctx: i.n_ctx,
+                            frame: i.frame,
+                            workspace: i.workspace,
+                        };
+                        dirty = true;
+                    }
+                    Ok(Msg::Text(t, k)) => {
                         v.push(t, k);
                         dirty = true;
                     }
-                    Ok(Event::Status(s)) => {
+                    Ok(Msg::Status(s)) => {
                         v.status = Some(s);
                         dirty = true;
                     }
-                    Ok(Event::Note(n)) => {
+                    Ok(Msg::Note(n)) => {
                         v.notes.push(n);
                         dirty = true;
                     }
-                    Ok(Event::Stopped) => return Ok(()),
+                    Ok(Msg::Err(e)) => {
+                        v.notes.push(e);
+                        dirty = true;
+                    }
+                    Ok(Msg::Ok(_)) => {}
+                    Ok(Msg::Other(l)) => {
+                        v.notes.push(format!("the service said: {l}"));
+                        dirty = true;
+                    }
+                    Ok(Msg::Bye) => return Ok(()),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok(()),
                 }
@@ -420,16 +466,15 @@ pub fn run(erx: Receiver<Event>, ctx: Sender<Command>, placement: Placement) -> 
                         dirty = true;
                         match code {
                             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                                ctx.send(Command::Quit).ok();
-                                return Ok(());
+                                return Ok(())
                             }
-                            KeyCode::Char(c) => v.input.push(c),
+                            KeyCode::Char(ch) => v.input.push(ch),
                             KeyCode::Backspace => {
                                 v.input.pop();
                             }
                             KeyCode::Enter => {
                                 let line = std::mem::take(&mut v.input);
-                                submit(&line, &ctx, &mut v);
+                                submit(&line, &mut w, &mut v);
                                 v.scroll = 0;
                             }
                             KeyCode::Esc => v.input.clear(),

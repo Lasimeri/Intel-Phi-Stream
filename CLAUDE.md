@@ -5,7 +5,11 @@ Read `CONTRIBUTING.md` first; it is the authority. The non-obvious rules:
 - What this is: one model split over the GPU, the Xeon Phi cards and
   host memory, one llama.cpp context, a live sequence that never stops
   while readings run beside it in the same decode cycles
-  (`src/engine.md`). llama.cpp is linked, never changed. The cards come
+  (`src/engine.md`), owned by a service on a Unix socket whose clients
+  are the terminal and the one-shot commands (`src/serve.md`,
+  `src/client.md`): to talk to the running mind from here, `phi-stream
+  say`, `feed`, `tail`, `status`, `persona`; never start a second
+  service (one process holds the cards). llama.cpp is linked, never changed. The cards come
   from the sibling Intel-Phi-AVX512 (`scripts/avx512.md`: `PHI_AVX512_ROOT`,
   a checkout next to this one or in `$HOME`, under either name); never
   copy anything of it here.

@@ -201,3 +201,41 @@ the GPU, which the Q6_K does not; the Q4_K_M does, and the two-context
 form for it (a second copy of the model in host memory for the cards,
 sequence state exchanged as `llama_state_seq_get_data` blobs between
 two contexts in two processes) is designed, not built.
+
+## Afternoon: the service, the journal frame, the mind's own lines
+
+Same machine, same split; the program now `serve` plus clients
+(`src/serve.md`, `src/client.md`), the journal frame by default
+(`src/engine.md`). The test (`~/.cache/phi-asm-test/stream/service-test.sh`,
+log `service-test.log`, workspace `ws-test/`): `scripts/phi-stream.sh
+start --frame journal` in tmux; from another shell `status`, `say`,
+`tail --status` for 15 s, `feed` of the 1127-token file, `status`,
+`persona` with a gardener's persona, `tail`, `stop`.
+
+- The socket answered 21 s after `start` (the load); `status` then read
+  40 tok/s at 728 cells. `say` returned `heard`; the line is at the
+  position the stream was at (`stream.log`, line 9).
+- Left to itself in the journal frame, the stream chose a thread of its
+  own (the continuity of farthest-point pairs on a closed surface with a
+  metric; whether the pair assignment admits a continuous selection),
+  and wrote two `[note: ...]` lines about it unprompted; `notes.md`
+  holds them and the status counted them (`notes 1`, then 2).
+- The file was read beside the stream at 112 tok/s with the stream at
+  51.5 (adapting chunks), joined, and marked `« [from the system: read
+  the file prompt1k.txt]`.
+- The circling check fired once in the quiet after the reading.
+- `persona` returned at once; the engine asked for the summary with
+  nothing in flight, rolled over onto the new base (the new persona, the
+  summary, the notes), and the stream went on as the gardener while
+  keeping the mathematics thread (the summary carried it): its own thing
+  and the new frame together. `persona.md` in the workspace is the new
+  persona.
+- One frame leak: once the stream wrote a `«` line itself, in the
+  visitor's voice ("ok, just wanted to check in. You looked busy."). The
+  persona now says `«` lines come only from outside and the mind never
+  writes one; the engine counts any it writes (`leaks` in the status, a
+  line in the strip) rather than hiding them.
+- `stop` quit the service and the tmux session; nothing left running.
+- A launcher defect found and fixed on the way: the tmux command string
+  was unquoted and this checkout's path has spaces, so the session died
+  at once; every word is now `printf %q`-quoted.

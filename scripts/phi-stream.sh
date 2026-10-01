@@ -1,23 +1,65 @@
 #!/usr/bin/env bash
-# phi-stream.sh: run phi-stream with the cards when the co-processor
-# repository is found (its phi-ggml.sh starts the workers and names the
-# backend), on the GPU and the host alone otherwise. The binary is this
-# repository's release build. See phi-stream.md.
+# phi-stream.sh: the service and its clients. `start` runs the service in
+# a tmux session (with the cards when the co-processor repository is
+# found: its phi-ggml.sh starts the workers and names the backend; on the
+# GPU and the host alone otherwise); `attach` opens the terminal to it;
+# everything else passes through to the binary (`say`, `feed`, `tail`,
+# `status`, `persona`, `chunk`, `temp`, `pause`, `resume`, `quit`, `probe`,
+# `gate`, `run`, `serve` in the foreground). See phi-stream.md.
 #
-#   scripts/phi-stream.sh tui                 # the terminal
-#   scripts/phi-stream.sh run < lines.txt     # stdout and stdin
-#   scripts/phi-stream.sh probe               # the rates on this machine
+#   scripts/phi-stream.sh start [serve options]   # the service, in tmux session phi-stream
+#   scripts/phi-stream.sh attach                  # the terminal (Ctrl-C leaves it running)
+#   scripts/phi-stream.sh say "hello"             # a line to it
+#   scripts/phi-stream.sh tail                    # the stream on stdout
+#   scripts/phi-stream.sh stop                    # quit the service and end the session
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 bin="$root/target/release/phi-stream"
+session=${PHI_STREAM_SESSION:-phi-stream}
 [ -x "$bin" ] || { echo "$0: $bin not built; run make build" >&2; exit 1; }
 . "$here/avx512.sh"
-if [ -n "${PHI_AVX512_ROOT:-}" ]; then
-    # The cards' rows leave host memory after the upload (PHI_GGML_OFFLOAD),
-    # unless the caller says otherwise.
-    export PHI_GGML_OFFLOAD="${PHI_GGML_OFFLOAD:-1}"
-    exec "$PHI_AVX512_ROOT/scripts/phi-ggml.sh" "$bin" "$@"
-fi
-echo "$0: Intel-Phi-AVX512 not found; running on the GPU and the host alone (scripts/avx512.md)" >&2
-exec "$bin" "$@"
+
+# The binary, with the cards when the co-processor repository is found.
+launch() {
+    if [ -n "${PHI_AVX512_ROOT:-}" ]; then
+        export PHI_GGML_OFFLOAD="${PHI_GGML_OFFLOAD:-1}"
+        exec "$PHI_AVX512_ROOT/scripts/phi-ggml.sh" "$bin" "$@"
+    fi
+    echo "$0: Intel-Phi-AVX512 not found; running on the GPU and the host alone (scripts/avx512.md)" >&2
+    exec "$bin" "$@"
+}
+
+case "${1:-}" in
+    start)
+        shift
+        if tmux has-session -t "$session" 2>/dev/null; then
+            echo "$0: the service is already running in tmux session $session (attach, or stop)" >&2
+            exit 1
+        fi
+        # The session runs this script's own launch path, so the cards are found
+        # the same way; every word quoted, since the checkout's path may hold spaces.
+        cmd=$(printf '%q ' "$here/phi-stream.sh" serve "$@")
+        tmux new-session -d -s "$session" "$cmd"
+        echo "started the service in tmux session $session; log: tmux attach -t $session; the terminal: $0 attach"
+        ;;
+    stop)
+        "$bin" quit 2>/dev/null || true
+        sleep 2
+        tmux kill-session -t "$session" 2>/dev/null || true
+        echo "stopped"
+        ;;
+    attach)
+        exec "$bin" tui
+        ;;
+    serve|probe|gate|run)
+        launch "$@"
+        ;;
+    "")
+        echo "usage: $0 start|stop|attach|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run ..." >&2
+        exit 2
+        ;;
+    *)
+        exec "$bin" "$@"
+        ;;
+esac

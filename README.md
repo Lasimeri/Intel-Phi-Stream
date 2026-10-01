@@ -10,17 +10,32 @@ to talk to it, drawn as something alive. llama.cpp is used as a library
 and never changed.
 
 ```
-make build                                   # needs ~/llama.cpp with its CUDA build (build.md)
-scripts/phi-stream.sh tui                    # the terminal; with the cards when Intel-Phi-AVX512 is found
-scripts/phi-stream.sh probe                  # the rates on this machine
+make build                        # needs ~/llama.cpp with its CUDA build (build.md)
+scripts/phi-stream.sh start       # the service, in tmux; with the cards when Intel-Phi-AVX512 is found
+scripts/phi-stream.sh attach      # the terminal; Ctrl-C leaves the stream running
+scripts/phi-stream.sh say "hello" # from any shell, script or agent: say, feed, tail, status, persona
 ```
 
-In the terminal, type and press Enter: a short line is heard in the next
+The model is owned by a service that loads it once and listens on a Unix
+socket; the terminal and the one-shot commands are its clients, so a
+person, a script and an agent can talk to the same running mind, and
+the persona, the notes and the policy change without a reload
+([`src/serve.md`](src/serve.md), [`src/client.md`](src/client.md)). In
+the terminal, type and press Enter: a short line is heard in the next
 cycle and appears in the stream where it was; `/feed FILE` hands a file
 over, read beside the thoughts (the strip shows `reading N/M`, the two
-rates and how full the context is), then joined. `/chunk N`, `/temp T`,
-`/pause`, `/resume`, PgUp and PgDn, Ctrl-C to leave
+rates and how full the context is), then joined; `/persona FILE` gives
+it a new persona, which it rolls its context over onto after a summary;
+`/chunk N`, `/temp T`, `/pause`, `/resume`, PgUp and PgDn
 ([`src/tui.md`](src/tui.md)).
+
+The text is a journal by default: one continuous first-person text with
+no turns, the mind's own threads kept and returned to, what comes from
+outside as `«` lines, what it says aloud as `»` lines; and two things it
+does by itself inside the text, `[note: ...]` (kept in the workspace and
+shown to it again at every rollover) and `[read: PATH]` (brings a file
+in). `--frame chat` keeps the model's own template instead
+([`src/engine.md`](src/engine.md)).
 
 ## What it does
 
@@ -95,9 +110,10 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/split.rs` | the placement, from the file's tensor table and the GPU's free memory |
 | `src/llm.rs` | the model and the context over llama.cpp's C API; lanes of a cycle; the sampler |
 | `src/engine.rs` | the stream: hearing, reading beside, the join, the rollover, the nudges |
-| `src/tui.rs` | the terminal |
+| `src/serve.rs`, `src/client.rs` | the service that owns the model and its socket; the wire and the client side |
+| `src/tui.rs` | the terminal, a client of the service |
 | `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence |
-| `scripts/phi-stream.sh` | the launcher, with the cards when the co-processor repository is found |
+| `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
 | `docs/results/` | measurements, with their commands |
 
 ## The repositories

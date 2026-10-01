@@ -51,6 +51,29 @@ what the architecture allows: llama.cpp cannot shift this model's cells
 (`get_can_shift` is false for M-RoPE) and a recurrent state cannot be
 cut.
 
+**The journal frame** (the default; `--frame chat` keeps the model's
+template). The text is one continuous first-person journal with no
+turns: the persona is a paragraph at the top, what comes from outside is
+a line beginning with `«`, what the mind says aloud is a line beginning
+with `»` (shown as speech), everything else is thought. An end-of-text
+token sampled in this frame is replaced by a newline (a journal has no
+end); three in a row bring a word from the system. A `«` line the mind writes
+itself (a line in someone else's voice, the frame's one known leak) is
+shown as thought and counted in the status. In the chat frame the
+end of a turn is followed by the assistant's turn reopened at once (no
+silent user turn), so the floor stays the mind's. Both frames carry two
+lines the mind writes for itself: `[note: ...]` is kept in the workspace's
+`notes.md` and shown to it again in every new base (a rollover, a new
+persona), and `[read: PATH]` brings the file (a regular file under 1 MiB,
+relative to the workspace or absolute) in as a reading, or tells it why
+not. The workspace (`--workspace`) holds `persona.md` (written at start,
+reloaded by `persona`, edited in place between runs), `notes.md` and
+`stream.log` (everything shown, appended).
+
+**A new persona** (`Command::Persona`) takes effect the way a rollover
+does: the summary is asked for with nothing in flight, and the new base
+is the new persona, the summary and the notes.
+
 **Why one context.** The backend's lock is taken and dropped inside
 `phi_ggml_begin` and `phi_ggml_end` separately (`host/asm/common/lock.md`:
 one caller at a time in practice), with one request in flight per card

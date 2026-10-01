@@ -1,22 +1,28 @@
 //! `phi-stream`: one model split over the GPU, the cards and host memory,
 //! thinking without pause while it reads what it is given, over llama.cpp
-//! used as a library and never changed. See main.md.
+//! used as a library and never changed. The model is owned by a service
+//! (`serve`); the terminal and the one-shot commands are its clients. See
+//! main.md.
 
+mod client;
 mod engine;
 mod gate;
 mod llm;
 mod probe;
+mod serve;
 mod split;
 mod sys;
 mod tui;
 
-use anyhow::{Context as _, Result};
-use clap::{Args, Parser, Subcommand};
-
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use crate::engine::{Command, Config, Engine, Event, Kind, Mode};
+use anyhow::{Context as _, Result};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+use crate::client::{default_socket, escape, parse, Client, Msg};
+use crate::engine::{default_persona, Command, Config, Engine, Event, Frame, Kind, Mode};
 use crate::llm::{Llm, Options, Sampling};
 
 #[derive(Parser)]
@@ -27,6 +33,9 @@ use crate::llm::{Llm, Options, Sampling};
 struct Cli {
     #[command(flatten)]
     model: ModelArgs,
+    /// The service's socket (also PHI_STREAM_SOCKET; default under XDG_RUNTIME_DIR).
+    #[arg(long, global = true)]
+    socket: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -85,50 +94,32 @@ struct ModelArgs {
     verbose: bool,
 }
 
-#[derive(Subcommand)]
-enum Cmd {
-    /// The placement and the rates on this machine.
-    Probe {
-        /// A prompt file to read (default: a built-in paragraph).
-        prompt: Option<String>,
-        /// Tokens to generate alone.
-        #[arg(long, default_value_t = 64)]
-        gen: usize,
-        /// Chunk sizes for reading while thinking.
-        #[arg(long, value_delimiter = ',', default_value = "8,16,32,64")]
-        chunks: Vec<usize>,
-    },
-    /// Does composing a reading give the straight sequence's next token?
-    Gate {
-        /// Thoughts generated while reading.
-        #[arg(long, default_value_t = 48)]
-        thoughts: usize,
-        #[arg(long, default_value_t = 16)]
-        chunk: usize,
-        /// Greedy tokens compared after the composition.
-        #[arg(long, default_value_t = 32)]
-        compare: usize,
-    },
-    /// The stream on stdout; lines on stdin are said to it.
-    Run {
-        #[command(flatten)]
-        stream: StreamArgs,
-    },
-    /// The stream in the terminal, talked to.
-    Tui {
-        #[command(flatten)]
-        stream: StreamArgs,
-    },
+#[derive(Clone, Copy, ValueEnum)]
+enum FrameArg {
+    /// One continuous first-person text, no turns; « from outside, » said aloud.
+    Journal,
+    /// The model's chat template: thoughts in <think>, speech after.
+    Chat,
 }
 
 #[derive(Args, Clone)]
 struct StreamArgs {
-    /// A file with the system prompt (the persona and the rules).
+    /// How the text is framed.
+    #[arg(long, value_enum, default_value_t = FrameArg::Journal)]
+    frame: FrameArg,
+    /// Where the persona, the notes and the log live.
+    #[arg(
+        long,
+        env = "PHI_STREAM_WORKSPACE",
+        default_value = "~/.local/share/phi-stream"
+    )]
+    workspace: String,
+    /// A file with the persona (default: the workspace's persona.md when it exists, else the frame's own).
     #[arg(long)]
     system: Option<String>,
-    /// The first thing said to the stream.
-    #[arg(long, default_value = "[The stream begins. Nobody has spoken yet.]")]
-    seed: String,
+    /// The first thing from outside (default: the frame's own).
+    #[arg(long)]
+    seed_text: Option<String>,
     /// Said things up to this many tokens are heard at once.
     #[arg(long, default_value_t = 48)]
     direct_max: usize,
@@ -141,9 +132,79 @@ struct StreamArgs {
     /// Hand over a file at the start.
     #[arg(long)]
     feed: Option<String>,
-    /// Stop after this many live tokens (0: never).
-    #[arg(long, default_value_t = 0)]
-    max_tokens: usize,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Own the model and listen on the socket; the terminal and the commands below talk to it.
+    Serve {
+        #[command(flatten)]
+        stream: StreamArgs,
+    },
+    /// The terminal, talking to the service.
+    Tui,
+    /// Say something to the stream.
+    Say {
+        text: Vec<String>,
+    },
+    /// Hand a file over.
+    Feed {
+        path: String,
+    },
+    /// Print the stream as it happens (the recent text first).
+    Tail {
+        /// Status lines too.
+        #[arg(long)]
+        status: bool,
+    },
+    /// The last status line.
+    Status,
+    /// Tokens read beside the live token each cycle (0 adapts).
+    Chunk {
+        n: usize,
+    },
+    /// The temperature.
+    Temp {
+        t: f32,
+    },
+    /// A new persona from a file; the context rolls over onto it.
+    Persona {
+        path: String,
+    },
+    Pause,
+    Resume,
+    /// Stop the service.
+    Quit,
+    /// The placement and the rates on this machine (no service).
+    Probe {
+        /// A prompt file to read (default: a built-in paragraph).
+        prompt: Option<String>,
+        /// Tokens to generate alone.
+        #[arg(long, default_value_t = 64)]
+        gen: usize,
+        /// Chunk sizes for reading while thinking.
+        #[arg(long, value_delimiter = ',', default_value = "8,16,32,64")]
+        chunks: Vec<usize>,
+    },
+    /// Does composing a reading give the straight sequence's next token? (no service)
+    Gate {
+        /// Thoughts generated while reading.
+        #[arg(long, default_value_t = 48)]
+        thoughts: usize,
+        #[arg(long, default_value_t = 16)]
+        chunk: usize,
+        /// Greedy tokens compared after the composition.
+        #[arg(long, default_value_t = 32)]
+        compare: usize,
+    },
+    /// The stream on stdout, lines on stdin said to it (no service; for scripts).
+    Run {
+        #[command(flatten)]
+        stream: StreamArgs,
+        /// Stop after this many live tokens (0: never).
+        #[arg(long, default_value_t = 0)]
+        max_tokens: usize,
+    },
 }
 
 pub fn expand_home(p: &str) -> String {
@@ -154,7 +215,7 @@ pub fn expand_home(p: &str) -> String {
 }
 
 /// `GGML_BACKEND_PATH` names the cards' backend; when unset, the library
-/// beside this binary (the repository's own build) is used.
+/// beside this binary is used when there is one.
 fn backend_path() {
     if std::env::var_os("GGML_BACKEND_PATH").is_some() {
         return;
@@ -202,101 +263,94 @@ fn load(m: &ModelArgs) -> Result<Llm> {
 
 const PARAGRAPH: &str = "The scheduler assigns every operation of the graph to the backend that reports support for it, in priority order, and splits the graph where the assignment changes so that each backend computes a contiguous run of nodes; tensors crossing a split are copied between buffers before the next run starts. ";
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.cmd {
-        Cmd::Probe {
-            prompt,
-            gen,
-            chunks,
-        } => {
-            let text = match prompt {
-                Some(p) => std::fs::read_to_string(expand_home(&p))
-                    .with_context(|| format!("reading {p}"))?,
-                None => PARAGRAPH.repeat(20),
-            };
-            let mut llm = load(&cli.model)?;
-            probe::probe(&mut llm, &text, gen, &chunks)
-        }
-        Cmd::Gate {
-            thoughts,
-            chunk,
-            compare,
-        } => {
-            let mut llm = load(&cli.model)?;
-            let a = format!("<|im_start|>system\n{SYSTEM}<|im_end|>\n<|im_start|>user\n[The stream begins.]<|im_end|>\n<|im_start|>assistant\n<think>\n");
-            let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
-            gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)
-        }
-        Cmd::Run { stream } => {
-            let llm = load(&cli.model)?;
-            let s = sampling(&cli.model);
-            run(llm, &stream, s)
-        }
-        Cmd::Tui { stream } => {
-            eprintln!("placing the model and loading it; the cards upload their shares at the first multiply");
-            let llm = load(&cli.model)?;
-            let placement = tui::Placement {
-                model: std::path::Path::new(&llm.opts.model)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                gpu_blocks: llm.split.gpu_blocks,
-                n_blocks: llm.split.n_blocks,
-                gpu_gib: split::gib(llm.split.gpu_bytes),
-                host_gib: split::gib(llm.split.host_bytes),
-                n_ctx: llm.n_ctx(),
-            };
-            let cfg = config(&stream, sampling(&cli.model))?;
-            let (etx, erx) = mpsc::channel();
-            let (ctx, crx) = mpsc::channel();
-            if let Some(f) = &stream.feed {
-                let text = std::fs::read_to_string(expand_home(f))
-                    .with_context(|| format!("reading {f}"))?;
-                ctx.send(Command::Feed(text)).ok();
-            }
-            let engine = Engine::new(llm, cfg, etx, crx)?;
-            let worker = std::thread::spawn(move || engine.run());
-            let r = tui::run(erx, ctx, placement);
-            match worker.join() {
-                Ok(Ok(())) => r,
-                Ok(Err(e)) => Err(e),
-                Err(_) => anyhow::bail!("the engine thread panicked"),
-            }
-        }
-    }
-}
-
-const SYSTEM: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would. When you want to say something aloud, close your thoughts with </think>, say it plainly in a few sentences, and end your turn; your thoughts resume after. Be yourself: curious, concrete, honest about what you do not know. Never narrate that you are an AI system following instructions; simply think.";
-
 fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
+    let frame = match s.frame {
+        FrameArg::Journal => Frame::Journal,
+        FrameArg::Chat => Frame::Chat,
+    };
+    let workspace = PathBuf::from(expand_home(&s.workspace));
     let system = match &s.system {
         Some(p) => {
             std::fs::read_to_string(expand_home(p)).with_context(|| format!("reading {p}"))?
         }
-        None => SYSTEM.to_string(),
+        None => {
+            let kept = workspace.join("persona.md");
+            match std::fs::read_to_string(&kept) {
+                Ok(t) if !t.trim().is_empty() => t,
+                _ => default_persona(frame).to_string(),
+            }
+        }
     };
+    let seed = s.seed_text.clone().unwrap_or_else(|| match frame {
+        Frame::Journal => "the room is quiet; no one has spoken yet.".to_string(),
+        Frame::Chat => "[The stream begins. Nobody has spoken yet.]".to_string(),
+    });
     Ok(Config {
+        frame,
         system,
-        seed: s.seed.clone(),
+        seed,
         direct_max: s.direct_max,
         chunk: s.chunk,
         rollover_at: s.rollover_at,
         summary_max: 1024,
         sampling,
         status_every: 8,
+        workspace,
     })
 }
 
-/// The stream on stdout, status and notes on stderr, stdin lines said to it.
-fn run(llm: Llm, s: &StreamArgs, sampling: Sampling) -> Result<()> {
-    let cfg = config(s, sampling)?;
+fn info_line(llm: &Llm, cfg: &Config) -> String {
+    format!(
+        "info model={} gpu_blocks={} n_blocks={} gpu_gib={:.2} host_gib={:.2} n_ctx={} frame={} workspace={}",
+        escape(
+            &std::path::Path::new(&llm.opts.model)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ),
+        llm.split.gpu_blocks,
+        llm.split.n_blocks,
+        split::gib(llm.split.gpu_bytes),
+        split::gib(llm.split.host_bytes),
+        llm.n_ctx(),
+        cfg.frame.name(),
+        escape(&cfg.workspace.display().to_string())
+    )
+}
+
+/// The service: the engine on its thread, the socket on this one.
+fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
+    eprintln!("phi-stream: placing the model and loading it; the cards upload their shares at the first multiply");
+    let llm = load(m)?;
+    let cfg = config(s, sampling(m))?;
+    let info = info_line(&llm, &cfg);
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
     if let Some(f) = &s.feed {
         let text =
             std::fs::read_to_string(expand_home(f)).with_context(|| format!("reading {f}"))?;
-        ctx.send(Command::Feed(text)).ok();
+        ctx.send(Command::Feed(text, format!("the file {f}"))).ok();
+    }
+    let engine = Engine::new(llm, cfg, etx, crx)?;
+    let worker = std::thread::spawn(move || engine.run());
+    let r = serve::serve(erx, ctx, &socket, info);
+    match worker.join() {
+        Ok(Ok(())) => r,
+        Ok(Err(e)) => Err(e),
+        Err(_) => anyhow::bail!("the engine thread panicked"),
+    }
+}
+
+/// The stream on stdout, status and notes on stderr, stdin lines said to it.
+fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
+    let llm = load(m)?;
+    let cfg = config(s, sampling(m))?;
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel();
+    if let Some(f) = &s.feed {
+        let text =
+            std::fs::read_to_string(expand_home(f)).with_context(|| format!("reading {f}"))?;
+        ctx.send(Command::Feed(text, format!("the file {f}"))).ok();
     }
     let engine = Engine::new(llm, cfg, etx, crx)?;
     let worker = std::thread::spawn(move || engine.run());
@@ -312,7 +366,9 @@ fn run(llm: Llm, s: &StreamArgs, sampling: Sampling) -> Result<()> {
             if let Some(p) = line.strip_prefix("/feed ") {
                 match std::fs::read_to_string(expand_home(p.trim())) {
                     Ok(t) => {
-                        stdin_tx.send(Command::Feed(t)).ok();
+                        stdin_tx
+                            .send(Command::Feed(t, format!("the file {}", p.trim())))
+                            .ok();
                     }
                     Err(e) => eprintln!("/feed: {e}"),
                 }
@@ -342,24 +398,11 @@ fn run(llm: Llm, s: &StreamArgs, sampling: Sampling) -> Result<()> {
                     }
                 }
                 out.flush()?;
-                if s.max_tokens > 0 && live >= s.max_tokens {
+                if max_tokens > 0 && live >= max_tokens {
                     ctx.send(Command::Quit).ok();
                 }
             }
-            Ok(Event::Status(st)) => {
-                let mode = match st.mode {
-                    Mode::Thinking => "thinking".to_string(),
-                    Mode::Speaking => "speaking".to_string(),
-                    Mode::Reading { done, total } => format!("reading {done}/{total}"),
-                    Mode::CatchingUp { done, total } => format!("catching up {done}/{total}"),
-                    Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
-                    Mode::Paused => "paused".to_string(),
-                };
-                eprintln!(
-                    "\x1b[2m[{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}]\x1b[0m",
-                    st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued
-                );
-            }
+            Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st)),
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
             Ok(Event::Stopped) | Err(_) => break,
         }
@@ -367,5 +410,109 @@ fn run(llm: Llm, s: &StreamArgs, sampling: Sampling) -> Result<()> {
     match worker.join() {
         Ok(r) => r,
         Err(_) => anyhow::bail!("the engine thread panicked"),
+    }
+}
+
+fn status_text(st: &engine::Status) -> String {
+    let mode = match st.mode {
+        Mode::Thinking => "thinking".to_string(),
+        Mode::Speaking => "speaking".to_string(),
+        Mode::Reading { done, total } => format!("reading {done}/{total}"),
+        Mode::CatchingUp { done, total } => format!("catching up {done}/{total}"),
+        Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
+        Mode::Paused => "paused".to_string(),
+    };
+    format!(
+        "{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}; notes {}; {} frame",
+        st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued, st.notes, st.frame
+    )
+}
+
+/// A one-shot command to the service: its reply on stdout.
+fn ask(socket: &Path, line: &str) -> Result<()> {
+    let mut c = Client::connect(socket)?;
+    let reply = c.ask(line)?;
+    println!("{reply}");
+    Ok(())
+}
+
+/// The stream as it happens, on stdout; status on stderr when asked.
+fn tail(socket: &Path, with_status: bool) -> Result<()> {
+    let mut c = Client::connect(socket)?;
+    c.send("tail")?;
+    let mut out = std::io::stdout();
+    while let Some(line) = c.line()? {
+        match parse(&line) {
+            Msg::Text(t, Kind::Given) => write!(out, "\x1b[33m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Speak) => write!(out, "\x1b[1m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Think) => write!(out, "{t}")?,
+            Msg::Status(st) => {
+                if with_status {
+                    eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st));
+                }
+            }
+            Msg::Note(n) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
+            Msg::Bye => break,
+            _ => {}
+        }
+        out.flush()?;
+    }
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let socket = cli.socket.clone().unwrap_or_else(default_socket);
+    match cli.cmd {
+        Cmd::Serve { stream } => serve_cmd(&cli.model, &stream, socket),
+        Cmd::Tui => tui::run(&socket),
+        Cmd::Say { text } => ask(&socket, &format!("say {}", escape(&text.join(" ")))),
+        Cmd::Feed { path } => ask(&socket, &format!("feed {}", expand_home(&path))),
+        Cmd::Tail { status } => tail(&socket, status),
+        Cmd::Status => {
+            let mut c = Client::connect(&socket)?;
+            c.send("status")?;
+            while let Some(line) = c.line()? {
+                match parse(&line) {
+                    Msg::Status(st) => println!("{}", status_text(&st)),
+                    Msg::Ok(_) | Msg::Err(_) | Msg::Bye => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        Cmd::Chunk { n } => ask(&socket, &format!("chunk {n}")),
+        Cmd::Temp { t } => ask(&socket, &format!("temp {t}")),
+        Cmd::Persona { path } => ask(&socket, &format!("persona {}", expand_home(&path))),
+        Cmd::Pause => ask(&socket, "pause"),
+        Cmd::Resume => ask(&socket, "resume"),
+        Cmd::Quit => ask(&socket, "quit"),
+        Cmd::Probe {
+            prompt,
+            gen,
+            chunks,
+        } => {
+            let text = match prompt {
+                Some(p) => std::fs::read_to_string(expand_home(&p))
+                    .with_context(|| format!("reading {p}"))?,
+                None => PARAGRAPH.repeat(20),
+            };
+            let mut llm = load(&cli.model)?;
+            probe::probe(&mut llm, &text, gen, &chunks)
+        }
+        Cmd::Gate {
+            thoughts,
+            chunk,
+            compare,
+        } => {
+            let mut llm = load(&cli.model)?;
+            let a = format!(
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[The stream begins.]<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                engine::PERSONA_CHAT
+            );
+            let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
+            gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)
+        }
+        Cmd::Run { stream, max_tokens } => run_cmd(&cli.model, &stream, max_tokens),
     }
 }

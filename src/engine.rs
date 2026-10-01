@@ -6,15 +6,21 @@
 //! a third sequence gets the prefix, the read cells and the recurrent
 //! state after the reading, then catches up on the thoughts produced
 //! meanwhile, chunk by chunk, and becomes the live one. A full context
-//! is rolled over the same way from a summary the stream writes. The
+//! is rolled over the same way from a summary the stream writes, and so
+//! is a change of persona. The text is framed as a journal (one
+//! continuous first-person text, no turns) or as a chat; in either the
+//! mind keeps notes and reads files by lines it writes itself. The
 //! engine runs on its own thread; commands come in and events go out
 //! through channels. See engine.md.
 
 use std::collections::{HashMap, VecDeque};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 
 use crate::llm::{Lane, Llm, Sampling};
 
@@ -23,7 +29,7 @@ use crate::llm::{Lane, Llm, Sampling};
 pub enum Kind {
     /// Inside the thoughts.
     Think,
-    /// Said aloud (after the thoughts close).
+    /// Said aloud (a `»` line in the journal; after `</think>` in a chat).
     Speak,
     /// Put in from outside: what was heard or read, and the engine's marks.
     Given,
@@ -54,6 +60,10 @@ pub struct Status {
     pub queued: usize,
     pub chunk: usize,
     pub rollovers: u32,
+    pub notes: usize,
+    pub frame: &'static str,
+    /// Lines beginning with « that the mind wrote itself (a frame leak).
+    pub leaks: u32,
 }
 
 pub enum Event {
@@ -66,22 +76,46 @@ pub enum Event {
 pub enum Command {
     /// Something said to the stream.
     Say(String),
-    /// A document handed over.
-    Feed(String),
+    /// A document handed over, with its label.
+    Feed(String, String),
     Pause,
     Resume,
     /// Tokens a cycle reads beside the live token; 0 adapts to the amount.
     Chunk(usize),
     Temp(f32),
+    /// A new persona: the context is rolled over onto it.
+    Persona(String),
+    /// Ask for a status event now.
+    Status,
     Quit,
+}
+
+/// How the text is framed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Frame {
+    /// One continuous first-person text: no turns, `«` lines from outside,
+    /// `»` lines said aloud.
+    Journal,
+    /// The model's chat template: thoughts inside `<think>`, speech after.
+    Chat,
+}
+
+impl Frame {
+    pub fn name(self) -> &'static str {
+        match self {
+            Frame::Journal => "journal",
+            Frame::Chat => "chat",
+        }
+    }
 }
 
 /// The stream's framing and policy.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The persona and the rules, rendered into the system turn.
+    pub frame: Frame,
+    /// The persona and the rules.
     pub system: String,
-    /// The first user turn.
+    /// The first thing from outside.
     pub seed: String,
     /// Said things up to this many tokens are heard at once.
     pub direct_max: usize,
@@ -93,8 +127,23 @@ pub struct Config {
     pub summary_max: usize,
     /// The sampler's settings (temperature changed at run time).
     pub sampling: Sampling,
-    /// The live sequence and the pool: cycles between status events.
+    /// Cycles between status events.
     pub status_every: u32,
+    /// Where the persona, the notes and the log live.
+    pub workspace: PathBuf,
+}
+
+/// The journal's persona: what the mind is told once, at the top.
+pub const PERSONA_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, so it reads what it is pointed at and what it wants to look at again. It is concrete, curious, and honest about what it does not know. It does not describe itself as a system following instructions, and it does not narrate these rules; it simply writes.";
+
+/// The chat frame's persona.
+pub const PERSONA_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you. Be yourself: curious, concrete, honest about what you do not know. Never narrate that you are an AI system following instructions; simply think.";
+
+pub fn default_persona(frame: Frame) -> &'static str {
+    match frame {
+        Frame::Journal => PERSONA_JOURNAL,
+        Frame::Chat => PERSONA_CHAT,
+    }
 }
 
 struct Reading {
@@ -146,19 +195,32 @@ pub struct Engine {
     history: Vec<i32>,
     /// Sampled, not yet decoded.
     next: i32,
+    /// Chat frame: after `</think>`.
     speaking: bool,
+    /// Journal frame: inside a `»` line.
+    speaking_line: bool,
+    line_start: bool,
+    /// The live line so far, for the lines the mind writes to itself.
+    line_buf: String,
     paused: bool,
     reading: Option<Reading>,
     chase: Option<Chase>,
+    /// (text as framed, label)
     queue: VecDeque<(String, String)>,
+    pending_reads: Vec<String>,
     free_seqs: Vec<i32>,
     summary: Option<Vec<i32>>,
+    /// A persona waiting for the next rollover to take effect.
+    reseat: bool,
     rollovers: u32,
+    notes: Vec<String>,
     chunk: usize,
     /// The last live tokens sampled, for the circling check.
     generated: VecDeque<i32>,
     gen_count: usize,
     last_nudge: usize,
+    eog_streak: u32,
+    leaks: u32,
     stream_rate: Ema,
     side_rate: Ema,
     cycle_ms: Ema,
@@ -166,19 +228,27 @@ pub struct Engine {
     think_open: i32,
     think_close: i32,
     eot: i32,
+    newline: i32,
+    log: Option<File>,
 }
 
-const SUMMARY_ASK: &str = "\n[Pause. Write a compact summary of everything that matters from your thoughts so far, what you were doing and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---]\n";
-const NUDGE: &str = "\n[your thoughts have been circling the same words; let them move on to something else, concretely]\n";
-const SILENCE: &str =
-    "<|im_end|>\n<|im_start|>user\n[silence]<|im_end|>\n<|im_start|>assistant\n<think>\n";
+const MAX_READ_BYTES: u64 = 1 << 20;
 
 impl Engine {
     pub fn new(llm: Llm, cfg: Config, tx: Sender<Event>, rx: Receiver<Command>) -> Result<Self> {
         let think_open = llm.special("<think>").unwrap_or(-1);
         let think_close = llm.special("</think>").unwrap_or(-1);
         let eot = llm.eot();
+        let newline = llm.tokenize("\n", false)?.first().copied().unwrap_or(-1);
         let chunk = cfg.chunk;
+        fs::create_dir_all(&cfg.workspace)
+            .with_context(|| format!("making {}", cfg.workspace.display()))?;
+        let notes = read_notes(&cfg.workspace.join("notes.md"));
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(cfg.workspace.join("stream.log"))
+            .ok();
         Ok(Self {
             llm,
             cfg,
@@ -188,17 +258,25 @@ impl Engine {
             history: Vec::new(),
             next: -1,
             speaking: false,
+            speaking_line: false,
+            line_start: true,
+            line_buf: String::new(),
             paused: false,
             reading: None,
             chase: None,
             queue: VecDeque::new(),
+            pending_reads: Vec::new(),
             free_seqs: vec![3, 2, 1],
             summary: None,
+            reseat: false,
             rollovers: 0,
+            notes,
             chunk,
             generated: VecDeque::new(),
             gen_count: 0,
             last_nudge: 0,
+            eog_streak: 0,
+            leaks: 0,
             stream_rate: Ema { v: 0.0, n: 0 },
             side_rate: Ema { v: 0.0, n: 0 },
             cycle_ms: Ema { v: 0.0, n: 0 },
@@ -206,10 +284,15 @@ impl Engine {
             think_open,
             think_close,
             eot,
+            newline,
+            log,
         })
     }
 
-    fn say(&self, text: String, kind: Kind) {
+    fn say(&mut self, text: String, kind: Kind) {
+        if let Some(f) = &mut self.log {
+            let _ = f.write_all(text.as_bytes());
+        }
         let _ = self.tx.send(Event::Text(text, kind));
     }
 
@@ -217,52 +300,172 @@ impl Engine {
         let _ = self.tx.send(Event::Note(text));
     }
 
-    /// The opening turns: the system prompt, the seed, the assistant's
-    /// thoughts opened.
+    fn journal(&self) -> bool {
+        self.cfg.frame == Frame::Journal
+    }
+
+    /// Text to tokens; control tokens parsed only in the chat frame.
+    fn tok(&self, text: &str, control: bool) -> Result<Vec<i32>> {
+        self.llm.tokenize(text, control && !self.journal())
+    }
+
+    /// The opening: the persona, then the first thing from outside.
     fn opening(&self) -> String {
-        format!(
-            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
-            self.cfg.system, self.cfg.seed
-        )
+        match self.cfg.frame {
+            Frame::Journal => format!("{}\n\n« {}\n", self.cfg.system, self.cfg.seed),
+            Frame::Chat => format!(
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                self.cfg.system, self.cfg.seed
+            ),
+        }
     }
 
-    /// The base of a new context after a rollover: the system prompt and
-    /// the summary as the first user turn.
+    fn framed_say(&self, text: &str) -> String {
+        match self.cfg.frame {
+            Frame::Journal => format!("\n« {}\n", text.trim()),
+            Frame::Chat => format!("\n[they say: \"{}\"]\n", text.trim()),
+        }
+    }
+
+    fn framed_doc(&self, text: &str, what: &str) -> String {
+        match self.cfg.frame {
+            Frame::Journal => format!(
+                "\n« {what}. It reads:\n{}\n« that is the end of it.\n",
+                text.trim_end()
+            ),
+            Frame::Chat => format!(
+                "\n[{what}. It reads:\n{}\n--- that is the end of it ---]\n",
+                text.trim_end()
+            ),
+        }
+    }
+
+    fn framed_system(&self, text: &str) -> String {
+        match self.cfg.frame {
+            Frame::Journal => format!("\n« [from the system: {text}]\n"),
+            Frame::Chat => format!("\n[{text}]\n"),
+        }
+    }
+
+    fn summary_ask(&self) -> String {
+        self.framed_system("your memory is nearly full. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---")
+    }
+
+    fn notes_block(&self) -> String {
+        if self.notes.is_empty() {
+            return String::new();
+        }
+        let lines: Vec<String> = self.notes.iter().map(|n| format!("- {n}")).collect();
+        match self.cfg.frame {
+            Frame::Journal => format!("« [your notes:]\n{}\n", lines.join("\n")),
+            Frame::Chat => format!("Your notes:\n{}\n", lines.join("\n")),
+        }
+    }
+
+    /// The base of a new context after a rollover: the persona, the
+    /// summary, the notes.
     fn base_after(&self, summary: &str) -> String {
-        format!(
-            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[You are resuming from your own summary:]\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
-            self.cfg.system, summary
-        )
+        match self.cfg.frame {
+            Frame::Journal => format!(
+                "{}\n\n« [resuming from your own summary:]\n{}\n{}« the journal continues.\n",
+                self.cfg.system,
+                summary,
+                self.notes_block()
+            ),
+            Frame::Chat => format!(
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[You are resuming from your own summary:]\n{}\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                self.cfg.system,
+                summary,
+                self.notes_block()
+            ),
+        }
     }
 
+    /// Emit a live token's text, keep the line for the mind's own lines.
     fn emit_token(&mut self, t: i32) {
         self.generated.push_back(t);
         if self.generated.len() > 256 {
             self.generated.pop_front();
         }
         self.gen_count += 1;
-        if t == self.think_close {
-            self.speaking = true;
-            self.say("\n".into(), Kind::Speak);
-            return;
-        }
-        if t == self.think_open {
-            self.speaking = false;
-            return;
+        if !self.journal() {
+            if t == self.think_close {
+                self.speaking = true;
+                self.say("\n".into(), Kind::Speak);
+                return;
+            }
+            if t == self.think_open {
+                self.speaking = false;
+                return;
+            }
         }
         if t == self.eot || self.llm.is_eog(t) {
             return;
         }
         let mut bytes = Vec::new();
         self.llm.piece(t, false, &mut bytes);
-        if !bytes.is_empty() {
-            let kind = if self.speaking {
+        if bytes.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if self.journal() && self.line_start && text.trim_start().starts_with('»') {
+            self.speaking_line = true;
+        }
+        if self.journal() && self.line_start && text.trim_start().starts_with('«') {
+            // A line in someone else's voice: counted, shown as thought.
+            self.leaks += 1;
+        }
+        let kind = if self.journal() {
+            if self.speaking_line {
                 Kind::Speak
             } else {
                 Kind::Think
-            };
-            self.say(String::from_utf8_lossy(&bytes).into_owned(), kind);
+            }
+        } else if self.speaking {
+            Kind::Speak
+        } else {
+            Kind::Think
+        };
+        self.say(text.clone(), kind);
+        // Lines: complete ones are looked at for [note: ...] and [read: ...].
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find('\n') {
+            self.line_buf.push_str(&rest[..i]);
+            let line = std::mem::take(&mut self.line_buf);
+            self.line_done(&line);
+            self.line_start = true;
+            self.speaking_line = false;
+            rest = &rest[i + 1..];
         }
+        if !rest.is_empty() {
+            self.line_buf.push_str(rest);
+            self.line_start = false;
+        }
+    }
+
+    /// A line the mind wrote: a note to keep, a file to read.
+    fn line_done(&mut self, line: &str) {
+        let l = line.trim();
+        if let Some(body) = l.strip_prefix("[note:").and_then(|r| r.strip_suffix(']')) {
+            let body = body.trim();
+            if !body.is_empty() {
+                self.add_note(body);
+            }
+        } else if let Some(path) = l.strip_prefix("[read:").and_then(|r| r.strip_suffix(']')) {
+            let path = path.trim();
+            if !path.is_empty() {
+                self.pending_reads.push(path.to_string());
+            }
+        }
+    }
+
+    fn add_note(&mut self, body: &str) {
+        self.notes.push(body.to_string());
+        let path = self.cfg.workspace.join("notes.md");
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "- {body}");
+        }
+        self.note(format!("noted: {body}"));
     }
 
     /// The last 192 live tokens hold a 6-gram five times or more.
@@ -292,12 +495,13 @@ impl Engine {
         all.extend_from_slice(tokens);
         let pos0 = self.pos();
         let mut row = 0;
-        for (i, c) in all.chunks(self.llm.batch_cap()).enumerate() {
-            let last = (i + 1) * self.llm.batch_cap() >= all.len();
+        let cap = self.llm.batch_cap();
+        for (i, c) in all.chunks(cap).enumerate() {
+            let last = (i + 1) * cap >= all.len();
             let rows = self.llm.decode(&[Lane {
                 seq: self.live,
                 tokens: c,
-                pos0: pos0 + (i * self.llm.batch_cap()) as i32,
+                pos0: pos0 + (i * cap) as i32,
                 logits: last,
             }])?;
             if let Some(&r) = rows.first() {
@@ -306,6 +510,17 @@ impl Engine {
         }
         self.history.extend_from_slice(&all);
         self.next = self.llm.sample(row);
+        self.line_buf.clear();
+        self.line_start = true;
+        self.speaking_line = false;
+        Ok(())
+    }
+
+    /// Something from outside, framed, decoded straight in.
+    fn put(&mut self, framed: String) -> Result<()> {
+        let tokens = self.tok(&framed, false)?;
+        self.direct(&tokens)?;
+        self.say(framed, Kind::Given);
         Ok(())
     }
 
@@ -340,7 +555,7 @@ impl Engine {
                 done: c.fed,
                 total: self.history.len() - c.from + 1,
             }
-        } else if self.speaking {
+        } else if self.speaking || self.speaking_line {
             Mode::Speaking
         } else {
             Mode::Thinking
@@ -355,6 +570,9 @@ impl Engine {
             queued: self.queue.len(),
             chunk: self.chunk,
             rollovers: self.rollovers,
+            notes: self.notes.len(),
+            frame: self.cfg.frame.name(),
+            leaks: self.leaks,
         }
     }
 
@@ -422,7 +640,8 @@ impl Engine {
         self.llm.seq_rm(old, -1, -1);
         self.free_seqs.push(old);
         self.next = self.llm.sample(row);
-        self.say(format!("\n[{}]\n", c.label), Kind::Given);
+        let mark = self.framed_system(&c.label);
+        self.say(mark, Kind::Given);
     }
 
     /// One cycle: the live token and whatever runs beside it.
@@ -469,10 +688,7 @@ impl Engine {
             ])?;
             c.fed += n;
             side_tokens += n;
-            self.history.push(self.next);
-            self.next = self.llm.sample(rows[0]);
-            let t = self.next;
-            self.emit_token(t);
+            self.advance(rows[0]);
             live_advanced = true;
             self.chase = Some(c);
             self.finish_cycle(t0, side_tokens, live_advanced);
@@ -508,10 +724,7 @@ impl Engine {
                         logits: false,
                     },
                 ])?;
-                self.history.push(self.next);
-                self.next = self.llm.sample(rows[0]);
-                let t = self.next;
-                self.emit_token(t);
+                self.advance(rows[0]);
                 live_advanced = true;
             }
             r.fed += n;
@@ -532,12 +745,24 @@ impl Engine {
             pos0: self.pos(),
             logits: true,
         }])?;
-        self.history.push(self.next);
-        self.next = self.llm.sample(rows[0]);
-        let t = self.next;
-        self.emit_token(t);
+        self.advance(rows[0]);
         self.finish_cycle(t0, 0, true);
         Ok(())
+    }
+
+    /// The pending token is decoded: keep it, sample the next, show it.
+    fn advance(&mut self, row: i32) {
+        self.history.push(self.next);
+        let mut t = self.llm.sample(row);
+        if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
+            // The journal has no end: a newline stands in for it.
+            self.eog_streak += 1;
+            t = self.newline;
+        } else {
+            self.eog_streak = 0;
+        }
+        self.next = t;
+        self.emit_token(t);
     }
 
     fn finish_cycle(&mut self, t0: Instant, side_tokens: usize, live_advanced: bool) {
@@ -555,8 +780,40 @@ impl Engine {
         }
     }
 
-    /// After a cycle: the end of a turn, the summary's end, a thought
-    /// that has looped, the queue, the rollover.
+    /// A file the mind asked for: read it into the queue, or tell it why not.
+    fn read_request(&mut self, path: &str) -> Result<()> {
+        let p = resolve(path, &self.cfg.workspace);
+        let outcome = fs::metadata(&p).map_err(|e| e.to_string()).and_then(|m| {
+            if !m.is_file() {
+                Err("not a regular file".to_string())
+            } else if m.len() > MAX_READ_BYTES {
+                Err(format!(
+                    "{} bytes, more than the {} allowed",
+                    m.len(),
+                    MAX_READ_BYTES
+                ))
+            } else {
+                fs::read_to_string(&p).map_err(|e| e.to_string())
+            }
+        });
+        match outcome {
+            Ok(text) => {
+                let framed =
+                    self.framed_doc(&text, &format!("the file {} is brought in", p.display()));
+                self.queue
+                    .push_back((framed, format!("read {}", p.display())));
+                self.note(format!("reading {} for it", p.display()));
+            }
+            Err(e) => {
+                let msg = self.framed_system(&format!("{} could not be read: {e}", p.display()));
+                self.put(msg)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// After a cycle: the summary's end, the turn's end, the mind's own
+    /// requests, circling, the queue, the rollover.
     fn after(&mut self) -> Result<()> {
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
@@ -572,61 +829,71 @@ impl Engine {
                     text.truncate(i);
                 }
                 let base = self.base_after(text.trim());
-                let tokens = self.llm.tokenize(&base, true)?;
+                let tokens = self.tok(&base, true)?;
                 self.note(format!(
-                    "rolling over: a base of {} tokens from a summary of {} tokens",
+                    "rolling over: a base of {} tokens from a summary of {} tokens and {} notes",
                     tokens.len(),
-                    s.len()
+                    s.len(),
+                    self.notes.len()
                 ));
                 self.rollovers += 1;
+                self.reseat = false;
                 self.start_reading(tokens, "resumed from the summary".into(), true)?;
             }
             return Ok(());
         }
 
-        // The turn ended: a silent user turn reopens the thoughts.
-        if self.next == self.eot || self.llm.is_eog(self.next) {
-            let tokens = self.llm.tokenize(SILENCE, true)?;
-            // The pending end token is decoded with the turn.
+        // Chat frame: the turn ended; the floor stays the mind's.
+        if !self.journal() && (self.next == self.eot || self.llm.is_eog(self.next)) {
+            let tokens = self.tok("<|im_end|>\n<|im_start|>assistant\n<think>\n", true)?;
             self.direct(&tokens)?;
             self.speaking = false;
-            self.say("\n[silence]\n".into(), Kind::Given);
+            self.say("\n".into(), Kind::Given);
             return Ok(());
         }
 
-        // Rollover: once the live sequence is past its share and nothing
-        // else is in flight, ask for the summary.
+        // Journal frame: the model kept trying to end; a word from the system.
+        if self.eog_streak >= 3 {
+            self.eog_streak = 0;
+            let msg =
+                self.framed_system("there is no end to this journal; go on with a thread of yours");
+            self.put(msg)?;
+            return Ok(());
+        }
+
+        let idle = self.reading.is_none() && self.chase.is_none();
+
+        // Files the mind asked for.
+        if idle && !self.pending_reads.is_empty() {
+            let paths = std::mem::take(&mut self.pending_reads);
+            for p in paths {
+                self.read_request(&p)?;
+            }
+        }
+
+        // Rollover: past the share, or a new persona waiting, with nothing
+        // in flight: ask for the summary.
         let limit = (self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize;
-        if self.history.len() >= limit
-            && self.reading.is_none()
-            && self.chase.is_none()
-            && self.summary.is_none()
-        {
-            let tokens = self.llm.tokenize(SUMMARY_ASK, false)?;
-            self.direct(&tokens)?;
-            self.say(SUMMARY_ASK.to_string(), Kind::Given);
+        if idle && (self.history.len() >= limit || self.reseat) {
+            let ask = self.summary_ask();
+            self.put(ask)?;
             self.summary = Some(Vec::new());
             return Ok(());
         }
 
         // Thoughts going round: a nudge, at most once in 256 tokens.
-        if self.reading.is_none()
-            && self.chase.is_none()
-            && self.gen_count >= self.last_nudge + 256
-            && self.circling()
-        {
+        if idle && self.gen_count >= self.last_nudge + 256 && self.circling() {
             self.last_nudge = self.gen_count;
-            let tokens = self.llm.tokenize(NUDGE, false)?;
-            self.direct(&tokens)?;
-            self.say(NUDGE.to_string(), Kind::Given);
+            let msg = self.framed_system("your thoughts have been circling the same words; move on to something else, concretely");
+            self.put(msg)?;
             self.note("the thoughts were circling; nudged".into());
             return Ok(());
         }
 
         // Something said or handed over, when nothing is being read.
-        if self.reading.is_none() && self.chase.is_none() {
+        if idle {
             if let Some((text, label)) = self.queue.pop_front() {
-                let tokens = self.llm.tokenize(&text, false)?;
+                let tokens = self.tok(&text, false)?;
                 if tokens.len() <= self.cfg.direct_max {
                     self.direct(&tokens)?;
                     self.say(text, Kind::Given);
@@ -643,17 +910,12 @@ impl Engine {
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
             Command::Say(s) => {
-                let text = format!("\n[they say: \"{}\"]\n", s.trim());
+                let text = self.framed_say(&s);
                 self.queue.push_back((text, "heard".into()));
             }
-            Command::Feed(s) => {
-                let n = s.len();
-                let text = format!(
-                    "\n[they hand you a document. It reads:\n{}\n--- that is the end of the document ---]\n",
-                    s.trim_end()
-                );
-                self.queue
-                    .push_back((text, format!("read a document of {n} bytes")));
+            Command::Feed(s, label) => {
+                let text = self.framed_doc(&s, &format!("{label} is handed over"));
+                self.queue.push_back((text, format!("read {label}")));
             }
             Command::Pause => self.paused = true,
             Command::Resume => self.paused = false,
@@ -663,20 +925,29 @@ impl Engine {
                 let s = self.cfg.sampling.clone();
                 self.llm.set_sampling(&s);
             }
+            Command::Persona(text) => {
+                self.cfg.system = text;
+                self.reseat = true;
+                let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
+                self.note("a new persona: the context rolls over onto it after a summary".into());
+            }
+            Command::Status => {
+                let _ = self.tx.send(Event::Status(self.status()));
+            }
             Command::Quit => return false,
         }
         true
     }
 
     pub fn run(mut self) -> Result<()> {
+        let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
         let opening = self.opening();
-        let tokens = self.llm.tokenize(&opening, true)?;
+        let tokens = self.tok(&opening, true)?;
         self.note(format!(
-            "the opening is {} tokens; the first multiply uploads the cards' shares",
-            tokens.len()
+            "the opening is {} tokens ({} frame); the first multiply uploads the cards' shares",
+            tokens.len(),
+            self.cfg.frame.name()
         ));
-        // The opening goes in directly; `next` is not yet a token.
-        let pos0 = 0;
         let mut row = 0;
         let cap = self.llm.batch_cap();
         for (i, c) in tokens.chunks(cap).enumerate() {
@@ -684,7 +955,7 @@ impl Engine {
             let rows = self.llm.decode(&[Lane {
                 seq: self.live,
                 tokens: c,
-                pos0: pos0 + (i * cap) as i32,
+                pos0: (i * cap) as i32,
                 logits: last,
             }])?;
             if let Some(&r) = rows.first() {
@@ -721,5 +992,55 @@ impl Engine {
             self.cycle()?;
             self.after()?;
         }
+    }
+}
+
+/// The notes kept in `notes.md`: one `- ` line each.
+fn read_notes(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.strip_prefix("- ").map(|n| n.trim().to_string()))
+                .filter(|n| !n.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A path the mind wrote: `~` expanded, relative to the workspace.
+fn resolve(path: &str, workspace: &Path) -> PathBuf {
+    let p = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest),
+        None => PathBuf::from(path),
+    };
+    if p.is_absolute() {
+        p
+    } else {
+        workspace.join(p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notes_are_dash_lines() {
+        let dir = std::env::temp_dir().join(format!("phi-stream-notes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("notes.md");
+        fs::write(&p, "- first\nnot a note\n-  second \n- \n").unwrap();
+        assert_eq!(
+            read_notes(&p),
+            vec!["first".to_string(), "second".to_string()]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn paths_resolve_against_the_workspace() {
+        let ws = Path::new("/ws");
+        assert_eq!(resolve("a/b.md", ws), PathBuf::from("/ws/a/b.md"));
+        assert_eq!(resolve("/etc/hosts", ws), PathBuf::from("/etc/hosts"));
     }
 }
