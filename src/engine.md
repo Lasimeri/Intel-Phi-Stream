@@ -156,7 +156,7 @@ whole set of tasks. The run's sampling is set explicitly when the engine
 starts.
 
 **Reads it asks for** (`[read: PATH]`, `[read: PATH:START-END]` for
-those lines, 1-based and inclusive):
+those lines, 1-based and inclusive, `END` or `end` for the last line):
 - **Must fit.** A file is read beside the live sequence, then joined. The
   reading's cells, the thoughts placed meanwhile and the chase all come
   out of the cells the live sequence leaves, so a read must fit what is

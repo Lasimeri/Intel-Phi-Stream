@@ -1962,7 +1962,11 @@ impl Engine {
             }
         };
         let what = match range {
-            Some((a, b)) => format!("lines {a} to {b} of {} are brought in", p.display()),
+            Some((a, b)) => format!(
+                "lines {a} to {} of {} are brought in",
+                b.min(a - 1 + text.lines().count()),
+                p.display()
+            ),
             None => format!("the file {} is brought in", p.display()),
         };
         let framed = self.framed_doc(&text, &what, clock::now_us());
@@ -2424,7 +2428,12 @@ fn fence_step(tail: &str, piece: &str) -> (bool, String) {
 fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
     if let Some((path, r)) = spec.rsplit_once(':') {
         if let Some((a, b)) = r.split_once('-') {
-            if let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse()) {
+            // `end` for the last line (the dev stream wrote `:41-end`).
+            let b = match b.trim() {
+                e if e.eq_ignore_ascii_case("end") => Ok(usize::MAX),
+                n => n.parse(),
+            };
+            if let (Ok(a), Ok(b)) = (a.trim().parse(), b) {
                 return (path.trim(), Some((a, b)));
             }
         }
@@ -2510,6 +2519,7 @@ mod tests {
             ("src/engine.rs", Some((120, 200)))
         );
         assert_eq!(read_range("a b/c.rs: 3 - 4"), ("a b/c.rs", Some((3, 4))));
+        assert_eq!(read_range("t.c:41-end"), ("t.c", Some((41, usize::MAX))));
         // A colon that is no range stays part of the path.
         assert_eq!(read_range("notes:draft.md"), ("notes:draft.md", None));
     }
