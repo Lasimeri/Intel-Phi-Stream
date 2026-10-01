@@ -572,6 +572,7 @@ pub fn stream(
             // A task's objective is the task.
             gate_output: false,
             summary_on_quit: false,
+            second_chain: false,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

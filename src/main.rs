@@ -187,6 +187,11 @@ struct StreamArgs {
     /// thinks until one is given: `phi-stream objective TEXT`).
     #[arg(long)]
     no_objective_gate: bool,
+    /// The second chain (src/engine.md): beside the live token, a reflection on
+    /// each line it ends, given the J-space words the line had on its mind;
+    /// the reflection joins the journal at a later line.
+    #[arg(long)]
+    second_chain: bool,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -625,6 +630,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         terminal: s.terminal,
         gate_output: !s.no_objective_gate,
         summary_on_quit: false,
+        second_chain: s.second_chain,
     })
 }
 
@@ -782,6 +788,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Objective(_, t)) => eprintln!("\x1b[2mobjective: {t}\x1b[0m"),
             Ok(Event::TermStart(_, _, c)) => eprintln!("\x1b[2m$ {c}\x1b[0m"),
             Ok(Event::TermEnd(_, r)) => eprintln!("\x1b[2m{}\x1b[0m", r.out),
+            Ok(Event::Delib(d)) => eprintln!("\x1b[2mbeside: {}\x1b[0m", d.text),
             Ok(Event::Done { .. }) => {}
             Ok(Event::Stopped) | Err(_) => break,
         }

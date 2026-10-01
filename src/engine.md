@@ -331,3 +331,33 @@ sampling stays), `Quit`.
 - **What changed** (in development): the commit it runs is kept in
   `last_run`; at a start on another commit it is told the commits between,
   newest first, at most 30.
+
+## The second chain (`--second-chain`, on in `dev`)
+
+Reflection at every token, not on a command: beside the live token runs
+a second chain (`Chain`), which reflects on each line the journal ends.
+- At a line's end (the live token placed holds a newline), when nothing
+  else is in flight (no check, reading, chase or summary, not inside a
+  code fence), at most once a second, and with three sequences free (two
+  stay for a check or a reading), a sequence is copied from the live one:
+  the whole context, nothing read again.
+- It is opened with a marker, not a question: the line's J-space words
+  (each word's lens probability summed over the line's tokens and blocks,
+  the six likeliest), `« [beside the journal; on its mind in the line
+  above: ...]`. The marker's first token is decoded alone (the copy
+  shares the live sequence's recurrent state until it writes its own, as
+  a check's deliberation does), the rest and then each of its own tokens
+  (greedy) in the live token's batch, until a newline after some text,
+  64 tokens, or an end of text. It pauses while a check, reading or
+  chase runs (their cycles are their own) and resumes after.
+- Its reflection joins the journal at a later line's end, when nothing
+  is in flight, as `« [HH:MM:SS] [beside the journal: ...]`: the J-space
+  generalizations come back into the reasoning chain's own context. A
+  rollover (the live sequence replaced) or a word written over by a check
+  drops a reflection in flight.
+- It runs whether or not there is an objective: it is reasoning, not
+  output. Its text goes to the terminals as `delib` lines (start: the
+  words it was given; piece: each token; end: what became of it), shown
+  in DELIBERATION; the service replays the last 400 to a new tail.
+- `chain on|off` on the socket turns it on or off live, so its cost is
+  measured interleaved on one service (`docs/results`).

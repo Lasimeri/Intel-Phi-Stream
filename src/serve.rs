@@ -29,6 +29,8 @@ const REPLAY_CHARS: usize = 12_000;
 const KEEP_MINDS: usize = 256;
 /// Lines of its terminal replayed to a new tail.
 const KEEP_TERM: usize = 64;
+/// Lines of the second chain replayed to a new tail.
+const KEEP_DELIB: usize = 400;
 
 struct Hub {
     recent: VecDeque<(String, Kind, i64)>,
@@ -41,9 +43,18 @@ struct Hub {
     /// lines of its terminal, replayed to a new tail.
     objective: Option<String>,
     term: VecDeque<String>,
+    /// The second chain's last lines, replayed likewise.
+    delib: VecDeque<String>,
 }
 
 impl Hub {
+    fn push_delib(&mut self, line: String) {
+        self.delib.push_back(line);
+        while self.delib.len() > KEEP_DELIB {
+            self.delib.pop_front();
+        }
+    }
+
     fn push_term(&mut self, line: String) {
         self.term.push_back(line);
         while self.term.len() > KEEP_TERM {
@@ -81,6 +92,7 @@ impl Hub {
         out.extend(self.minds.iter().cloned());
         out.extend(self.objective.iter().cloned());
         out.extend(self.term.iter().cloned());
+        out.extend(self.delib.iter().cloned());
         if let Some(s) = &self.last_status {
             out.push(s.clone());
         }
@@ -120,6 +132,7 @@ pub fn serve(
         minds: VecDeque::new(),
         objective: None,
         term: VecDeque::new(),
+        delib: VecDeque::new(),
     }));
     let stopped = Arc::new(AtomicBool::new(false));
 
@@ -165,6 +178,11 @@ pub fn serve(
                     Event::TermStart(id, t, cmd) => {
                         let line = format!("term start t={t} id={id} {}", escape(&cmd));
                         h.push_term(line.clone());
+                        h.broadcast(&line);
+                    }
+                    Event::Delib(d) => {
+                        let line = crate::client::delib_line(&d);
+                        h.push_delib(line.clone());
                         h.broadcast(&line);
                     }
                     Event::TermEnd(t, r) => {
@@ -319,6 +337,11 @@ fn connection(
                 }
                 Ok("tailing".to_string())
             }
+            "chain" => match arg.trim() {
+                "on" => ctx.send(Command::Chain(true)).map(|_| "the second chain on".to_string()).map_err(|_| "the engine is gone".to_string()),
+                "off" => ctx.send(Command::Chain(false)).map(|_| "the second chain off".to_string()).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("chain takes on or off".to_string()),
+            },
             "objective" => ctx
                 .send(Command::Objective(arg.to_string()))
                 .map(|_| if arg.trim().is_empty() { "objective cleared".to_string() } else { format!("objective set: {}", arg.trim()) })
@@ -327,7 +350,7 @@ fn connection(
                 ctx.send(Command::Quit).ok();
                 Ok("stopping".to_string())
             }
-            _ => Err(format!("unknown command {cmd}; say, feed, persona, objective, chunk, temp, pause, resume, status, recent, tail, quit")),
+            _ => Err(format!("unknown command {cmd}; say, feed, persona, objective, chain, chunk, temp, pause, resume, status, recent, tail, quit")),
         };
         match reply {
             Ok(m) => writeln!(w, "ok {m}")?,

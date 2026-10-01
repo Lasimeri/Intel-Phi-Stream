@@ -192,7 +192,7 @@ case "$sub" in
             fi
             rest+=("$a")
         done
-        exec "$0" start --dev "$root" --mind --reflect --terminal \
+        exec "$0" start --dev "$root" --mind --reflect --terminal --second-chain \
             --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev}" "${rest[@]}"
         ;;
     attach)

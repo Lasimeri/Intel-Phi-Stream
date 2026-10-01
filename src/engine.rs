@@ -106,6 +106,8 @@ pub enum Event {
     /// the command), or one ended (the real time, how).
     TermStart(u64, i64, String),
     TermEnd(i64, crate::term::Ran),
+    /// The second chain's text: a reflection began, a piece of it, its end.
+    Delib(crate::client::Delib),
     Stopped,
 }
 
@@ -131,6 +133,8 @@ pub enum Command {
     /// What it works toward (empty: none, and its output is idle until one
     /// is given).
     Objective(String),
+    /// The second chain on or off, live (an A/B of its cost).
+    Chain(bool),
     Quit,
 }
 
@@ -210,6 +214,9 @@ pub struct Config {
     /// `quit` writes the summary first, so a restart resumes from it (the
     /// service; a one-shot run stops at once).
     pub summary_on_quit: bool,
+    /// The second chain (`Chain`): a reflection beside the live token at
+    /// each line's end.
+    pub second_chain: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -330,6 +337,25 @@ struct Saved {
 
 /// A check in flight (reflect.md): the token in question, the two copies
 /// made before it, and the deliberation's lane.
+/// The second chain (`--second-chain`, `engine.md`): a lane forked from the
+/// live sequence at a line's end that reflects on that line beside the
+/// live token, given the J-space words the line had on its mind; its
+/// reflection joins the journal at a later line's end.
+struct Chain {
+    seq: i32,
+    /// Its opening (the marker with the line's J-space words), fed first.
+    prompt: Vec<i32>,
+    fed: usize,
+    /// Its own tokens; the last is decoded in the next cycle.
+    out: Vec<i32>,
+    /// The next position in its sequence.
+    pos: i32,
+}
+
+/// The longest reflection, and the least time between two.
+const CHAIN_MAX: usize = 64;
+const CHAIN_EVERY_US: i64 = 1_000_000;
+
 struct Check {
     why: Why,
     /// The position of the token in question, its text, the model's
@@ -472,6 +498,16 @@ pub struct Engine {
     stop_now: bool,
     /// What changed in the program since it last ran (`changes_since`).
     changed_since: String,
+    /// The second chain: on, the lane in flight, the J-space words of the
+    /// line being written (word, summed probability), when it last forked,
+    /// the live token just placed ended a line, a reflection waiting for the
+    /// journal.
+    chain_on: bool,
+    reflecting: Option<Chain>,
+    line_words: HashMap<String, f32>,
+    chain_fork_mono: i64,
+    line_ended: bool,
+    reflection: Option<String>,
     read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
@@ -676,6 +712,7 @@ impl Engine {
             .reflect
             .as_ref()
             .map(|_| RotLog::open(cfg.workspace.join("reflect.log")));
+        let chain_on = cfg.second_chain && !cfg.task;
         Ok(Self {
             llm,
             cfg,
@@ -730,6 +767,12 @@ impl Engine {
             quit_deadline: None,
             stop_now: false,
             changed_since,
+            chain_on,
+            reflecting: None,
+            line_words: HashMap::new(),
+            chain_fork_mono: i64::MIN / 2,
+            line_ended: false,
+            reflection: None,
             read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
@@ -1180,6 +1223,100 @@ impl Engine {
         }
     }
 
+    /// A line of the journal ended (`after`): the waiting reflection joins
+    /// it, and the second chain forks to reflect on the line just ended,
+    /// when nothing else is in flight.
+    fn on_line_end(&mut self) -> Result<()> {
+        let quiet = self.check.is_none()
+            && self.reading.is_none()
+            && self.chase.is_none()
+            && self.summary.is_none()
+            && !self.in_code;
+        if !quiet {
+            return Ok(());
+        }
+        if let Some(text) = self.reflection.take() {
+            let at = clock::hms(clock::now_us());
+            let line = match self.cfg.frame {
+                Frame::Journal => format!("\n« [{at}] [beside the journal: {text}]\n"),
+                Frame::Chat => format!("\n[at {at}, beside your thoughts: {text}]\n"),
+            };
+            self.put(line)?;
+        }
+        let mono = clock::mono_us();
+        let words = std::mem::take(&mut self.line_words);
+        if self.reflecting.is_some()
+            || mono - self.chain_fork_mono < CHAIN_EVERY_US
+            || self.free_seqs.len() < 3
+            || words.is_empty()
+        {
+            return Ok(());
+        }
+        // The line's J-space words, likeliest first.
+        let mut words: Vec<(String, f32)> = words.into_iter().collect();
+        words.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let shown: Vec<String> = words.into_iter().take(6).map(|w| w.0).collect();
+        let marker = match self.cfg.frame {
+            Frame::Journal => format!(
+                "\n« [beside the journal; on its mind in the line above: {}]\n",
+                shown.join(", ")
+            ),
+            Frame::Chat => format!(
+                "\n[beside your thoughts; on your mind in the line above: {}]\n",
+                shown.join(", ")
+            ),
+        };
+        let prompt = self.tok(&marker, false)?;
+        if prompt.is_empty() || prompt.len() >= self.llm.batch_cap() {
+            return Ok(());
+        }
+        let seq = self.free_seqs.pop().unwrap();
+        self.llm.seq_rm(seq, -1, -1);
+        self.llm.seq_cp(self.live, seq, -1, -1);
+        self.chain_fork_mono = mono;
+        let pos = self.history.len() as i32;
+        let _ = self.tx.send(Event::Delib(crate::client::Delib {
+            kind: crate::client::DelibKind::Start,
+            t_us: clock::now_us(),
+            pos,
+            text: format!("on its mind in the line before {pos}: {}", shown.join(", ")),
+        }));
+        self.reflecting = Some(Chain {
+            seq,
+            prompt,
+            fed: 0,
+            out: Vec::new(),
+            pos,
+        });
+        Ok(())
+    }
+
+    /// The second chain's reflection ends: kept for the journal's next
+    /// line (`keep`), or dropped (the journal moved under it: a rollover,
+    /// a word written over); its sequence freed.
+    fn end_chain(&mut self, keep: bool) {
+        let Some(c) = self.reflecting.take() else {
+            return;
+        };
+        self.llm.seq_rm(c.seq, -1, -1);
+        self.free_seqs.push(c.seq);
+        let text = self.llm.text(&c.out).trim().to_string();
+        let outcome = if keep && !text.is_empty() {
+            self.reflection = Some(text);
+            "into the journal at its next line's end"
+        } else if keep {
+            "nothing to say"
+        } else {
+            "dropped: the journal moved under it"
+        };
+        let _ = self.tx.send(Event::Delib(crate::client::Delib {
+            kind: crate::client::DelibKind::End,
+            t_us: clock::now_us(),
+            pos: c.pos,
+            text: outcome.to_string(),
+        }));
+    }
+
     /// What it works toward, set (or cleared, empty): kept in
     /// `objective.md`, told to it as a line from the system, sent to the
     /// terminals; its output opens (or idles again).
@@ -1406,6 +1543,18 @@ impl Engine {
             if self.reflector.is_some() {
                 self.last_reading = Some(r.clone());
             }
+            // The line's J-space words, for the second chain: each word's
+            // probability summed over the line's tokens and blocks.
+            if self.chain_on {
+                for (_, ws) in &r.layers {
+                    for (w, lp) in ws {
+                        let w = w.trim();
+                        if !w.is_empty() {
+                            *self.line_words.entry(w.to_string()).or_default() += lp.exp();
+                        }
+                    }
+                }
+            }
             let _ = self.tx.send(Event::Mind(r));
         }
         Ok(())
@@ -1563,6 +1712,8 @@ impl Engine {
     /// The chase has fed every thought up to the pending token: the
     /// composed sequence becomes the live one.
     fn swap(&mut self, c: Chase, row: i32) -> Result<()> {
+        // The live sequence is replaced: a reflection on the old one goes.
+        self.end_chain(false);
         let old = self.live;
         let mut history = c.head;
         history.extend_from_slice(&self.history[c.from..]);
@@ -1686,6 +1837,73 @@ impl Engine {
             return Ok(());
         }
 
+        // The second chain beside the live token (`Chain`): its opening's
+        // first token alone (the copy shares the live sequence's recurrent
+        // state until it writes its own, as a check's deliberation does),
+        // then the rest of it and each token of its own in the live token's
+        // batch.
+        if let Some(mut c) = self.reflecting.take() {
+            if c.fed == 0 {
+                self.llm.decode(&[Lane {
+                    seq: c.seq,
+                    tokens: &c.prompt[..1],
+                    pos0: c.pos,
+                    logits: false,
+                }])?;
+                // No live row in it: nobody reads the capture.
+                if let Some(cap) = self.llm.capture() {
+                    cap.take();
+                }
+                c.fed = 1;
+                c.pos += 1;
+                self.reflecting = Some(c);
+                self.finish_cycle(t0, 1, false);
+                return Ok(());
+            }
+            let lane: Vec<i32> = if c.fed < c.prompt.len() {
+                c.prompt[c.fed..].to_vec()
+            } else {
+                vec![*c.out.last().unwrap()]
+            };
+            let rows = self.llm.decode(&[
+                Lane {
+                    seq: self.live,
+                    tokens: &[self.next],
+                    pos0: self.pos(),
+                    logits: true,
+                },
+                Lane {
+                    seq: c.seq,
+                    tokens: &lane,
+                    pos0: c.pos,
+                    logits: true,
+                },
+            ])?;
+            c.pos += lane.len() as i32;
+            c.fed = c.prompt.len();
+            let t = self.llm.greedy(rows[1], true)?;
+            let piece = self.llm.text(&[t]);
+            c.out.push(t);
+            let done = self.llm.is_eog(t)
+                || c.out.len() >= CHAIN_MAX
+                || (piece.contains('\n') && !self.llm.text(&c.out).trim().is_empty());
+            let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                kind: crate::client::DelibKind::Piece,
+                t_us: clock::now_us(),
+                pos: c.pos,
+                text: piece,
+            }));
+            // Back in place before the live token advances (`consider` and
+            // the sequences' count must see it).
+            self.reflecting = Some(c);
+            if done {
+                self.end_chain(true);
+            }
+            self.advance(rows[0])?;
+            self.finish_cycle(t0, lane.len(), true);
+            return Ok(());
+        }
+
         // Nothing beside: the live token alone.
         let rows = self.llm.decode(&[Lane {
             seq: self.live,
@@ -1703,6 +1921,10 @@ impl Engine {
     /// checking it, show it.
     fn advance(&mut self, row: i32) -> Result<()> {
         self.mind_step(self.pos(), self.next)?;
+        // A line ends with this token: the second chain's moment (`after`).
+        if self.chain_on && self.llm.text(&[self.next]).contains('\n') {
+            self.line_ended = true;
+        }
         self.history.push(self.next);
         let forced = self.forced.pop_front();
         let mut t = match forced {
@@ -2075,6 +2297,8 @@ impl Engine {
                 self.held.truncate((c.hold_from - self.released) as usize);
                 self.history.truncate(c.at);
                 self.restore(c.saved);
+                // A word written over: a reflection forked before it goes.
+                self.end_chain(false);
                 let old = self.live;
                 self.llm.seq_rm(old, -1, -1);
                 self.llm.seq_rm(c.seq, -1, -1);
@@ -2347,6 +2571,10 @@ impl Engine {
         }
         // Its terminal: commands that ended come back as documents.
         self.poll_term();
+        // A line ended: the second chain's moment.
+        if std::mem::take(&mut self.line_ended) {
+            self.on_line_end()?;
+        }
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
             s.push(self.next);
@@ -2566,6 +2794,17 @@ impl Engine {
                 let _ = self.tx.send(Event::Status(self.status()));
             }
             Command::Objective(text) => self.set_objective(text.trim()),
+            Command::Chain(on) => {
+                self.chain_on = on && !self.cfg.task;
+                if !self.chain_on {
+                    self.end_chain(false);
+                    self.line_words.clear();
+                }
+                self.note(format!(
+                    "the second chain {}",
+                    if self.chain_on { "on" } else { "off" }
+                ));
+            }
             Command::Quit => {
                 // Its context outlives the restart: the summary first (at
                 // the next point with nothing in flight), then the stop; by

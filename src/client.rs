@@ -318,10 +318,6 @@ pub struct Delib {
 }
 
 /// A `delib` line as the service sends it.
-// Sent by the engine's next commit (the reasoning check); the terminal
-// reads these lines first, so a reloaded terminal shows them on the
-// service's restart.
-#[allow(dead_code)]
 pub fn delib_line(d: &Delib) -> String {
     let kind = match d.kind {
         DelibKind::Start => "start",

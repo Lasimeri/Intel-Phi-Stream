@@ -39,7 +39,9 @@ a failure's message outlives the tmux session.
 While the model is loaded and running, a terminal window on the desktop
 shows it: the diagnostics (the placement, the rates, the context, the
 mind strip, the checks) and the input line (`src/tui.md`).
-- `dev` adds `--terminal` (the stream's sandboxed terminal, `src/term.md`).
+- `dev` adds `--terminal` (the stream's sandboxed terminal, `src/term.md`)
+and `--second-chain` (a reflection beside the live token at each line's
+end, `src/engine.md`).
 `stop` waits up to two minutes for the service to write its summary and
 end (`src/engine.md`) before it ends the session.
 
