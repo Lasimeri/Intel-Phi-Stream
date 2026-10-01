@@ -14,7 +14,7 @@
 //! through channels. See engine.md.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -27,6 +27,7 @@ use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
 use crate::playout::Playout;
 use crate::reflect::{self, Decision, Episode, Outcome, ReflectConfig, Reflector, Why};
+use crate::rotlog::RotLog;
 use crate::verify;
 
 /// What a piece of the stream is.
@@ -408,9 +409,9 @@ pub struct Engine {
     think_close: i32,
     eot: i32,
     newline: i32,
-    log: Option<File>,
+    log: RotLog,
     /// Each piece of the stream with its microseconds (`chain.log`).
-    chain: Option<File>,
+    chain: RotLog,
     /// When something last came from outside, when the clock was last put
     /// into the chain, and when the thoughts were last nudged: microseconds
     /// of the monotonic clock (durations; the wall clock may step).
@@ -439,7 +440,7 @@ pub struct Engine {
     reflector: Option<Reflector>,
     check: Option<Check>,
     forced: VecDeque<i32>,
-    reflect_log: Option<File>,
+    reflect_log: Option<RotLog>,
     last_reading: Option<MindReading>,
     spent_noted: bool,
     /// The choice's tokens: the one-token forms of keep and of write, and
@@ -532,12 +533,8 @@ impl Engine {
             }
             None => notes,
         };
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(cfg.workspace.join("stream.log"))
-            .ok();
-        let cfg_chain_path = cfg.workspace.join("chain.log");
+        let log = RotLog::open(cfg.workspace.join("stream.log"));
+        let chain = RotLog::open(cfg.workspace.join("chain.log"));
         let tx = Playout::start(cfg.horizon_us, tx);
         let reflector = cfg.reflect.clone().map(Reflector::new);
         let choice = match &cfg.reflect {
@@ -562,13 +559,10 @@ impl Engine {
             }
             None => None,
         };
-        let reflect_log = cfg.reflect.as_ref().and_then(|_| {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(cfg.workspace.join("reflect.log"))
-                .ok()
-        });
+        let reflect_log = cfg
+            .reflect
+            .as_ref()
+            .map(|_| RotLog::open(cfg.workspace.join("reflect.log")));
         Ok(Self {
             llm,
             cfg,
@@ -606,11 +600,7 @@ impl Engine {
             eot,
             newline,
             log,
-            chain: OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(cfg_chain_path)
-                .ok(),
+            chain,
             last_outside_mono: clock::mono_us(),
             last_anchor_mono: clock::mono_us(),
             last_nudge_mono: i64::MIN / 2,
@@ -645,16 +635,15 @@ impl Engine {
     /// Out with a piece: `stream.log` (the text), `chain.log` (each piece
     /// with the microsecond it came to exist) and the clients.
     fn out(&mut self, text: String, kind: Kind, t: i64) {
-        if let Some(f) = &mut self.log {
-            let _ = f.write_all(text.as_bytes());
-        }
-        if let Some(f) = &mut self.chain {
+        self.log.write(text.as_bytes());
+        {
+            let f = &mut self.chain;
             let k = match kind {
                 Kind::Think => "think",
                 Kind::Speak => "speak",
                 Kind::Given => "given",
             };
-            let _ = writeln!(f, "{t}\t{k}\t{}", crate::client::escape(&text));
+            f.line(&format!("{t}\t{k}\t{}", crate::client::escape(&text)));
         }
         let _ = self.tx.send(Event::Text(text, kind, t));
     }
@@ -1797,7 +1786,7 @@ impl Engine {
             back,
         };
         if let Some(f) = &mut self.reflect_log {
-            let _ = writeln!(f, "{}", reflect::line(&e));
+            f.line(&reflect::line(&e));
         }
         if outcome == Outcome::Changed {
             self.note(format!(
@@ -1858,6 +1847,18 @@ impl Engine {
         let (path, range) = read_range(spec);
         // In development, paths are the repository's (`docs/dev.md`).
         let p = resolve(path, self.cfg.dev.as_deref().unwrap_or(&self.cfg.workspace));
+        // And they stay in it (closed by default): its reads are logged and
+        // shown, so nothing outside the repository and its workspace (a key,
+        // a private file) is brought in. `..` and symbolic links are resolved
+        // before the test, so no spelling escapes it.
+        if let Some(root) = &self.cfg.dev {
+            if !inside(&p, &[root.as_path(), self.cfg.workspace.as_path()]) {
+                return self.read_failed(
+                    &p,
+                    "outside the repository and your workspace, all a read may reach while developing",
+                );
+            }
+        }
         let outcome = fs::metadata(&p)
             .map_err(|e| e.to_string())
             .and_then(|m| {
@@ -2268,6 +2269,42 @@ fn read_notes(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `p` with `.` and `..` resolved in its text and symbolic links resolved
+/// in the longest part of it that exists.
+fn normalized(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    let mut existing = out.clone();
+    let mut rest = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(n) => {
+                rest.push(n.to_os_string());
+                existing.pop();
+            }
+            None => break,
+        }
+    }
+    let mut base = fs::canonicalize(&existing).unwrap_or(existing);
+    for n in rest.into_iter().rev() {
+        base.push(n);
+    }
+    base
+}
+
+/// Whether `p` lies under one of `roots`, both normalized.
+fn inside(p: &Path, roots: &[&Path]) -> bool {
+    let p = normalized(p);
+    roots.iter().any(|r| p.starts_with(normalized(r)))
+}
 /// For a path that does not exist: its nearest existing directory and up
 /// to 40 of the names in it, sorted, directories with a trailing `/`.
 fn nearest_listing(p: &Path) -> Option<(PathBuf, String)> {
@@ -2337,6 +2374,26 @@ mod tests {
         assert_eq!(at, dir.join("src"));
         assert_eq!(names, "engine.rs, reflect.rs");
         assert!(nearest_listing(&dir.join("src/engine.rs")).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn development_reads_stay_inside() {
+        let dir = std::env::temp_dir().join(format!("phi-stream-inside-{}", std::process::id()));
+        let repo = dir.join("repo");
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/a.rs"), "").unwrap();
+        let ws = dir.join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let roots = [repo.as_path(), ws.as_path()];
+        assert!(inside(&repo.join("src/a.rs"), &roots));
+        assert!(inside(&repo.join("src/not-yet.rs"), &roots));
+        assert!(inside(&ws.join("reflect.log"), &roots));
+        assert!(!inside(&repo.join("src/../../outside"), &roots));
+        assert!(!inside(Path::new("/etc/passwd"), &roots));
+        // A symbolic link out of the repository does not carry a read out.
+        std::os::unix::fs::symlink("/etc", repo.join("etc")).unwrap();
+        assert!(!inside(&repo.join("etc/passwd"), &roots));
         fs::remove_dir_all(&dir).unwrap();
     }
 

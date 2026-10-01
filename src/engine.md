@@ -168,6 +168,11 @@ those lines, 1-based and inclusive):
     18000 filled the 32768 cells. The decode failed and the service
     stopped.
 - **Asked twice, read once.** A path asked for twice is read once.
+- **Inside, in development.** With `--dev`, a read must lie in the
+  repository or the workspace, with `..` and symbolic links resolved
+  first. Its reads are logged and shown, so nothing outside (a key, a
+  private file) is brought in. Closed by default, as in the Machine note
+  (2.9).
 - **Dropped at a rollover.** Reads still waiting when a rollover starts
   are dropped, with a note: the summary carries what they were for, and
   stale whole files would refill the new context at once.
@@ -258,6 +263,10 @@ cycle carries the live token beside D's lane, plus the one solo cycle.
 Every check is an `Event::Reflect` (an episode: `reflect.md`), a line in
 `reflect.log`, and counts in the status (`checks`, `changes`,
 `unparsed`, `checking`).
+
+**Logs rotate** (`rotlog.md`): `stream.log`, `chain.log`, `mind.log` and
+`reflect.log` each move to `NAME.1` past 64 MiB, the dev stream's own
+audit finding.
 
 Rates: exponential averages over recent cycles (`stream_tps` over cycles
 that carried a live token, `side_tps` over those that read or caught up,

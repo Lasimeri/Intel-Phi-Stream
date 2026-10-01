@@ -19,6 +19,7 @@ mod playout;
 mod probe;
 mod readout;
 mod reflect;
+mod rotlog;
 mod screen;
 mod serve;
 mod split;

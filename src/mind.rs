@@ -6,8 +6,6 @@
 //! the engine's cycle, right after the decode that placed the token. See
 //! mind.md.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
@@ -16,6 +14,7 @@ use anyhow::{bail, Context as _, Result};
 use crate::lens::Lens;
 use crate::llm::Llm;
 use crate::readout::{cuda_device, Group, Readout};
+use crate::rotlog::RotLog;
 
 /// How the mind is read.
 #[derive(Clone, Debug)]
@@ -58,7 +57,7 @@ pub struct Mind {
     wordlike: Vec<bool>,
     /// The token texts, for display.
     texts: Vec<String>,
-    log: Option<File>,
+    log: RotLog,
 }
 
 /// The reference's display rule (`_meaningful_token_mask`, jlens/vis.py):
@@ -109,11 +108,7 @@ impl Mind {
             wordlike.push(is_wordlike(&s));
             texts.push(s.trim().to_string());
         }
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(workspace.join("mind.log"))
-            .ok();
+        let log = RotLog::open(workspace.join("mind.log"));
         Ok(Self {
             readout,
             cfg,
@@ -189,9 +184,7 @@ impl Mind {
             ms: t0.elapsed().as_secs_f32() * 1000.0,
             t_us,
         };
-        if let Some(f) = &mut self.log {
-            let _ = writeln!(f, "{}", line(&reading));
-        }
+        self.log.line(&line(&reading));
         Ok(Some(reading))
     }
 }

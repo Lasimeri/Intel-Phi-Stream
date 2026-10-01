@@ -190,7 +190,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
 | `src/clock.rs` | the wall clock the stream is kept against, to the microsecond |
 | `src/torch.rs`, `src/lens.rs`, `src/eval.rs`, `src/mind.rs` | the reference's lens file read without Python; the `.jlens` format; the lens against the logit lens on the reference's sets; what is on its mind at every token |
-| `src/reflect.rs`, `src/playout.rs` | the reflection loop's triggers, controls, question, choice and episodes; the display's own clock |
+| `src/reflect.rs`, `src/playout.rs`, `src/verify.rs`, `src/rotlog.rs` | the reflection loop's triggers, controls, question, choice and episodes; the display's own clock; a note checked against the code; logs rotated by size |
 | `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
 | `src/code.rs`, `scripts/fetch-code-eval.sh`, `tools/parquet-jsonl` | whether it writes working code: MultiPL-E's HumanEval in Rust, fetched pinned, compiled and tested in a sandbox |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
