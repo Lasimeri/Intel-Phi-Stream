@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use anyhow::{bail, Context as _, Result};
 
+use crate::capture::{eval_callback, Capture, CaptureConfig};
 use crate::split::{self, Split};
 use crate::sys;
 
@@ -40,6 +41,12 @@ pub struct Options {
     pub kv_unified: bool,
     /// Show llama.cpp's informational log.
     pub verbose: bool,
+    /// Read the residual stream through llama.cpp's eval callback
+    /// (`capture.rs`); none: no callback is installed at all.
+    pub capture: Option<CaptureConfig>,
+    /// GPU memory to leave free beyond the context's own needs (the
+    /// readout's backend and transports), bytes.
+    pub extra_reserve: u64,
 }
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -112,6 +119,8 @@ pub struct Llm {
     pub vram: (u64, u64),
     pub opts: Options,
     eog: Vec<i32>,
+    /// The callback's state; boxed so its address is stable for llama.cpp.
+    capture: Option<Box<Capture>>,
 }
 
 // SAFETY: the context is driven by one thread at a time (the engine's);
@@ -150,7 +159,8 @@ impl Llm {
             let reserve = kv_per_token * opts.ctx as u64
                 + 512 * (1 << 20)
                 + opts.batch as u64 * 2 * (1 << 20)
-                + 768 * (1 << 20);
+                + 768 * (1 << 20)
+                + opts.extra_reserve;
             let budget = (free as u64).saturating_sub(reserve);
             let plan = split::plan(&sizes, budget, opts.gpu_blocks);
 
@@ -189,6 +199,11 @@ impl Llm {
             cp.n_threads_batch = opts.threads;
             cp.flash_attn_type = sys::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_ENABLED;
             cp.kv_unified = opts.kv_unified;
+            let mut capture = opts.capture.clone().map(|c| Box::new(Capture::new(c)));
+            if let Some(c) = capture.as_mut() {
+                cp.cb_eval = Some(eval_callback);
+                cp.cb_eval_user_data = c.as_mut() as *mut Capture as *mut c_void;
+            }
             let kv_type = if opts.kv_q8 {
                 sys::ggml_type_GGML_TYPE_Q8_0
             } else {
@@ -230,8 +245,23 @@ impl Llm {
                 vram: (free as u64, total as u64),
                 opts,
                 eog,
+                capture,
             })
         }
+    }
+
+    /// The capture, when one is installed.
+    pub fn capture(&mut self) -> Option<&mut Capture> {
+        self.capture.as_deref_mut()
+    }
+
+    /// The number of decoder blocks the main pass runs. llama.cpp's count
+    /// already leaves out the extra prediction block (`hparams.n_layer()`
+    /// against `n_layer_all`, llama-hparams.cpp): 40 for this model, whose
+    /// file holds 41.
+    pub fn n_layer(&self) -> i32 {
+        // SAFETY: a plain query of the model.
+        unsafe { sys::llama_model_n_layer(self.model.as_ptr()) }
     }
 
     pub fn n_ctx(&self) -> u32 {

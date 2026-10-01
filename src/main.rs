@@ -4,11 +4,14 @@
 //! (`serve`); the terminal and the one-shot commands are its clients. See
 //! main.md.
 
+mod capture;
+mod check;
 mod client;
 mod engine;
 mod gate;
 mod llm;
 mod probe;
+mod readout;
 mod serve;
 mod split;
 mod sys;
@@ -206,6 +209,11 @@ enum Cmd {
         #[arg(long, default_value_t = 32)]
         compare: usize,
     },
+    /// The lens: its checks and readouts (no service).
+    Lens {
+        #[command(subcommand)]
+        cmd: LensCmd,
+    },
     /// The stream on stdout, lines on stdin said to it (no service; for scripts).
     Run {
         #[command(flatten)]
@@ -214,6 +222,14 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         max_tokens: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum LensCmd {
+    /// Gate: the captured residual of the token being placed, decoded by
+    /// the readout, reproduces the model's own logits, alone, beside a
+    /// reading and at the end of an injection (check.md).
+    Check,
 }
 
 pub fn expand_home(p: &str) -> String {
@@ -255,6 +271,16 @@ fn sampling(m: &ModelArgs) -> Sampling {
 }
 
 fn load(m: &ModelArgs) -> Result<Llm> {
+    load_with(m, None, 0)
+}
+
+/// GPU memory the readout needs beside the model: its own backend's
+/// buffers and the logits of a few columns (`readout.md`).
+const READOUT_RESERVE: u64 = 256 << 20;
+
+/// The model with a capture installed (`capture.md`) and `extra` bytes of
+/// GPU memory kept free for the readout.
+fn load_with(m: &ModelArgs, capture: Option<capture::CaptureConfig>, extra: u64) -> Result<Llm> {
     backend_path();
     let opts = Options {
         model: expand_home(&m.model),
@@ -267,6 +293,8 @@ fn load(m: &ModelArgs) -> Result<Llm> {
         n_seq: m.n_seq,
         kv_unified: !m.kv_split,
         verbose: m.verbose,
+        capture,
+        extra_reserve: extra,
     };
     Llm::load(opts, &sampling(m))
 }
@@ -534,6 +562,24 @@ fn main() -> Result<()> {
             let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
             gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)
         }
+        Cmd::Lens { cmd } => match cmd {
+            LensCmd::Check => {
+                let mut llm = load_with(
+                    &cli.model,
+                    Some(capture::CaptureConfig {
+                        layers: Vec::new(),
+                        all_rows: false,
+                        keep_logits: true,
+                    }),
+                    READOUT_RESERVE,
+                )?;
+                let last = llm.n_layer() - 1;
+                if let Some(c) = llm.capture() {
+                    c.cfg.layers = vec![last];
+                }
+                check::check(&mut llm, &PARAGRAPH.repeat(6), &PARAGRAPH.repeat(4))
+            }
+        },
         Cmd::Run { stream, max_tokens } => run_cmd(&cli.model, &stream, max_tokens),
     }
 }

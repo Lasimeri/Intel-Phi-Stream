@@ -71,6 +71,24 @@ in). `--frame chat` keeps the model's own template instead
   touching the backend; llama.cpp's hybrid memory splits such a batch by
   itself.
 
+## Reading what is on its mind (in progress)
+
+The next stage gives the stream a view of its own workspace: per token,
+the residual stream at chosen blocks read through a Jacobian lens (the
+technique of Anthropic's "Verbalizable Representations Form a Global
+Workspace in Language Models"), then fed back so the mind can reason
+about the concepts it is holding at the token it is placing. Built in
+gated steps, each usable and recorded:
+
+- **Done**: the capture and the readout. `scripts/phi-stream.sh lens
+  check` proves that the residual captured live, decoded with the
+  model's own norm and unembedding, is exactly the model's next-token
+  distribution in every kind of cycle
+  ([`docs/results/2026-10-01-lens-capture.md`](docs/results/2026-10-01-lens-capture.md)).
+- Next: the cost in the stream, the pinned lens file and its converter,
+  the lens evaluated on this model against the plain logit lens, then
+  the live per-token readout and the reflection loop.
+
 ## Measured (2026-10-01, [`docs/results/2026-10-01-phi-stream.md`](docs/results/2026-10-01-phi-stream.md))
 
 | | the stream | the reading |
@@ -118,6 +136,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/serve.rs`, `src/client.rs` | the service that owns the model and its socket; the wire and the client side |
 | `src/tui.rs` | the terminal, a client of the service |
 | `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence |
+| `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
 | `docs/results/` | measurements, with their commands |
 

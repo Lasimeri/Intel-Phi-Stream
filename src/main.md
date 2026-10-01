@@ -18,6 +18,8 @@ phi-stream chunk 16 | temp 0.8 | pause | resume | quit
 
 Subcommands that own the model (no service): `serve` (the service
 itself, `src/serve.md`), `probe` (`src/probe.md`), `gate` (`src/gate.md`),
+`lens check` (the capture and the readout reproduce the model's own
+logits, `src/check.md`),
 `run` (the stream on stdout, stdin lines said to it, `/feed FILE`,
 `/chunk N`, `/quit`; `--max-tokens` to stop; for scripted tests). The
 clients take `--socket PATH` (or `PHI_STREAM_SOCKET`; `src/client.md`).
