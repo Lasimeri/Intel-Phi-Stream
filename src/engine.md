@@ -167,6 +167,8 @@ those lines, 1-based and inclusive):
   - In the first dev session, one 21026-token file read at position
     18000 filled the 32768 cells. The decode failed and the service
     stopped.
+- **A directory reads as its listing** (sorted, directories with a
+  trailing `/`): how it learns the tree.
 - **Asked twice, read once.** A path asked for twice is read once.
 - **Inside, in development.** With `--dev`, a read must lie in the
   repository or the workspace, with `..` and symbolic links resolved

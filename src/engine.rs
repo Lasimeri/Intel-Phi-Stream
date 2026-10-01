@@ -1903,7 +1903,24 @@ impl Engine {
         let outcome = fs::metadata(&p)
             .map_err(|e| e.to_string())
             .and_then(|m| {
-                if !m.is_file() {
+                if m.is_dir() {
+                    // A directory reads as its listing: how it learns the tree.
+                    let mut names: Vec<String> = fs::read_dir(&p)
+                        .map_err(|e| e.to_string())?
+                        .filter_map(|e| e.ok())
+                        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                        .map(|e| {
+                            let n = e.file_name().to_string_lossy().into_owned();
+                            if e.path().is_dir() {
+                                format!("{n}/")
+                            } else {
+                                n
+                            }
+                        })
+                        .collect();
+                    names.sort();
+                    Ok(names.join("\n"))
+                } else if !m.is_file() {
                     Err("not a regular file".to_string())
                 } else if m.len() > MAX_READ_BYTES {
                     Err(format!(
