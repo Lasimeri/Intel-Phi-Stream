@@ -86,3 +86,57 @@ thread and handed to the drawing loop through a channel.
   pane: a half-typed line survived a rebuild (same pid, the new inode
   running, `(1 reloaded)`); after the client was aborted by pid the loop
   reset the pane, waited, and ran the next build.
+
+## Compartments
+
+The screen is divided into framed compartments, each with an upper-case
+label in its top edge (the management plan's layout, 2.6):
+
+| at | compartment | holds |
+| --- | --- | --- |
+| row 0 | title | the placement, the cells, the time up, the stream's clock |
+| 80 to 119 columns | the view (rows 1 to 13 at 24 rows), then ASSESSMENT (4 lines) | |
+| 120 columns and more | the view on the left; a 40-column side column with ASSESSMENT (12 rows) above LOG | |
+| row h-4 | MIND strip | the last reading of its mind |
+| row h-3 | status strip | what it is doing, the rates, the checks |
+| row h-2 | input | |
+| row h-1 | keys and the last note | |
+
+- **The view** is one of FEED (the stream), MIND (the readings token by
+  token) and LOG; `Tab` cycles them, `/feed`, `/mind`, `/log` name one
+  (`/feed FILE` still hands a file over; `/mind` again goes back to the
+  stream). Its label names it and the next one.
+- **ASSESSMENT** is the last check that ended, with its numbers exactly
+  as the `reflect` line has them (`reflect.md`): the outcome word, KEEP
+  and WRITE (keep's share of the two and the rest), ANSWERED (`fmt`), the
+  model's probability of the token and the trigger, the three likeliest
+  tokens at `Decision:` with their percent, the words on its mind, the
+  rule that decided, the time, position and duration. In the side
+  column the token stands in a frame of 5 rows by 13 columns with a tick
+  at each side's midpoint (the plan's 2.4): light and white for a check
+  that kept it; heavy and red for one that changed it; a white outline
+  with heavy red ticks for one that would have (`--reflect-dry`). The
+  heavy glyphs (or `#` in ASCII) carry the state without colour, and red
+  is never text (4.44:1). The label says `ASSESSING NOW` while the
+  status says a check is in flight; the token of a check in flight is
+  not sent by this service, so it is not shown.
+- **LOG** holds the checks and the engine's notes, oldest first, each with
+  its time: a check's own time, a note's arrival (notes carry none),
+  wrapped to the compartment, the last 500.
+- With nothing yet, a compartment says what it knows: no status yet, no
+  check since this terminal connected (with the service's count), no
+  reading yet, or that the service does not read its mind (its status
+  reports a reading time of 0).
+- Under 80x24 one line says the size it needs, and nothing else is drawn.
+- Outlines are box drawing when the locale (`LC_ALL`, `LC_CTYPE`, `LANG`,
+  the first set) is UTF-8, ASCII otherwise.
+- Verified on the live service (2026-10-01): captured at 80x24 and
+  150x36, the panel's numbers equal to two decimals the `reflect.log`
+  line of the same check (keep 0.8900, fmt 0.2563, top 0.2196, 0.2053,
+  0.1855).
+
+Tests: the compartments fit and never overlap from 80x24 to 200x60, each
+with room for the token frame, the side column from 120 columns;
+wrapping keeps to the width, CJK counted two; a reload hands the view,
+scroll, counts and the typed line over, and reads an older build's
+`mind=1`.

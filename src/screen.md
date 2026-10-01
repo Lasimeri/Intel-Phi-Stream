@@ -14,6 +14,11 @@ The terminal (`tui.md`) draws every frame into a fresh screen:
   control characters shown as spaces;
 - `fill` pads to the end of a row;
 - `line` writes a whole row.
+- `put_to` writes clipped at a given column, for text inside a
+  compartment;
+- `frame` draws the outline of a `Rect` with a label in its top edge, in
+  `LIGHT` or `HEAVY` box drawing or `ASCII` (`utf8_locale` decides:
+  the first of `LC_ALL`, `LC_CTYPE`, `LANG` that is set names UTF-8).
 
 `diff` then writes what turns the screen the terminal shows (the last
 frame) into this one:

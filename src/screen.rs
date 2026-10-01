@@ -76,18 +76,32 @@ impl Screen {
     /// characters shown as spaces, zero-width ones dropped, a wide one that
     /// does not fit shown as a space); the column after it.
     pub fn put(&mut self, row: usize, col: usize, text: &str, style: Style) -> usize {
+        self.put_to(row, col, self.w, text, style)
+    }
+
+    /// `put`, clipped at column `end` (exclusive) instead of the right
+    /// edge: text inside a compartment.
+    pub fn put_to(
+        &mut self,
+        row: usize,
+        col: usize,
+        end: usize,
+        text: &str,
+        style: Style,
+    ) -> usize {
         let mut c = col;
+        let end = end.min(self.w);
         if row >= self.h {
             return c;
         }
         for ch in text.chars() {
-            if c >= self.w {
+            if c >= end {
                 break;
             }
             let ch = if ch.is_control() { ' ' } else { ch };
             match columns(ch) {
                 0 => {}
-                2 if c + 1 < self.w => {
+                2 if c + 1 < end => {
                     self.set(row, c, Cell { ch, style });
                     self.set(row, c + 1, Cell { ch: TAIL, style });
                     c += 2;
@@ -136,6 +150,172 @@ impl Screen {
         self.fill(row, c, style);
     }
 
+    /// The outline of `r` in `g`'s glyphs and `edge`'s style, its inside
+    /// left as it is; `label`, when not empty, in the top edge after two
+    /// columns, in `label_style`. Too small a rectangle (under 2x2, or
+    /// past the screen) draws nothing.
+    pub fn frame(&mut self, r: Rect, g: &Glyphs, edge: Style, label: &str, label_style: Style) {
+        if r.h < 2 || r.w < 2 || r.top + r.h > self.h || r.left + r.w > self.w {
+            return;
+        }
+        let (b, rt) = (r.top + r.h - 1, r.left + r.w - 1);
+        for c in r.left + 1..rt {
+            self.set(
+                r.top,
+                c,
+                Cell {
+                    ch: g.h,
+                    style: edge,
+                },
+            );
+            self.set(
+                b,
+                c,
+                Cell {
+                    ch: g.h,
+                    style: edge,
+                },
+            );
+        }
+        for row in r.top + 1..b {
+            self.set(
+                row,
+                r.left,
+                Cell {
+                    ch: g.v,
+                    style: edge,
+                },
+            );
+            self.set(
+                row,
+                rt,
+                Cell {
+                    ch: g.v,
+                    style: edge,
+                },
+            );
+        }
+        self.set(
+            r.top,
+            r.left,
+            Cell {
+                ch: g.tl,
+                style: edge,
+            },
+        );
+        self.set(
+            r.top,
+            rt,
+            Cell {
+                ch: g.tr,
+                style: edge,
+            },
+        );
+        self.set(
+            b,
+            r.left,
+            Cell {
+                ch: g.bl,
+                style: edge,
+            },
+        );
+        self.set(
+            b,
+            rt,
+            Cell {
+                ch: g.br,
+                style: edge,
+            },
+        );
+        if !label.is_empty() && r.w > 6 {
+            let c = self.put_to(r.top, r.left + 2, rt - 1, " ", label_style);
+            let c = self.put_to(r.top, c, rt - 1, label, label_style);
+            self.put_to(r.top, c, rt - 1, " ", label_style);
+        }
+    }
+}
+
+/// A rectangle of cells: its top row, left column, height and width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub top: usize,
+    pub left: usize,
+    pub h: usize,
+    pub w: usize,
+}
+
+impl Rect {
+    /// The inside of its outline.
+    pub fn inner(self) -> Rect {
+        Rect {
+            top: self.top + 1,
+            left: self.left + 1,
+            h: self.h.saturating_sub(2),
+            w: self.w.saturating_sub(2),
+        }
+    }
+
+    /// Whether the two share a cell.
+    #[cfg(test)]
+    pub fn overlaps(self, o: Rect) -> bool {
+        self.top < o.top + o.h
+            && o.top < self.top + self.h
+            && self.left < o.left + o.w
+            && o.left < self.left + self.w
+    }
+}
+
+/// The glyphs an outline is drawn with: box drawing when the terminal's
+/// locale is UTF-8, ASCII otherwise (`glyphs`).
+pub struct Glyphs {
+    pub h: char,
+    pub v: char,
+    pub tl: char,
+    pub tr: char,
+    pub bl: char,
+    pub br: char,
+}
+
+pub const LIGHT: Glyphs = Glyphs {
+    h: '─',
+    v: '│',
+    tl: '┌',
+    tr: '┐',
+    bl: '└',
+    br: '┘',
+};
+
+pub const HEAVY: Glyphs = Glyphs {
+    h: '━',
+    v: '┃',
+    tl: '┏',
+    tr: '┓',
+    bl: '┗',
+    br: '┛',
+};
+
+pub const ASCII: Glyphs = Glyphs {
+    h: '-',
+    v: '|',
+    tl: '+',
+    tr: '+',
+    bl: '+',
+    br: '+',
+};
+
+/// Whether the locale is UTF-8: the first of `LC_ALL`, `LC_CTYPE` and
+/// `LANG` that is set (the order the C library reads them in) names it.
+pub fn utf8_locale(get: impl Fn(&str) -> Option<String>) -> bool {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|k| get(k).filter(|v| !v.is_empty()))
+        .is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("utf-8") || v.contains("utf8")
+        })
+}
+
+impl Screen {
     /// Queue on `out` what makes a terminal showing `front` (none: unknown,
     /// or another size) show this screen: runs of changed cells, each with a
     /// cursor move, the style set only when it changes.

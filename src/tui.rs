@@ -24,7 +24,7 @@ use crate::client::{escape, parse, unescape, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
 use crate::mind::Reading;
 use crate::reflect::{Episode, Outcome};
-use crate::screen::{columns, text_columns, Screen, Style, Weight};
+use crate::screen::{self, columns, text_columns, Glyphs, Rect, Screen, Style, Weight};
 use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
@@ -67,6 +67,19 @@ mod theme {
         g: 0xa6,
         b: 0xc0,
     };
+    /// The Machine's white (the management plan, 2.3): the assessment's
+    /// frames and labels, 19.75:1 on the background.
+    pub const WHITE: Color = Color::Rgb {
+        r: 0xff,
+        g: 0xff,
+        b: 0xff,
+    };
+    /// Its red, 4.44:1: frames and marks only, never text.
+    pub const RED: Color = Color::Rgb {
+        r: 0xeb,
+        g: 0x1c,
+        b: 0x24,
+    };
 }
 
 /// What the title line says about the placement (the service's `info`).
@@ -100,8 +113,12 @@ struct View {
     last_t_us: i64,
     /// The last readings of its mind, newest last.
     minds: VecDeque<Reading>,
-    /// The main area shows the readings token by token instead of the stream.
-    mind_view: bool,
+    /// What the main compartment shows (Tab cycles it).
+    view: Pane,
+    /// The checks and the engine's notes, oldest first: (real time, text).
+    log: VecDeque<(i64, String)>,
+    /// Box drawing for the outlines (a UTF-8 locale), else ASCII.
+    utf8: bool,
     /// The last checks of its tokens (`reflect.rs`), newest last.
     episodes: VecDeque<Episode>,
     /// Whether the service answers, and since when it has not.
@@ -125,6 +142,7 @@ enum Link {
 
 const KEEP_MINDS: usize = 400;
 const KEEP_EPISODES: usize = 64;
+const KEEP_LOG: usize = 500;
 /// How often a missing service is looked for.
 const RETRY: Duration = Duration::from_secs(3);
 /// How often `--follow` looks at the binary.
@@ -264,12 +282,24 @@ fn episode_short(e: &Episode) -> String {
 const KEEP_CHARS: usize = 400_000;
 
 impl View {
+    /// A line of the log, the oldest dropped past `KEEP_LOG`.
+    fn log_push(&mut self, t_us: i64, text: String) {
+        self.log.push_back((t_us, text));
+        while self.log.len() > KEEP_LOG {
+            self.log.pop_front();
+        }
+    }
+
     /// What a reload hands over (`STATE_VAR`): the view, the counts and
     /// the line being typed, last and escaped, so it may hold anything.
     fn state(&self) -> String {
         format!(
             "mind={} scroll={} heard={} up={} reloads={} input={}",
-            self.mind_view as u8,
+            match self.view {
+                Pane::Feed => 0,
+                Pane::Mind => 1,
+                Pane::Log => 2,
+            },
             self.scroll,
             self.heard,
             self.started.elapsed().as_secs(),
@@ -288,7 +318,13 @@ impl View {
             };
             let n: u64 = val.parse().unwrap_or(0);
             match k {
-                "mind" => self.mind_view = n == 1,
+                "mind" => {
+                    self.view = match n {
+                        1 => Pane::Mind,
+                        2 => Pane::Log,
+                        _ => Pane::Feed,
+                    }
+                }
                 "scroll" => self.scroll = n as usize,
                 "heard" => self.heard = n as u32,
                 "up" => {
@@ -442,6 +478,278 @@ fn plain(fg: Color, bg: Color) -> Style {
     }
 }
 
+/// The main compartment's views, cycled with Tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pane {
+    /// The stream.
+    Feed,
+    /// The readings of its mind, token by token.
+    Mind,
+    /// The checks and the engine's notes, over time.
+    Log,
+}
+
+impl Pane {
+    fn name(self) -> &'static str {
+        match self {
+            Pane::Feed => "FEED",
+            Pane::Mind => "MIND",
+            Pane::Log => "LOG",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Pane::Feed => Pane::Mind,
+            Pane::Mind => Pane::Log,
+            Pane::Log => Pane::Feed,
+        }
+    }
+}
+
+/// Where each compartment goes (`tui.md`), or none under the minimum.
+#[derive(Debug)]
+struct Layout {
+    /// The view chosen (feed, mind, log), framed.
+    main: Rect,
+    /// The last check, framed.
+    assess: Rect,
+    /// The log beside the view, framed, when there is room for a side column.
+    log: Option<Rect>,
+    mind: usize,
+    status: usize,
+    input: usize,
+    hints: usize,
+}
+
+const MIN_W: usize = 80;
+const MIN_H: usize = 24;
+/// From this width the assessment and the log stand in a side column.
+const WIDE: usize = 120;
+const SIDE_W: usize = 40;
+
+fn layout(w: usize, h: usize) -> Option<Layout> {
+    if w < MIN_W || h < MIN_H {
+        return None;
+    }
+    let (mind, status, input, hints) = (h - 4, h - 3, h - 2, h - 1);
+    // Rows 1 up to the mind strip hold the compartments.
+    let body = mind - 1;
+    Some(if w >= WIDE {
+        let left = w - SIDE_W;
+        let assess_h = 12.min(body / 2);
+        Layout {
+            main: Rect {
+                top: 1,
+                left: 0,
+                h: body,
+                w: left,
+            },
+            assess: Rect {
+                top: 1,
+                left,
+                h: assess_h,
+                w: SIDE_W,
+            },
+            log: Some(Rect {
+                top: 1 + assess_h,
+                left,
+                h: body - assess_h,
+                w: SIDE_W,
+            }),
+            mind,
+            status,
+            input,
+            hints,
+        }
+    } else {
+        let assess_h = 6;
+        Layout {
+            main: Rect {
+                top: 1,
+                left: 0,
+                h: body - assess_h,
+                w,
+            },
+            assess: Rect {
+                top: 1 + body - assess_h,
+                left: 0,
+                h: assess_h,
+                w,
+            },
+            log: None,
+            mind,
+            status,
+            input,
+            hints,
+        }
+    })
+}
+
+/// A probability as the assessment shows it: percent, two decimals.
+fn pct(p: f32) -> String {
+    format!("{:.2} %", p * 100.0)
+}
+
+/// A token as a label: its spaces and controls visible, quoted.
+fn tok(t: &str) -> String {
+    format!("{:?}", shown(t))
+}
+
+/// The lines of the assessment of check `e`; `narrow`: four longer
+/// lines, for the compartment under the view at 80 columns.
+fn assessment(e: &Episode, narrow: bool) -> Vec<String> {
+    let label = match e.outcome {
+        Outcome::Changed => "CHANGED",
+        Outcome::Dry => "WOULD WRITE",
+        Outcome::Kept => "KEPT",
+        Outcome::Same => "SAME",
+        Outcome::Unparsed => "UNPARSED",
+        Outcome::Abandoned => "ABANDONED",
+    };
+    let wrote = match e.outcome {
+        Outcome::Changed | Outcome::Dry => format!("  WROTE {}", tok(&e.to)),
+        _ => String::new(),
+    };
+    let top: Vec<String> = e
+        .top
+        .iter()
+        .map(|(t, p)| format!("{} {}", tok(t), pct(*p)))
+        .collect();
+    let words = if e.words.is_empty() {
+        "nothing in particular".to_string()
+    } else {
+        e.words.join(", ")
+    };
+    let when = format!("{} pos {} {:.0} ms", crate::clock::hms(e.t_us), e.pos, e.ms);
+    if narrow {
+        vec![
+            format!(
+                "{label} {}  p {:.4} {}  KEEP {}  WRITE {}  ANSWERED {}{wrote}",
+                tok(&e.chosen),
+                e.p_chosen,
+                e.why.name().to_uppercase(),
+                pct(e.keep),
+                pct(1.0 - e.keep),
+                pct(e.fmt)
+            ),
+            format!("TOP  {}", top.join(" · ")),
+            format!("ON ITS MIND  {words}"),
+            format!("RULE {}  ·  {when}", e.rule),
+        ]
+    } else {
+        let mut l = vec![
+            format!("{label}{wrote}"),
+            format!("KEEP     {}", pct(e.keep)),
+            format!("WRITE    {}", pct(1.0 - e.keep)),
+            format!("ANSWERED {}", pct(e.fmt)),
+            format!("p {:.4} {}", e.p_chosen, e.why.name().to_uppercase()),
+        ];
+        for (i, t) in top.iter().enumerate() {
+            l.push(format!("{} {t}", if i == 0 { "TOP" } else { "   " }));
+        }
+        l.push(format!("ON ITS MIND {words}"));
+        l.push(format!("RULE {}", e.rule));
+        l.push(when);
+        l
+    }
+}
+
+/// The frame around the token in question (plan 2.4: an outline with an
+/// inward tick at each side's midpoint), 5 rows by 13 columns at
+/// `top`, `left`: light for a check that kept it, heavy red for one that
+/// changed it, a white outline with heavy red ticks for one that would
+/// have (dry) or one in flight. Heavy glyphs, or `#` in ASCII, carry the
+/// state without colour.
+fn token_frame(
+    s: &mut Screen,
+    top: usize,
+    left: usize,
+    token: &str,
+    state: Option<Outcome>,
+    utf8: bool,
+) {
+    let white = plain(theme::WHITE, theme::BG);
+    let red = plain(theme::RED, theme::BG);
+    let (edge, ticks_style, heavy_ticks, heavy_edge) = match state {
+        Some(Outcome::Changed) => (red, red, true, true),
+        Some(Outcome::Dry) | None => (white, red, true, false),
+        _ => (white, white, false, false),
+    };
+    let g = match (utf8, heavy_edge) {
+        (false, true) => &Glyphs {
+            h: '#',
+            v: '#',
+            tl: '#',
+            tr: '#',
+            bl: '#',
+            br: '#',
+        },
+        (false, false) => &screen::ASCII,
+        (true, true) => &screen::HEAVY,
+        (true, false) => &screen::LIGHT,
+    };
+    let r = Rect {
+        top,
+        left,
+        h: 5,
+        w: 13,
+    };
+    s.frame(r, g, edge, "", edge);
+    let (tt, tb, tl, tr) = match (utf8, heavy_ticks) {
+        (true, true) => ('┳', '┻', '┣', '┫'),
+        (true, false) => ('┬', '┴', '├', '┤'),
+        (false, true) => ('#', '#', '#', '#'),
+        (false, false) => ('+', '+', '+', '+'),
+    };
+    let mid = left + 6;
+    s.put(top, mid, &tt.to_string(), ticks_style);
+    s.put(top + 4, mid, &tb.to_string(), ticks_style);
+    s.put(top + 2, left, &tl.to_string(), ticks_style);
+    s.put(top + 2, left + 12, &tr.to_string(), ticks_style);
+    let t = shown(token.trim());
+    let t: String = t.chars().take(9).collect();
+    let pad = (9usize.saturating_sub(text_columns(&t))) / 2;
+    s.put_to(
+        top + 2,
+        left + 2 + pad,
+        left + 11,
+        &t,
+        plain(theme::WHITE, theme::BG),
+    );
+}
+
+/// `text` wrapped by words to `width` terminal columns, the lines after
+/// the first indented by `indent`; a word longer than a line is left to be
+/// clipped where it is drawn.
+fn wrap(text: &str, width: usize, indent: usize) -> Vec<String> {
+    let width = width.max(indent + 8);
+    let mut rows = Vec::new();
+    let mut line = String::new();
+    let mut cols = 0;
+    for word in text.split(' ') {
+        let wc = text_columns(word);
+        if cols + wc > width && cols > indent {
+            rows.push(std::mem::take(&mut line));
+            line = " ".repeat(indent);
+            cols = indent;
+        }
+        line.push_str(word);
+        line.push(' ');
+        cols += wc + 1;
+    }
+    rows.push(line);
+    rows
+}
+
+/// The log's lines for a compartment `width` wide, oldest first: each
+/// entry its time, then its text, wrapped with a two-column indent.
+fn log_rows(log: &VecDeque<(i64, String)>, width: usize) -> Vec<String> {
+    log.iter()
+        .flat_map(|(t, text)| wrap(&format!("{} {text}", crate::clock::hms(*t)), width, 2))
+        .collect()
+}
+
 /// One frame: drawn into a fresh screen, then only what changed since
 /// `front` (the frame the terminal shows) is written (`screen.md`).
 fn draw(
@@ -453,11 +761,32 @@ fn draw(
 ) -> io::Result<()> {
     let (w, h) = terminal::size()?;
     let (w, h) = (w as usize, h as usize);
-    if h < 6 {
-        return Ok(());
-    }
     let base = plain(theme::TEXT, theme::BG);
     let mut s = Screen::new(w, h, base);
+    let Some(lay) = layout(w, h) else {
+        // Under the minimum: the size it needs, and nothing else.
+        s.line(
+            0,
+            &format!("phi-stream needs {MIN_W}x{MIN_H}; this terminal is {w}x{h}"),
+            base,
+        );
+        queue!(out, cursor::Hide)?;
+        s.diff(front.as_ref(), out)?;
+        out.flush()?;
+        *front = Some(s);
+        return Ok(());
+    };
+    let g = if v.utf8 {
+        &screen::LIGHT
+    } else {
+        &screen::ASCII
+    };
+    let edge = plain(theme::DIM, theme::BG);
+    let label = Style {
+        fg: theme::TEXT,
+        bg: theme::BG,
+        weight: Weight::Bold,
+    };
     // Title.
     let title = format!(
         " phi-stream · {} · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {} · {}",
@@ -473,35 +802,27 @@ fn draw(
         if v.last_t_us > 0 { crate::clock::hms(v.last_t_us) } else { String::new() }
     );
     s.line(0, &title, plain(theme::DIM, theme::SURFACE));
-    // The stream.
-    let has_mind = !v.minds.is_empty();
-    let body_h = h - 4 - has_mind as usize;
-    if v.mind_view {
-        // The readings, token by token, newest at the bottom.
-        let end = v.minds.len().saturating_sub(v.scroll);
-        let start = end.saturating_sub(body_h);
-        for r in 0..body_h {
-            let text = v
-                .minds
-                .get(start + r)
-                .map(|m| {
-                    // The reading a check was asked from is the one before its token.
-                    match v.episodes.iter().rev().find(|e| e.pos == m.pos + 1) {
-                        Some(e) => format!("{}   [{}]", mind_row(m), episode_short(e)),
-                        None => mind_row(m),
-                    }
-                })
-                .unwrap_or_default();
-            s.line(1 + r, &format!(" {text}"), plain(theme::GIVEN, theme::BG));
-        }
-    } else {
-        let rows = v.rows(w.saturating_sub(2));
-        let end = rows.len().saturating_sub(v.scroll);
-        let start = end.saturating_sub(body_h);
-        for r in 0..body_h {
-            let mut col = 0;
-            if let Some(row) = rows.get(start + r) {
-                col = s.put(1 + r, 0, " ", base);
+
+    // The main compartment: the view chosen.
+    let views = format!("{} · Tab: {}", v.view.name(), v.view.next().name());
+    s.frame(lay.main, g, edge, &views, label);
+    let inner = lay.main.inner();
+    let end = inner.left + inner.w;
+    let given = Style {
+        fg: theme::GIVEN,
+        bg: theme::SURFACE,
+        weight: Weight::Italic,
+    };
+    match v.view {
+        Pane::Feed => {
+            let rows = v.rows(inner.w.saturating_sub(2));
+            let last = rows.len().saturating_sub(v.scroll);
+            let first = last.saturating_sub(inner.h);
+            for r in 0..inner.h {
+                let Some(row) = rows.get(first + r) else {
+                    continue;
+                };
+                let mut col = inner.left + 1;
                 for (text, kind) in row {
                     let style = match kind {
                         Kind::Think => base,
@@ -510,27 +831,154 @@ fn draw(
                             bg: theme::BG,
                             weight: Weight::Bold,
                         },
-                        Kind::Given => Style {
-                            fg: theme::GIVEN,
-                            bg: theme::SURFACE,
-                            weight: Weight::Italic,
-                        },
+                        Kind::Given => given,
                     };
-                    col = s.put(1 + r, col, text, style);
+                    col = s.put_to(inner.top + r, col, end, text, style);
                 }
             }
-            s.fill(1 + r, col, base);
         }
-    }
-    // The mind strip: what was on its mind at the last token it placed.
-    if let Some(r) = v.minds.back() {
-        let mut strip = format!(" mind  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms);
-        if let Some(e) = v.episodes.back() {
-            if v.last_t_us - e.t_us < 8_000_000 {
-                strip = format!(" {}   ·{strip}", episode_short(e));
+        Pane::Mind => {
+            // The readings, newest at the bottom; a check beside the
+            // reading it was asked from (the one before its token).
+            let last = v.minds.len().saturating_sub(v.scroll);
+            let first = last.saturating_sub(inner.h);
+            for r in 0..inner.h {
+                let Some(m) = v.minds.get(first + r) else {
+                    continue;
+                };
+                let text = match v.episodes.iter().rev().find(|e| e.pos == m.pos + 1) {
+                    Some(e) => format!("{}   [{}]", mind_row(m), episode_short(e)),
+                    None => mind_row(m),
+                };
+                s.put_to(
+                    inner.top + r,
+                    inner.left + 1,
+                    end,
+                    &text,
+                    plain(theme::GIVEN, theme::BG),
+                );
             }
         }
-        s.line(h - 4, &strip, plain(theme::GIVEN, theme::SURFACE));
+        Pane::Log => {
+            let rows = log_rows(&v.log, inner.w.saturating_sub(2));
+            let last = rows.len().saturating_sub(v.scroll);
+            let first = last.saturating_sub(inner.h);
+            for (r, line) in rows[first..last].iter().enumerate() {
+                s.put_to(
+                    inner.top + r,
+                    inner.left + 1,
+                    end,
+                    line,
+                    plain(theme::GIVEN, theme::BG),
+                );
+            }
+        }
+    }
+
+    // The assessment: the last check, and whether one is in flight.
+    let checking = v.status.as_ref().is_some_and(|s| s.checking);
+    let assess_label = if checking {
+        "ASSESSMENT · ASSESSING NOW"
+    } else {
+        "ASSESSMENT"
+    };
+    s.frame(lay.assess, g, edge, assess_label, label);
+    let ai = lay.assess.inner();
+    let aend = ai.left + ai.w;
+    let text = plain(theme::TEXT, theme::BG);
+    match v.episodes.back() {
+        None => {
+            // What it knows, not a guess: the service does not say whether it
+            // reflects, only how many checks it has run.
+            let why = match &v.status {
+                None => "no status from the service yet".to_string(),
+                Some(s) => format!(
+                    "no check has ended since this terminal connected ({} in all; checks run with --reflect)",
+                    s.checks
+                ),
+            };
+            for (r, l) in wrap(&why, ai.w.saturating_sub(2), 0)
+                .iter()
+                .take(ai.h)
+                .enumerate()
+            {
+                s.put_to(ai.top + r, ai.left + 1, aend, l, text);
+            }
+        }
+        Some(e) if lay.log.is_none() => {
+            for (r, l) in assessment(e, true).iter().take(ai.h).enumerate() {
+                s.put_to(ai.top + r, ai.left + 1, aend, l, text);
+            }
+        }
+        Some(e) => {
+            token_frame(
+                &mut s,
+                ai.top,
+                ai.left + 1,
+                &e.chosen,
+                Some(e.outcome),
+                v.utf8,
+            );
+            let lines = assessment(e, false);
+            // Beside the frame (5 rows): the outcome and the branches.
+            for (r, l) in lines.iter().take(5.min(ai.h)).enumerate() {
+                let st = if r == 0 {
+                    plain(theme::WHITE, theme::BG)
+                } else {
+                    text
+                };
+                s.put_to(ai.top + r, ai.left + 15, aend, l, st);
+            }
+            // Under it the rest, wrapped, as many rows as there are.
+            let rest: Vec<String> = lines
+                .iter()
+                .skip(5)
+                .flat_map(|l| wrap(l, ai.w.saturating_sub(2), 2))
+                .collect();
+            for (r, l) in rest.iter().take(ai.h.saturating_sub(5)).enumerate() {
+                s.put_to(ai.top + 5 + r, ai.left + 1, aend, l, text);
+            }
+        }
+    }
+
+    // The log beside, when there is room.
+    if let Some(lr) = lay.log {
+        s.frame(lr, g, edge, "LOG", label);
+        let li = lr.inner();
+        let rows = log_rows(&v.log, li.w.saturating_sub(2));
+        let first = rows.len().saturating_sub(li.h);
+        for (r, line) in rows[first..].iter().enumerate() {
+            s.put_to(
+                li.top + r,
+                li.left + 1,
+                li.left + li.w,
+                line,
+                plain(theme::GIVEN, theme::BG),
+            );
+        }
+    }
+
+    // The mind strip: what was on its mind at the last token it placed.
+    match v.minds.back() {
+        Some(r) => s.line(
+            lay.mind,
+            &format!(" MIND  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms),
+            plain(theme::GIVEN, theme::SURFACE),
+        ),
+        None => {
+            // Its status says whether it reads its mind: a reading time of 0.
+            let why = match &v.status {
+                Some(s) if s.mind_ms == 0.0 => {
+                    "the service does not read its mind (it does with --mind)"
+                }
+                _ => "no reading yet",
+            };
+            s.line(
+                lay.mind,
+                &format!(" MIND  {why}"),
+                plain(theme::GIVEN, theme::SURFACE),
+            )
+        }
     }
     // The strip: what it is doing, and the rates.
     let (mode, rates) = match (v.link, &v.status) {
@@ -552,33 +1000,33 @@ fn draw(
             ),
         ),
     };
-    let note = v.notes.last().cloned().unwrap_or_default();
     s.line(
-        h - 3,
+        lay.status,
         &format!(" {mode}   {rates}"),
         plain(theme::TEXT, theme::SURFACE),
     );
     // Input.
     s.line(
-        h - 2,
+        lay.input,
         &format!(" › {}", v.input),
         plain(theme::BRIGHT, theme::BG),
     );
     // Hints and the last note.
+    let note = v.notes.last().cloned().unwrap_or_default();
     let follows = match v.follow {
         Some(0) => " follows the build ·".to_string(),
         Some(n) => format!(" follows the build ({n} reloaded) ·"),
         None => String::new(),
     };
     let hints = format!(
-        "{follows} Enter speaks · /feed FILE · /persona FILE · /mind · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        "{follows} Enter speaks · Tab views · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
-    s.line(h - 1, &hints, plain(theme::ACCENT_DIM, theme::BG));
+    s.line(lay.hints, &hints, plain(theme::ACCENT_DIM, theme::BG));
     queue!(out, cursor::Hide)?;
     s.diff(front.as_ref(), out)?;
     let cx = (3 + text_columns(&v.input)).min(w - 1) as u16;
-    queue!(out, cursor::MoveTo(cx, (h - 2) as u16), cursor::Show)?;
+    queue!(out, cursor::MoveTo(cx, lay.input as u16), cursor::Show)?;
     out.flush()?;
     *front = Some(s);
     Ok(())
@@ -608,14 +1056,15 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
         format!("chunk {}", c.trim())
     } else if let Some(t) = line.strip_prefix("/temp ") {
         format!("temp {}", t.trim())
-    } else if line == "/mind" {
-        v.mind_view = !v.mind_view;
+    } else if line == "/mind" || line == "/log" || line == "/feed" {
+        // A view by name (Tab cycles them); /mind again goes back to the
+        // stream, as before.
+        v.view = match line {
+            "/mind" if v.view != Pane::Mind => Pane::Mind,
+            "/log" => Pane::Log,
+            _ => Pane::Feed,
+        };
         v.scroll = 0;
-        v.notes.push(if v.mind_view {
-            "the readings of its mind, token by token (/mind again: the stream)".into()
-        } else {
-            "the stream".into()
-        });
         return;
     } else if line == "/quit" {
         v.quitting = true;
@@ -684,7 +1133,9 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             heard: 0,
             last_t_us: 0,
             minds: VecDeque::new(),
-            mind_view: false,
+            view: Pane::Feed,
+            log: VecDeque::new(),
+            utf8: screen::utf8_locale(|k| std::env::var(k).ok()),
             episodes: VecDeque::new(),
             link: if conn.is_some() {
                 Link::Up
@@ -769,6 +1220,8 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         dirty = true;
                     }
                     Ok(Msg::Note(n)) => {
+                        // A note carries no time: the time it arrived.
+                        v.log_push(crate::clock::now_us(), n.clone());
                         v.notes.push(n);
                         dirty = true;
                     }
@@ -780,6 +1233,7 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         dirty = true;
                     }
                     Ok(Msg::Reflect(e)) => {
+                        v.log_push(e.t_us, episode_short(&e));
                         v.episodes.push_back(e);
                         while v.episodes.len() > KEEP_EPISODES {
                             v.episodes.pop_front();
@@ -838,6 +1292,10 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                                 v.scroll = 0;
                             }
                             KeyCode::Esc => v.input.clear(),
+                            KeyCode::Tab => {
+                                v.view = v.view.next();
+                                v.scroll = 0;
+                            }
                             KeyCode::PageUp => v.scroll += 10,
                             KeyCode::PageDown => v.scroll = v.scroll.saturating_sub(10),
                             KeyCode::End => v.scroll = 0,
@@ -869,4 +1327,110 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
     .ok();
     terminal::disable_raw_mode().ok();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view() -> View {
+        View {
+            pieces: Vec::new(),
+            chars: 0,
+            scroll: 0,
+            input: String::new(),
+            status: None,
+            notes: Vec::new(),
+            started: Instant::now(),
+            heard: 0,
+            last_t_us: 0,
+            minds: VecDeque::new(),
+            view: Pane::Feed,
+            log: VecDeque::new(),
+            utf8: true,
+            episodes: VecDeque::new(),
+            link: Link::Up,
+            socket: String::new(),
+            quitting: false,
+            follow: Some(0),
+        }
+    }
+
+    #[test]
+    fn compartments_fit_and_never_overlap() {
+        assert!(layout(79, 24).is_none());
+        assert!(layout(80, 23).is_none());
+        for (w, h) in [
+            (80, 24),
+            (100, 30),
+            (119, 40),
+            (120, 24),
+            (150, 36),
+            (200, 60),
+        ] {
+            let l = layout(w, h).unwrap();
+            let mut rects = vec![l.main, l.assess];
+            rects.extend(l.log);
+            for (i, a) in rects.iter().enumerate() {
+                assert!(a.top >= 1 && a.top + a.h <= l.mind, "{w}x{h} {a:?}");
+                assert!(a.left + a.w <= w, "{w}x{h} {a:?}");
+                assert!(
+                    a.h >= 6 && a.w >= 13,
+                    "{w}x{h} {a:?}: room for the token frame"
+                );
+                for b in &rects[i + 1..] {
+                    assert!(!a.overlaps(*b), "{w}x{h} {a:?} {b:?}");
+                }
+            }
+            assert_eq!(l.log.is_some(), w >= WIDE);
+            assert_eq!(
+                (l.mind, l.status, l.input, l.hints),
+                (h - 4, h - 3, h - 2, h - 1)
+            );
+        }
+        // 80x24: the view in rows 1 to 13, the assessment's four lines in 15 to 18.
+        let l = layout(80, 24).unwrap();
+        assert_eq!(
+            l.main,
+            Rect {
+                top: 1,
+                left: 0,
+                h: 13,
+                w: 80
+            }
+        );
+        assert_eq!(l.assess.inner().h, 4);
+    }
+
+    #[test]
+    fn wrapping_keeps_to_the_width() {
+        let rows = wrap("a check on the next word: you were about to write", 20, 2);
+        assert!(rows.len() > 1);
+        for r in &rows {
+            assert!(text_columns(r.trim_end()) <= 20, "{r:?}");
+        }
+        assert!(rows[1].starts_with("  "));
+        // CJK words count two columns each.
+        for r in wrap("而不是 而非 而不是 而非", 10, 0) {
+            assert!(text_columns(r.trim_end()) <= 10, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_reload_hands_the_view_over() {
+        let mut a = view();
+        a.view = Pane::Log;
+        a.scroll = 7;
+        a.heard = 3;
+        a.input = "half typed\nwith a newline \\ and a backslash".into();
+        let mut b = view();
+        b.restore(&a.state());
+        assert_eq!((b.view, b.scroll, b.heard), (Pane::Log, 7, 3));
+        assert_eq!(b.input, a.input);
+        assert_eq!(b.follow, Some(1));
+        // An older build handed over `mind=1` for the mind view.
+        let mut c = view();
+        c.restore("mind=1 scroll=0 heard=0 up=5 reloads=0 input=");
+        assert_eq!(c.view, Pane::Mind);
+    }
 }
