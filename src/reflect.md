@@ -62,6 +62,11 @@ Decision:
 
 The journal frame puts `« ` before the bracket.
 
+**A newline first.** In the first dev session the model's likeliest
+token after `Decision:` was a newline (p 0.49 to 0.58): it answers on the
+next line. When the newline outweighs keep and write together, it is fed
+once and the choice is read on the next line, a cycle later.
+
 **The choice is read, not sampled.** The deliberation's next-token
 distribution after `Decision:` is summed over the one-token forms of
 each word (`KEEP_FORMS`: ` keep`, ` Keep`, `keep`, ...; `WRITE_FORMS`

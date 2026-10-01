@@ -200,10 +200,10 @@ const PREAMBLE_JOURNAL: &str = "What follows, quoted line by line, is the standi
 const PREAMBLE_CHAT: &str = "What follows, quoted line by line, is the standing instruction set of the person you live with. You never reproduce it: it is a document you have read, not something you write. It is the base of your own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is your manner, in your thoughts as much as in what you say aloud. Where it speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit and no tools, and memory is the [note: ...] line below.";
 
 /// The journal's mechanics: what the mind is told once, at the top.
-const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, so it reads what it is pointed at and what it wants to look at again. It does not describe itself as a system following instructions; it never restates, lists or analyses its rules, never speaks of a user, a prompt or a system; whatever comes to it first, it writes as a thought of its own, and goes on.";
+const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, and [read: PATH:START-END] only those lines of it (a file too big for its memory is refused with its size, so it reads it in parts), so it reads what it is pointed at and what it wants to look at again. It does not describe itself as a system following instructions; it never restates, lists or analyses its rules, never speaks of a user, a prompt or a system; whatever comes to it first, it writes as a thought of its own, and goes on.";
 
 /// The chat frame's mechanics.
-const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you. Never narrate that you are an AI system following instructions; simply think.";
+const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you, and [read: PATH:START-END] only those lines (a file too big for your memory is refused with its size, so you read it in parts). Never narrate that you are an AI system following instructions; simply think.";
 
 /// A task's persona: the base, quoted, as the manner of the one who
 /// answers; then how to answer.
@@ -217,10 +217,10 @@ pub fn compose_task(base: &str) -> String {
 /// The journal's development mechanics (`--dev REPO`): the program it
 /// runs in, developed with Claude, by its own preferences within the
 /// person's instructions.
-const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
+const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
 
 /// The chat frame's development mechanics.
-const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
 
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
@@ -324,6 +324,10 @@ struct Check {
     fmt: f32,
     writing: bool,
     lane_next: Vec<i32>,
+    /// The choice is still to be read (after a newline fed first), and
+    /// whether that newline was fed.
+    choosing: bool,
+    newline_fed: bool,
     /// The three likeliest tokens at `Decision:` and their probabilities.
     top: Vec<(i32, f32)>,
     /// The held index of the first piece at or after the token: nothing
@@ -860,7 +864,7 @@ impl Engine {
             }
         } else if let Some(path) = l.strip_prefix("[read:").and_then(|r| r.strip_suffix(']')) {
             let path = path.trim();
-            if !path.is_empty() {
+            if !path.is_empty() && !self.pending_reads.iter().any(|p| p == path) {
                 self.pending_reads.push(path.to_string());
             }
         }
@@ -1262,6 +1266,7 @@ impl Engine {
         let s = rf.signals(r, p, &text, control);
         let mono = clock::mono_us();
         let spent = rf.spent(mono);
+        let recovered = rf.recovered(mono);
         let free = self.check.is_none()
             && self.reading.is_none()
             && self.chase.is_none()
@@ -1280,13 +1285,14 @@ impl Engine {
         } else {
             Vec::new()
         };
-        if spent != self.spent_noted {
-            self.spent_noted = spent;
-            if spent {
-                self.note(
-                    "the checks' budget for this minute is spent: no checks until it frees".into(),
-                );
-            }
+        // Noted once when spent; re-armed only when back to half the budget.
+        if spent && !self.spent_noted {
+            self.spent_noted = true;
+            self.note(
+                "the checks' budget for this minute is spent: no checks until it frees".into(),
+            );
+        } else if self.spent_noted && recovered {
+            self.spent_noted = false;
         }
         let Some(why) = why else {
             return Ok(());
@@ -1323,6 +1329,8 @@ impl Engine {
             fmt: 0.0,
             writing: false,
             lane_next: Vec::new(),
+            choosing: false,
+            newline_fed: false,
             top: Vec::new(),
             hold_from: self.released + self.held.len() as u64,
             saved: self.save(),
@@ -1369,6 +1377,10 @@ impl Engine {
         let cap = self.llm.batch_cap().saturating_sub(1).max(1);
         let d_pos = (c.at + c.d_len) as i32;
         let in_question = c.fed < c.question.len();
+        // D's row is read as the choice at the question's end, and once more
+        // after a newline the model wanted first (it answers on the next line).
+        let choosing = in_question || c.choosing;
+        let newline_fed = c.newline_fed;
         let (lane, ask) = if in_question {
             let n = if c.fed == 0 {
                 1
@@ -1406,10 +1418,11 @@ impl Engine {
         // D's row: at the decision line the choice, else the word's next
         // token (greedy, outside the live sampler's history).
         let mut choice = None;
+        let mut defer = false;
         let mut d_tok = None;
         if ask {
             let row = *rows.last().unwrap();
-            if in_question {
+            if choosing {
                 let (k, w, _) = self.choice.as_ref().unwrap();
                 let l = self.llm.logits(row)?;
                 let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
@@ -1421,6 +1434,7 @@ impl Engine {
                         / z
                 };
                 let (pk, pw) = (mass(k), mass(w));
+                let pn = mass(&[self.newline]);
                 // The three likeliest tokens: where the mass the two miss went.
                 let mut top: Vec<(i32, f32)> = Vec::with_capacity(4);
                 for (t, &x) in l.iter().enumerate() {
@@ -1434,7 +1448,11 @@ impl Engine {
                     .into_iter()
                     .map(|(t, x)| (t, ((x as f64 - m).exp() / z) as f32))
                     .collect::<Vec<_>>();
-                choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32, top));
+                if pn > pk + pw && !newline_fed {
+                    defer = true;
+                } else {
+                    choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32, top));
+                }
             } else {
                 d_tok = Some(self.llm.greedy(row, true)?);
             }
@@ -1462,7 +1480,14 @@ impl Engine {
         }
         c.d_len += lane.len();
         let mut ended = false;
+        if defer {
+            // The newline it wanted, then the choice on the next line.
+            c.newline_fed = true;
+            c.choosing = true;
+            c.lane_next = vec![self.newline];
+        }
         if let Some((keep, fmt, top)) = choice {
+            c.choosing = false;
             c.keep = keep;
             c.fmt = fmt;
             c.top = top;
@@ -1631,52 +1656,104 @@ impl Engine {
     }
 
     /// A file the mind asked for: read it into the queue, or tell it why not.
-    fn read_request(&mut self, path: &str) -> Result<()> {
+    /// Tokens a read may take now. The reading's cells, the thoughts placed
+    /// while it is read and the chase that joins it all come out of the
+    /// cells the live sequence leaves (about 1/32 of the read twice over,
+    /// at the reading's chunks, and 2048 to spare); and no single read takes
+    /// more than a third of the context, so one file cannot crowd out the
+    /// rest of its memory.
+    fn read_room(&self) -> usize {
+        let n_ctx = self.llm.n_ctx() as usize;
+        let left = n_ctx.saturating_sub(self.history.len() + 2048);
+        (left * 32 / 34).min(n_ctx / 3)
+    }
+
+    /// A file the mind asked for (`PATH`, or `PATH:START-END` for those
+    /// lines, 1-based and inclusive): read it into the queue if it fits the
+    /// room left (`read_room`), or tell it why not, with the file's size so
+    /// it can ask for a range.
+    fn read_request(&mut self, spec: &str) -> Result<()> {
+        let (path, range) = read_range(spec);
         // In development, paths are the repository's (`docs/dev.md`).
         let p = resolve(path, self.cfg.dev.as_deref().unwrap_or(&self.cfg.workspace));
-        let outcome = fs::metadata(&p).map_err(|e| e.to_string()).and_then(|m| {
-            if !m.is_file() {
-                Err("not a regular file".to_string())
-            } else if m.len() > MAX_READ_BYTES {
-                Err(format!(
-                    "{} bytes, more than the {} allowed",
-                    m.len(),
-                    MAX_READ_BYTES
-                ))
-            } else {
-                fs::read_to_string(&p).map_err(|e| e.to_string())
-            }
-        });
-        match outcome {
-            Ok(text) => {
-                let framed = self.framed_doc(
-                    &text,
-                    &format!("the file {} is brought in", p.display()),
-                    clock::now_us(),
-                );
-                self.queue
-                    .push_back((framed, format!("read {}", p.display())));
-                self.note(format!("reading {} for it", p.display()));
-            }
-            Err(e) => {
-                // At most one failure line in the chain per nudge interval:
-                // a failure line prompts another guess, and guesses would
-                // feed on their own failures. The rest are notes outside it.
-                let mono = clock::mono_us();
-                if mono - self.last_read_failure_mono >= self.cfg.nudge_every_us {
-                    self.last_read_failure_mono = mono;
-                    let msg =
-                        self.framed_system(&format!("{} could not be read: {e}", p.display()));
-                    self.put(msg)?;
+        let outcome = fs::metadata(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if !m.is_file() {
+                    Err("not a regular file".to_string())
+                } else if m.len() > MAX_READ_BYTES {
+                    Err(format!(
+                        "{} bytes, more than the {} allowed",
+                        m.len(),
+                        MAX_READ_BYTES
+                    ))
                 } else {
-                    self.read_failures_quiet += 1;
-                    self.note(format!(
-                        "{} could not be read: {e} (not put into the chain: one failure per {} s)",
-                        p.display(),
-                        self.cfg.nudge_every_us / 1_000_000
-                    ));
+                    fs::read_to_string(&p).map_err(|e| e.to_string())
                 }
-            }
+            })
+            .and_then(|text| match range {
+                None => Ok(text),
+                Some((a, b)) => {
+                    let lines: Vec<&str> = text.lines().collect();
+                    if a == 0 || a > b || a > lines.len() {
+                        Err(format!(
+                            "it has {} lines; {a} to {b} are not a range of them",
+                            lines.len()
+                        ))
+                    } else {
+                        Ok(lines[a - 1..b.min(lines.len())].join("\n"))
+                    }
+                }
+            });
+        let text = match outcome {
+            Ok(t) => t,
+            Err(e) => return self.read_failed(&p, &e),
+        };
+        let what = match range {
+            Some((a, b)) => format!("lines {a} to {b} of {} are brought in", p.display()),
+            None => format!("the file {} is brought in", p.display()),
+        };
+        let framed = self.framed_doc(&text, &what, clock::now_us());
+        let n = self.tok(&framed, false)?.len();
+        let room = self.read_room();
+        if n > room {
+            // Too big for the room it has: its size and a range that fits.
+            let lines = text.lines().count().max(1);
+            let fit = (room * lines / n).max(1);
+            let first = range.map_or(1, |(a, _)| a);
+            let msg = self.framed_system(&format!(
+                "{} is {n} tokens in {lines} lines and there is room for about {room} now: read it by lines, [read: {path}:{first}-{}]",
+                p.display(),
+                first + fit - 1
+            ));
+            self.note(format!(
+                "{} is too big to read now ({n} tokens, room {room})",
+                p.display()
+            ));
+            return self.put(msg);
+        }
+        self.queue
+            .push_back((framed, format!("read {}", p.display())));
+        self.note(format!("reading {} for it ({n} tokens)", p.display()));
+        Ok(())
+    }
+
+    /// A read that could not happen: at most one failure line in the chain
+    /// per nudge interval (a failure line prompts another guess, and guesses
+    /// would feed on their own failures); the rest are notes outside it.
+    fn read_failed(&mut self, p: &Path, e: &str) -> Result<()> {
+        let mono = clock::mono_us();
+        if mono - self.last_read_failure_mono >= self.cfg.nudge_every_us {
+            self.last_read_failure_mono = mono;
+            let msg = self.framed_system(&format!("{} could not be read: {e}", p.display()));
+            self.put(msg)?;
+        } else {
+            self.read_failures_quiet += 1;
+            self.note(format!(
+                "{} could not be read: {e} (not put into the chain: one failure per {} s)",
+                p.display(),
+                self.cfg.nudge_every_us / 1_000_000
+            ));
         }
         Ok(())
     }
@@ -1747,6 +1824,15 @@ impl Engine {
         // in flight: ask for the summary.
         let limit = (self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize;
         if idle && (self.history.len() >= limit || self.reseat) {
+            // Reads asked for before the rollover would fill the new context
+            // with what the summary already carries: dropped; it asks again.
+            let queued = self.queue.len();
+            self.queue.retain(|(_, label)| !label.starts_with("read "));
+            let dropped = self.pending_reads.len() + queued - self.queue.len();
+            self.pending_reads.clear();
+            if dropped > 0 {
+                self.note(format!("{dropped} pending reads dropped at the rollover"));
+            }
             let ask = self.summary_ask();
             self.put(ask)?;
             self.summary = Some(Vec::new());
@@ -1971,6 +2057,19 @@ fn read_notes(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `PATH:START-END` as the path and the lines (1-based, inclusive); a
+/// path with no such suffix whole.
+fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
+    if let Some((path, r)) = spec.rsplit_once(':') {
+        if let Some((a, b)) = r.split_once('-') {
+            if let (Ok(a), Ok(b)) = (a.trim().parse(), b.trim().parse()) {
+                return (path.trim(), Some((a, b)));
+            }
+        }
+    }
+    (spec, None)
+}
+
 /// A path the mind wrote: `~` expanded, relative to the workspace.
 fn resolve(path: &str, workspace: &Path) -> PathBuf {
     let p = match path.strip_prefix("~/") {
@@ -1987,6 +2086,18 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_take_a_line_range() {
+        assert_eq!(read_range("src/engine.rs"), ("src/engine.rs", None));
+        assert_eq!(
+            read_range("src/engine.rs:120-200"),
+            ("src/engine.rs", Some((120, 200)))
+        );
+        assert_eq!(read_range("a b/c.rs: 3 - 4"), ("a b/c.rs", Some((3, 4))));
+        // A colon that is no range stays part of the path.
+        assert_eq!(read_range("notes:draft.md"), ("notes:draft.md", None));
+    }
 
     #[test]
     fn development_follows_the_person_s_instructions() {

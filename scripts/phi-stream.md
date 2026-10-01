@@ -28,3 +28,7 @@ subcommand past them. The binary is
 `target/release/phi-stream` (`make build`), or `PHI_STREAM_BIN` (another
 build: a measurement pinned to a frozen binary while the tree is
 rebuilt); the script stops with a message when it is not built.
+
+`start` (and `dev`) also keeps the service's output on disk, appended to
+`~/.local/share/phi-stream/serve.log` (`PHI_STREAM_LOG`; never tmpfs):
+a failure's message outlives the tmux session.

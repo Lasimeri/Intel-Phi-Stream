@@ -29,7 +29,10 @@ plus any serve options given after it.
     why), reports what it finds in the code, and disagrees where it
     disagrees.
 - **`[read: PATH]`** resolves PATH relative to the repository, so it reads
-  its own source the way Claude does.
+  its own source the way Claude does. `[read: PATH:START-END]` reads
+  those lines only. Its memory is about 32 thousand tokens: a file that
+  does not fit is refused with its size and a range that would fit
+  (`src/engine.md`).
 - **`[prefer: ...]`** lines are kept in `preferences.md` in the workspace,
   next to `notes.md`. They are announced as `prefers: ...` and shown back
   to it with its notes, at a rollover and at a fresh start (the opening

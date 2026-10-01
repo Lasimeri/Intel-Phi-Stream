@@ -71,9 +71,13 @@ case "$sub" in
         fi
         # The session runs this script's own launch path, so the cards are found
         # the same way; every word quoted, since the checkout's path may hold spaces.
-        cmd=$(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}")
+        # Its output is also kept on disk (a failure's message outlives the
+        # session; never tmpfs).
+        log=${PHI_STREAM_LOG:-$HOME/.local/share/phi-stream/serve.log}
+        mkdir -p "$(dirname "$log")"
+        cmd="$(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
         tmux new-session -d -s "$session" "$cmd"
-        echo "started the service in tmux session $session; log: tmux attach -t $session; the terminal: $0 attach"
+        echo "started the service in tmux session $session; log: $log (and tmux attach -t $session); the terminal: $0 attach"
         ;;
     stop)
         "$bin" quit 2>/dev/null || true

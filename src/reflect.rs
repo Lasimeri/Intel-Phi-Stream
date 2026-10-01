@@ -237,6 +237,16 @@ impl Reflector {
         n(&self.checks) >= self.cfg.checks_per_min || n(&self.changes) >= self.cfg.changes_per_min
     }
 
+    /// Whether the last minute's checks and changes are back to half the
+    /// budget or less: the spent note re-arms only then (hysteresis, so a
+    /// budget that frees one slot and spends it again is noted once).
+    pub fn recovered(&self, mono: i64) -> bool {
+        let minute = 60_000_000;
+        let n = |q: &VecDeque<i64>| q.iter().filter(|&&t| mono - t <= minute).count();
+        n(&self.checks) <= self.cfg.checks_per_min / 2
+            && n(&self.changes) <= self.cfg.changes_per_min / 2
+    }
+
     /// Whether to check this token now (`mono`: the monotonic clock, us).
     /// The hysteresis re-arms the flag trigger only once the smoothed score
     /// has fallen below `flag_lo`.
@@ -798,6 +808,9 @@ mod tests {
         assert_eq!(n, 2);
         assert!(r.spent(10_000));
         assert!(!r.spent(70_000_000));
+        // Spent at 2 of 2; recovered only at half (1) or less.
+        assert!(!r.recovered(10_000));
+        assert!(r.recovered(70_000_000));
     }
 
     #[test]

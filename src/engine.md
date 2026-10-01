@@ -142,6 +142,23 @@ microsecond in the prompt prevented), and a thinking budget after which
 whole set of tasks. The run's sampling is set explicitly when the engine
 starts.
 
+**Reads it asks for** (`[read: PATH]`, `[read: PATH:START-END]` for
+those lines, 1-based and inclusive):
+- **Must fit.** A file is read beside the live sequence, then joined. The
+  reading's cells, the thoughts placed meanwhile and the chase all come
+  out of the cells the live sequence leaves, so a read must fit what is
+  left (`read_room`): the free cells less 2048, less the thoughts, and
+  never more than a third of the context. A read that does not fit is
+  refused into the chain with its size, its line count and a range that
+  would fit.
+  - In the first dev session, one 21026-token file read at position
+    18000 filled the 32768 cells. The decode failed and the service
+    stopped.
+- **Asked twice, read once.** A path asked for twice is read once.
+- **Dropped at a rollover.** Reads still waiting when a rollover starts
+  are dropped, with a note: the summary carries what they were for, and
+  stale whole files would refill the new context at once.
+
 **Development** (`--dev REPO`, `docs/dev.md`). The persona gains a
 paragraph after the person's instructions and the frame's mechanics: the
 stream develops REPO (the program it runs in) as a peer with Claude.
