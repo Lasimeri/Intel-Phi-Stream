@@ -1559,7 +1559,10 @@ impl Engine {
             .map(|c| c.2.clone())
             .unwrap_or_default();
         let limit = self.reflector.as_ref().map_or(8, |r| r.cfg.answer_tokens);
-        let keep_at = self.reflector.as_ref().map_or(0.5, |r| r.cfg.keep_at);
+        let keep_at = self
+            .reflector
+            .as_ref()
+            .map_or(ReflectConfig::default().keep_at, |r| r.cfg.keep_at);
         let min_fmt = self.reflector.as_ref().map_or(0.2, |r| r.cfg.min_fmt);
         let c = self.check.as_mut().unwrap();
         if in_question {
