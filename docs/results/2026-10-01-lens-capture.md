@@ -76,3 +76,27 @@ token being placed, at any block, exactly as the model computed it, in
 the live stream's own cycles. Next: Gate B (the cost of the callback in
 the stream), then the lens file (fetched pinned, converted without
 Python) and Gate C.
+
+## Correction, the same afternoon: the first passing run did not go through the cards
+
+The table above came from `scripts/phi-stream.sh lens check` run before a
+launcher defect was found: the script sent only `serve`, `probe`, `gate`
+and `run` through the co-processor repository's `phi-ggml.sh`, so `lens`
+(and any subcommand preceded by a model option, such as `--gpu-blocks 27
+probe`) ran on the GPU and the host alone, without the cards. The header
+of this record ("both cards up", "split as the stream runs it") was
+therefore not true of that run.
+
+The launcher now finds the subcommand past the model options (which are
+global) and sends `lens` through `phi-ggml.sh` too. Rerun through the
+cards (`~/.cache/phi-asm-test/stream/lens-check-cards.out`; the backend
+reported cards 0 and 1 holding 33.3 percent of the experts each, 3.19
+GB): 18 of 18 tokens pass, the graph's logits row equal to llama's in
+all, the readout's largest difference 0.000000, the host norm within
+0.000002. The beside cycles show the live token as row 0 of micro-batch
+0, the injection end as row 40.
+
+The rerun also checks the GPU ranking the live readout uses (softmax,
+top-k and a gather on the GPU, `src/readout.md`): its top 10 equals the
+host's ranking of llama's logits for every token, log-probabilities
+within 1e-6 (`lens-check-gpu.out`).

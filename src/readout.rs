@@ -16,16 +16,15 @@ use crate::sys;
 
 /// A transport matrix resident on the GPU: `d x d`, float16, row `i` holding
 /// the coefficients of output coordinate `i` (the reference's `J[i][j]`).
-// `layer` and `Readout::transport` are read by the lens readouts (next).
-#[allow(dead_code)]
 pub struct Transport {
     pub layer: i32,
     tensor: *mut sys::ggml_tensor,
 }
 
-/// A group of columns sharing one transport (or none: the final block).
+/// A group of columns sharing one transport, named by its block (none:
+/// the final block, decoded as it is).
 pub struct Group<'a> {
-    pub transport: Option<&'a Transport>,
+    pub transport: Option<i32>,
     /// The columns are already the normed final residual: unembed only
     /// (a diagnostic of the unembedding alone).
     pub normed: bool,
@@ -186,18 +185,34 @@ impl Readout {
         self.eps
     }
 
-    #[allow(dead_code)]
-    pub fn transport(&self, layer: i32) -> Option<&Transport> {
-        self.transports.iter().find(|t| t.layer == layer)
-    }
-
     /// Logits for every column of every group, in order: `n_vocab` floats
     /// per column.
     pub fn logits(&mut self, groups: &[Group]) -> Result<Vec<Vec<f32>>> {
+        match self.run(groups, None)? {
+            Out::Logits(l) => Ok(l),
+            Out::Top(_) => unreachable!(),
+        }
+    }
+
+    /// The top `k` tokens of every column, ranked on the GPU (softmax,
+    /// top-k, a gather of the probabilities): only `k` indices and
+    /// probabilities a column come back to the host.
+    pub fn top(&mut self, groups: &[Group], k: usize) -> Result<Vec<Ranked>> {
+        match self.run(groups, Some(k))? {
+            Out::Top(t) => Ok(t),
+            Out::Logits(_) => unreachable!(),
+        }
+    }
+
+    fn run(&mut self, groups: &[Group], top_k: Option<usize>) -> Result<Out> {
         let d = self.d;
         let n_cols: usize = groups.iter().map(|g| g.columns.len() / d).sum();
         if n_cols == 0 {
-            return Ok(Vec::new());
+            return Ok(if top_k.is_some() {
+                Out::Top(Vec::new())
+            } else {
+                Out::Logits(Vec::new())
+            });
         }
         for g in groups {
             if g.columns.len() % d != 0 {
@@ -234,7 +249,13 @@ impl Readout {
                 sys::ggml_set_input(h);
                 inputs.push((h, g.columns));
                 let v = match g.transport {
-                    Some(t) => sys::ggml_mul_mat(ctx, t.tensor, h),
+                    Some(l) => match self.transports.iter().find(|t| t.layer == l) {
+                        Some(t) => sys::ggml_mul_mat(ctx, t.tensor, h),
+                        None => {
+                            sys::ggml_free(ctx);
+                            bail!("no transport for block {l} is loaded");
+                        }
+                    },
                     None => h,
                 };
                 x = if x.is_null() {
@@ -250,9 +271,32 @@ impl Readout {
                 sys::ggml_mul(ctx, normed, self.norm_w)
             };
             let out = sys::ggml_mul_mat(ctx, self.unembed, scaled);
-            sys::ggml_set_output(out);
+            // With `top_k`: softmax over the vocabulary, the top k indices
+            // (in no particular order), and their probabilities gathered by
+            // viewing each column as `n_vocab` rows of one element.
+            let v = self.n_vocab;
+            let (idx, probs) = match top_k {
+                Some(k) => {
+                    let p = sys::ggml_soft_max(ctx, out);
+                    let i = sys::ggml_top_k(ctx, p, k as i32);
+                    let p3 = sys::ggml_reshape_3d(ctx, p, 1, v as i64, n_cols as i64);
+                    let g = sys::ggml_get_rows(ctx, p3, i);
+                    sys::ggml_set_output(i);
+                    sys::ggml_set_output(g);
+                    (i, g)
+                }
+                None => {
+                    sys::ggml_set_output(out);
+                    (std::ptr::null_mut(), std::ptr::null_mut())
+                }
+            };
             let graph = sys::ggml_new_graph(ctx);
-            sys::ggml_build_forward_expand(graph, out);
+            if top_k.is_some() {
+                sys::ggml_build_forward_expand(graph, idx);
+                sys::ggml_build_forward_expand(graph, probs);
+            } else {
+                sys::ggml_build_forward_expand(graph, out);
+            }
             if !sys::ggml_gallocr_alloc_graph(self.galloc, graph) {
                 sys::ggml_free(ctx);
                 bail!("no GPU memory for the readout of {n_cols} columns");
@@ -265,13 +309,55 @@ impl Readout {
                 sys::ggml_free(ctx);
                 bail!("the readout graph failed ({st})");
             }
-            let v = self.n_vocab;
-            let mut all = vec![0f32; v * n_cols];
-            sys::ggml_backend_tensor_get(out, all.as_mut_ptr() as *mut c_void, 0, all.len() * 4);
+            let result = match top_k {
+                None => {
+                    let mut all = vec![0f32; v * n_cols];
+                    sys::ggml_backend_tensor_get(
+                        out,
+                        all.as_mut_ptr() as *mut c_void,
+                        0,
+                        all.len() * 4,
+                    );
+                    Out::Logits(all.chunks(v).map(|c| c.to_vec()).collect())
+                }
+                Some(k) => {
+                    let mut ids = vec![0i32; k * n_cols];
+                    let mut ps = vec![0f32; k * n_cols];
+                    sys::ggml_backend_tensor_get(
+                        idx,
+                        ids.as_mut_ptr() as *mut c_void,
+                        0,
+                        ids.len() * 4,
+                    );
+                    sys::ggml_backend_tensor_get(
+                        probs,
+                        ps.as_mut_ptr() as *mut c_void,
+                        0,
+                        ps.len() * 4,
+                    );
+                    Out::Top(
+                        ids.chunks(k)
+                            .zip(ps.chunks(k))
+                            .map(|(i, p)| {
+                                let mut top: Vec<(i32, f32)> =
+                                    i.iter().zip(p).map(|(&t, &q)| (t, q.ln())).collect();
+                                top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                                Ranked { top }
+                            })
+                            .collect(),
+                    )
+                }
+            };
             sys::ggml_free(ctx);
-            Ok(all.chunks(v).map(|c| c.to_vec()).collect())
+            Ok(result)
         }
     }
+}
+
+/// What a readout run returns.
+enum Out {
+    Logits(Vec<Vec<f32>>),
+    Top(Vec<Ranked>),
 }
 
 impl Drop for Readout {

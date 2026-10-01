@@ -110,8 +110,10 @@ pub fn sizes(path: &str) -> Result<Sizes> {
 #[derive(Clone, Debug)]
 pub struct Split {
     pub n_blocks: usize,
-    /// Blocks `0..gpu_blocks` keep their experts on the GPU.
+    /// How many blocks keep their experts on the GPU.
     pub gpu_blocks: usize,
+    /// Which, ascending (`0..gpu_blocks` unless some were asked to stay).
+    pub gpu_set: Vec<usize>,
     /// Weight bytes the GPU holds (the fixed part and those experts).
     pub gpu_bytes: u64,
     /// Expert bytes in host memory (the cards take their share of them).
@@ -125,26 +127,46 @@ pub struct Split {
 /// Choose the blocks. `budget`: bytes the GPU may give to weights. With
 /// `want` given the count is the user's; else the most that fit, the last
 /// block (a model's extra prediction block, unused here) always on the host.
-pub fn plan(s: &Sizes, budget: u64, want: Option<usize>) -> Split {
+/// `keep` names blocks whose experts go to the GPU first (the blocks the
+/// mind reads: reading a block whose experts run elsewhere costs the
+/// stream, Gate B); the rest of the count is filled from block 0 upward.
+pub fn plan(s: &Sizes, budget: u64, want: Option<usize>, keep: &[usize]) -> Split {
     let n = s.block.len();
     let fixed: u64 = s.other + (0..n).map(|b| s.block[b] - s.experts[b]).sum::<u64>();
+    // The order blocks are given to the GPU: the kept ones, then the rest.
+    let mut order: Vec<usize> = keep.iter().copied().filter(|&b| b + 1 < n).collect();
+    order.sort_unstable();
+    order.dedup();
+    for b in 0..n {
+        if !order.contains(&b) {
+            order.push(b);
+        }
+    }
     let mut used = fixed;
-    let mut k = 0;
+    let mut gpu: Vec<usize> = Vec::new();
     match want {
         Some(g) => {
-            k = g.min(n);
-            used += (0..k).map(|b| s.experts[b]).sum::<u64>();
+            for &b in order.iter().take(g.min(n)) {
+                used += s.experts[b];
+                gpu.push(b);
+            }
         }
         None => {
-            while k + 1 < n && used + s.experts[k] <= budget {
-                used += s.experts[k];
-                k += 1;
+            for &b in &order {
+                // The last block stays home.
+                if b + 1 == n || used + s.experts[b] > budget {
+                    break;
+                }
+                used += s.experts[b];
+                gpu.push(b);
             }
         }
     }
-    let host_bytes = (k..n).map(|b| s.experts[b]).sum();
-    let pattern = (k < n).then(|| {
-        let alts: Vec<String> = (k..n).map(|b| b.to_string()).collect();
+    gpu.sort_unstable();
+    let host: Vec<usize> = (0..n).filter(|b| !gpu.contains(b)).collect();
+    let host_bytes = host.iter().map(|&b| s.experts[b]).sum();
+    let pattern = (!host.is_empty()).then(|| {
+        let alts: Vec<String> = host.iter().map(|b| b.to_string()).collect();
         format!(
             r"blk\.({})\.ffn_(up|gate|down)_exps\.weight",
             alts.join("|")
@@ -152,11 +174,31 @@ pub fn plan(s: &Sizes, budget: u64, want: Option<usize>) -> Split {
     });
     Split {
         n_blocks: n,
-        gpu_blocks: k,
+        gpu_blocks: gpu.len(),
+        gpu_set: gpu,
         gpu_bytes: used,
         host_bytes,
         pattern,
     }
+}
+
+/// A set of blocks as ranges, `0..20, 26, 32` style.
+pub fn ranges(set: &[usize]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < set.len() {
+        let mut j = i;
+        while j + 1 < set.len() && set[j + 1] == set[j] + 1 {
+            j += 1;
+        }
+        out.push(if j == i {
+            set[i].to_string()
+        } else {
+            format!("{}..{}", set[i], set[j] + 1)
+        });
+        i = j + 1;
+    }
+    out.join(", ")
 }
 
 pub fn gib(bytes: u64) -> f64 {
@@ -180,7 +222,7 @@ mod tests {
     #[test]
     fn auto_fills_the_budget_and_keeps_the_last_block_home() {
         // fixed = 50 + 5 * 10 = 100; each block's experts 90
-        let p = plan(&sizes(), 100 + 90 * 2 + 10, None);
+        let p = plan(&sizes(), 100 + 90 * 2 + 10, None, &[]);
         assert_eq!(p.gpu_blocks, 2);
         assert_eq!(p.gpu_bytes, 280);
         assert_eq!(p.host_bytes, 270);
@@ -188,16 +230,31 @@ mod tests {
             p.pattern.as_deref(),
             Some(r"blk\.(2|3|4)\.ffn_(up|gate|down)_exps\.weight")
         );
-        let all = plan(&sizes(), u64::MAX, None);
+        let all = plan(&sizes(), u64::MAX, None, &[]);
         assert_eq!(all.gpu_blocks, 4);
     }
 
     #[test]
+    fn kept_blocks_go_first_and_the_rest_fills_from_zero() {
+        // Room for two blocks of experts: block 3 is kept, then block 0.
+        let p = plan(&sizes(), 100 + 90 * 2 + 10, None, &[3]);
+        assert_eq!(p.gpu_set, vec![0, 3]);
+        assert_eq!(
+            p.pattern.as_deref(),
+            Some(r"blk\.(1|2|4)\.ffn_(up|gate|down)_exps\.weight")
+        );
+        // The last block is never kept.
+        let p = plan(&sizes(), u64::MAX, None, &[4]);
+        assert_eq!(p.gpu_set, vec![0, 1, 2, 3]);
+        assert_eq!(ranges(&[0, 1, 2, 5, 7, 8]), "0..3, 5, 7..9");
+    }
+
+    #[test]
     fn a_wanted_count_is_taken_as_is() {
-        let p = plan(&sizes(), 0, Some(5));
+        let p = plan(&sizes(), 0, Some(5), &[]);
         assert_eq!(p.gpu_blocks, 5);
         assert!(p.pattern.is_none());
-        let p = plan(&sizes(), 0, Some(0));
+        let p = plan(&sizes(), 0, Some(0), &[]);
         assert_eq!(p.gpu_blocks, 0);
         assert_eq!(p.host_bytes, 450);
     }

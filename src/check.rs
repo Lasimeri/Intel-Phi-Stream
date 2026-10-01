@@ -12,7 +12,7 @@
 use anyhow::{bail, Context as _, Result};
 
 use crate::llm::{Lane, Llm};
-use crate::readout::{compare, cuda_device, Group, Readout};
+use crate::readout::{compare, cuda_device, rank, Group, Readout};
 
 /// What one compared token gave.
 struct Row {
@@ -30,6 +30,10 @@ struct Row {
     norm_vs_graph: f32,
     /// The unembedding alone, of the graph's normed row, against llama's logits.
     unembed_vs_api: f32,
+    /// The GPU's top 10 against the host's ranking of llama's logits: the
+    /// same tokens in the same order, and the largest log-probability difference.
+    gpu_top_same: bool,
+    gpu_top_logp: f32,
 }
 
 const TOP_K: usize = 10;
@@ -141,6 +145,26 @@ fn one(
         columns: &graph_normed,
     }])?;
     let (_, unembed_vs_api) = compare(&un[0], &api, TOP_K)?;
+    let gpu = r.top(
+        &[Group {
+            transport: None,
+            normed: false,
+            columns: &h,
+        }],
+        TOP_K,
+    )?;
+    let host = rank(&api, TOP_K);
+    let gpu_top_same = gpu[0]
+        .top
+        .iter()
+        .map(|x| x.0)
+        .eq(host.top.iter().map(|x| x.0));
+    let gpu_top_logp = gpu[0]
+        .top
+        .iter()
+        .zip(&host.top)
+        .map(|(a, b)| (a.1 - b.1).abs())
+        .fold(0.0, f32::max);
     out.push(Row {
         kind,
         pos,
@@ -151,6 +175,8 @@ fn one(
         readout_vs_api,
         norm_vs_graph,
         unembed_vs_api,
+        gpu_top_same,
+        gpu_top_logp,
     });
     Ok(())
 }
@@ -282,12 +308,16 @@ pub fn check(llm: &mut Llm, prompt: &str, side: &str) -> Result<()> {
     );
     let mut bad = 0;
     for r in &out {
-        let ok = r.graph_vs_api == 0.0 && r.topk_same && r.readout_vs_api <= MAX_DIFF;
+        let ok = r.graph_vs_api == 0.0
+            && r.topk_same
+            && r.readout_vs_api <= MAX_DIFF
+            && r.gpu_top_same
+            && r.gpu_top_logp <= 1e-3;
         if !ok {
             bad += 1;
         }
         println!(
-            "{:<14} {:>6} {:>6}  {:>13.6}  {:>9}  {:>15.6}  {:>14.6}  {:>15.6}{}",
+            "{:<14} {:>6} {:>6}  {:>13.6}  {:>9}  {:>15.6}  {:>14.6}  {:>15.6}  {:>12}{}",
             r.kind,
             r.pos,
             format!("{}:{}", r.micro_batch, r.row),
@@ -296,6 +326,11 @@ pub fn check(llm: &mut Llm, prompt: &str, side: &str) -> Result<()> {
             r.readout_vs_api,
             r.norm_vs_graph,
             r.unembed_vs_api,
+            if r.gpu_top_same {
+                format!("same {:.0e}", r.gpu_top_logp)
+            } else {
+                "DIFFERENT".to_string()
+            },
             if ok { "" } else { "   FAIL" }
         );
     }

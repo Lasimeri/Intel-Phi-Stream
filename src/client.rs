@@ -84,6 +84,8 @@ pub enum Msg {
     Text(String, Kind),
     Status(Status),
     Note(String),
+    /// What was on its mind at one token (`mind.rs`).
+    Mind(crate::mind::Reading),
     Ok(String),
     Err(String),
     Bye,
@@ -173,9 +175,14 @@ pub fn parse(line: &str) -> Msg {
                     "journal"
                 },
                 leaks: field(&f, "leaks").parse().unwrap_or(0),
+                mind_ms: field(&f, "mind_ms").parse().unwrap_or(0.0),
             })
         }
         "note" => Msg::Note(unescape(rest)),
+        "mind" => match crate::mind::parse_line(rest) {
+            Some(r) => Msg::Mind(r),
+            None => Msg::Other(line.to_string()),
+        },
         "ok" => Msg::Ok(rest.to_string()),
         "err" => Msg::Err(rest.to_string()),
         "bye" => Msg::Bye,
@@ -194,8 +201,8 @@ pub fn status_line(s: &Status) -> String {
         Mode::Paused => "paused".to_string(),
     };
     format!(
-        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={}",
-        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks
+        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2}",
+        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks, s.mind_ms
     )
 }
 
@@ -297,6 +304,7 @@ mod tests {
             notes: 4,
             frame: "journal",
             leaks: 0,
+            mind_ms: 0.0,
         };
         match parse(&status_line(&st)) {
             Msg::Status(s) => {

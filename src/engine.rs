@@ -23,6 +23,7 @@ use std::time::Instant;
 use anyhow::{bail, Context as _, Result};
 
 use crate::llm::{Lane, Llm, Sampling};
+use crate::mind::{Mind, MindConfig, Reading as MindReading};
 
 /// What a piece of the stream is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,12 +65,16 @@ pub struct Status {
     pub frame: &'static str,
     /// Lines beginning with « that the mind wrote itself (a frame leak).
     pub leaks: u32,
+    /// The mind readout's time per token, milliseconds (0: not read).
+    pub mind_ms: f64,
 }
 
 pub enum Event {
     Text(String, Kind),
     Status(Status),
     Note(String),
+    /// What was on its mind at a token it placed (`mind.rs`).
+    Mind(MindReading),
     Stopped,
 }
 
@@ -133,6 +138,9 @@ pub struct Config {
     pub status_every: u32,
     /// Where the persona, the notes and the log live.
     pub workspace: PathBuf,
+    /// Read what is on its mind at every token it places (`mind.rs`);
+    /// none: not read (and no eval callback installed).
+    pub mind: Option<MindConfig>,
 }
 
 /// The base of the personality when no file gives one.
@@ -248,6 +256,9 @@ pub struct Engine {
     eot: i32,
     newline: i32,
     log: Option<File>,
+    mind: Option<Mind>,
+    /// The readout's time per token, milliseconds, averaged.
+    mind_ms: Ema,
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
@@ -319,6 +330,8 @@ impl Engine {
             eot,
             newline,
             log,
+            mind: None,
+            mind_ms: Ema { v: 0.0, n: 0 },
         })
     }
 
@@ -522,6 +535,28 @@ impl Engine {
         self.history.len() as i32
     }
 
+    /// After a decode that asked for a token: what is on its mind at the
+    /// token just decoded (`pos`, `token`), synchronously, before the next
+    /// cycle. The readout starts at the first decode (it needs the model's
+    /// unembedding, which the capture sees then).
+    fn mind_step(&mut self, pos: i32, token: i32) -> Result<()> {
+        let Some(cfg) = self.cfg.mind.clone() else {
+            return Ok(());
+        };
+        if self.mind.is_none() {
+            let ws = self.cfg.workspace.clone();
+            self.mind = Some(Mind::new(&mut self.llm, cfg, &ws)?);
+            self.note("reading its mind at every token it places".into());
+        }
+        let text = self.llm.text(&[token]);
+        let m = self.mind.as_mut().unwrap();
+        if let Some(r) = m.read(&mut self.llm, pos, &text)? {
+            self.mind_ms.push(r.ms as f64);
+            let _ = self.tx.send(Event::Mind(r));
+        }
+        Ok(())
+    }
+
     /// Decode `tokens` into the live sequence after the pending token,
     /// logits of the last, and sample the next.
     fn direct(&mut self, tokens: &[i32]) -> Result<()> {
@@ -543,6 +578,7 @@ impl Engine {
             }
         }
         self.history.extend_from_slice(&all);
+        self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         self.next = self.llm.sample(row);
         self.line_buf.clear();
         self.line_start = true;
@@ -607,6 +643,11 @@ impl Engine {
             notes: self.notes.len(),
             frame: self.cfg.frame.name(),
             leaks: self.leaks,
+            mind_ms: if self.mind.is_some() {
+                self.mind_ms.v
+            } else {
+                0.0
+            },
         }
     }
 
@@ -664,7 +705,7 @@ impl Engine {
 
     /// The chase has fed every thought up to the pending token: the
     /// composed sequence becomes the live one.
-    fn swap(&mut self, c: Chase, row: i32) {
+    fn swap(&mut self, c: Chase, row: i32) -> Result<()> {
         let old = self.live;
         let mut history = c.head;
         history.extend_from_slice(&self.history[c.from..]);
@@ -673,9 +714,11 @@ impl Engine {
         self.live = c.seq;
         self.llm.seq_rm(old, -1, -1);
         self.free_seqs.push(old);
+        self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
         self.next = self.llm.sample(row);
         let mark = self.framed_system(&c.label);
         self.say(mark, Kind::Given);
+        Ok(())
     }
 
     /// One cycle: the live token and whatever runs beside it.
@@ -700,7 +743,7 @@ impl Engine {
                 }])?;
                 side_tokens += pending.len();
                 c.fed += pending.len();
-                self.swap(c, rows[0]);
+                self.swap(c, rows[0])?;
                 self.finish_cycle(t0, side_tokens, false);
                 return Ok(());
             }
@@ -722,7 +765,7 @@ impl Engine {
             ])?;
             c.fed += n;
             side_tokens += n;
-            self.advance(rows[0]);
+            self.advance(rows[0])?;
             live_advanced = true;
             self.chase = Some(c);
             self.finish_cycle(t0, side_tokens, live_advanced);
@@ -758,7 +801,7 @@ impl Engine {
                         logits: false,
                     },
                 ])?;
-                self.advance(rows[0]);
+                self.advance(rows[0])?;
                 live_advanced = true;
             }
             r.fed += n;
@@ -779,13 +822,14 @@ impl Engine {
             pos0: self.pos(),
             logits: true,
         }])?;
-        self.advance(rows[0]);
+        self.advance(rows[0])?;
         self.finish_cycle(t0, 0, true);
         Ok(())
     }
 
     /// The pending token is decoded: keep it, sample the next, show it.
-    fn advance(&mut self, row: i32) {
+    fn advance(&mut self, row: i32) -> Result<()> {
+        self.mind_step(self.pos(), self.next)?;
         self.history.push(self.next);
         let mut t = self.llm.sample(row);
         if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
@@ -797,6 +841,7 @@ impl Engine {
         }
         self.next = t;
         self.emit_token(t);
+        Ok(())
     }
 
     fn finish_cycle(&mut self, t0: Instant, side_tokens: usize, live_advanced: bool) {
@@ -998,6 +1043,7 @@ impl Engine {
             }
         }
         self.history.extend_from_slice(&tokens);
+        self.mind_step(tokens.len() as i32 - 1, *tokens.last().unwrap())?;
         self.next = self.llm.sample(row);
         self.say(opening.clone(), Kind::Given);
         let _ = self.tx.send(Event::Status(self.status()));

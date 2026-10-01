@@ -25,12 +25,16 @@ use crate::engine::{Command, Event, Kind};
 const KEEP_CHARS: usize = 400_000;
 /// What a new `tail` is shown first.
 const REPLAY_CHARS: usize = 12_000;
+/// Readings of its mind kept and shown to a new `tail`.
+const KEEP_MINDS: usize = 256;
 
 struct Hub {
     recent: VecDeque<(String, Kind)>,
     chars: usize,
     last_status: Option<String>,
     subs: Vec<Sender<String>>,
+    /// The last readings of its mind, as lines.
+    minds: VecDeque<String>,
 }
 
 impl Hub {
@@ -61,6 +65,7 @@ impl Hub {
             .skip(start)
             .map(|(t, k)| format!("text {} {}", kind_name(*k), escape(t)))
             .collect();
+        out.extend(self.minds.iter().cloned());
         if let Some(s) = &self.last_status {
             out.push(s.clone());
         }
@@ -97,6 +102,7 @@ pub fn serve(
         chars: 0,
         last_status: None,
         subs: Vec::new(),
+        minds: VecDeque::new(),
     }));
     let stopped = Arc::new(AtomicBool::new(false));
 
@@ -120,6 +126,14 @@ pub fn serve(
                     }
                     Event::Note(n) => {
                         let line = format!("note {}", escape(&n));
+                        h.broadcast(&line);
+                    }
+                    Event::Mind(r) => {
+                        let line = format!("mind {}", crate::mind::line(&r));
+                        h.minds.push_back(line.clone());
+                        while h.minds.len() > KEEP_MINDS {
+                            h.minds.pop_front();
+                        }
                         h.broadcast(&line);
                     }
                     Event::Stopped => {

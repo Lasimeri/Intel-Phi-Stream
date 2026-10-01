@@ -21,6 +21,8 @@ use crossterm::{cursor, execute, queue, terminal};
 
 use crate::client::{escape, parse, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
+use crate::mind::Reading;
+use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
 mod theme {
@@ -91,6 +93,30 @@ struct View {
     notes: Vec<String>,
     started: Instant,
     heard: u32,
+    /// The last readings of its mind, newest last.
+    minds: VecDeque<Reading>,
+    /// The main area shows the readings token by token instead of the stream.
+    mind_view: bool,
+}
+
+const KEEP_MINDS: usize = 400;
+
+/// A token as shown in the mind's rows: newlines and tabs visible.
+fn shown(token: &str) -> String {
+    token.replace('\n', "⏎").replace('\t', "⇥")
+}
+
+/// One reading as one line: the token, then each block's words.
+fn mind_row(r: &Reading) -> String {
+    let blocks: Vec<String> = r
+        .layers
+        .iter()
+        .map(|(l, ws)| {
+            let words: Vec<&str> = ws.iter().map(|(w, _)| w.as_str()).collect();
+            format!("{l}: {}", words.join(" "))
+        })
+        .collect();
+    format!("{:>14}  {}", shown(&r.token), blocks.join("  ·  "))
 }
 
 const KEEP_CHARS: usize = 400_000;
@@ -247,11 +273,32 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         Print(pad(&title, w))
     )?;
     // The stream.
-    let body_h = h - 4;
-    let rows = v.rows(w.saturating_sub(2));
+    let has_mind = !v.minds.is_empty();
+    let body_h = h - 4 - has_mind as usize;
+    if v.mind_view {
+        // The readings, token by token, newest at the bottom.
+        let end = v.minds.len().saturating_sub(v.scroll);
+        let start = end.saturating_sub(body_h);
+        for r in 0..body_h {
+            let text = v.minds.get(start + r).map(mind_row).unwrap_or_default();
+            queue!(
+                out,
+                cursor::MoveTo(0, (1 + r) as u16),
+                SetAttribute(Attribute::Reset),
+                SetBackgroundColor(theme::BG),
+                SetForegroundColor(theme::GIVEN),
+                Print(pad(&format!(" {text}"), w))
+            )?;
+        }
+    }
+    let rows = if v.mind_view {
+        Vec::new()
+    } else {
+        v.rows(w.saturating_sub(2))
+    };
     let end = rows.len().saturating_sub(v.scroll);
     let start = end.saturating_sub(body_h);
-    for r in 0..body_h {
+    for r in 0..if v.mind_view { 0 } else { body_h } {
         queue!(
             out,
             cursor::MoveTo(0, (1 + r) as u16),
@@ -295,6 +342,18 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
             Print(" ".repeat(w.saturating_sub(col)))
         )?;
     }
+    // The mind strip: what was on its mind at the last token it placed.
+    if let Some(r) = v.minds.back() {
+        let strip = format!(" mind  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms);
+        queue!(
+            out,
+            cursor::MoveTo(0, (h - 4) as u16),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(theme::SURFACE),
+            SetForegroundColor(theme::GIVEN),
+            Print(pad(&strip, w))
+        )?;
+    }
     // The strip: what it is doing, and the rates.
     let (mode, rates) = match &v.status {
         Some(s) => mode_line(s, tick),
@@ -320,7 +379,7 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
     )?;
     // Hints and the last note.
     let hints = format!(
-        " Enter speaks · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        " Enter speaks · /feed FILE · /persona FILE · /mind · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
     queue!(
@@ -354,6 +413,15 @@ fn submit(line: &str, w: &mut UnixStream, v: &mut View) {
         format!("chunk {}", c.trim())
     } else if let Some(t) = line.strip_prefix("/temp ") {
         format!("temp {}", t.trim())
+    } else if line == "/mind" {
+        v.mind_view = !v.mind_view;
+        v.scroll = 0;
+        v.notes.push(if v.mind_view {
+            "the readings of its mind, token by token (/mind again: the stream)".into()
+        } else {
+            "the stream".into()
+        });
+        return;
     } else if line == "/quit" {
         "quit".to_string()
     } else if line.starts_with('/') {
@@ -411,6 +479,8 @@ pub fn run(socket: &Path) -> Result<()> {
             notes: Vec::new(),
             started: Instant::now(),
             heard: 0,
+            minds: VecDeque::new(),
+            mind_view: false,
         };
         let mut tick = 0u64;
         let mut dirty = true;
@@ -442,6 +512,13 @@ pub fn run(socket: &Path) -> Result<()> {
                     }
                     Ok(Msg::Note(n)) => {
                         v.notes.push(n);
+                        dirty = true;
+                    }
+                    Ok(Msg::Mind(r)) => {
+                        v.minds.push_back(r);
+                        while v.minds.len() > KEEP_MINDS {
+                            v.minds.pop_front();
+                        }
                         dirty = true;
                     }
                     Ok(Msg::Err(e)) => {

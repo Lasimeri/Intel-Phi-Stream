@@ -80,14 +80,28 @@ Workspace in Language Models"), then fed back so the mind can reason
 about the concepts it is holding at the token it is placing. Built in
 gated steps, each usable and recorded:
 
-- **Done**: the capture and the readout. `scripts/phi-stream.sh lens
-  check` proves that the residual captured live, decoded with the
+- **Done, Gate A**: the capture and the readout. `scripts/phi-stream.sh
+  lens check` proves that the residual captured live, decoded with the
   model's own norm and unembedding, is exactly the model's next-token
   distribution in every kind of cycle
   ([`docs/results/2026-10-01-lens-capture.md`](docs/results/2026-10-01-lens-capture.md)).
-- Next: the cost in the stream, the pinned lens file and its converter,
-  the lens evaluated on this model against the plain logit lens, then
-  the live per-token readout and the reflection loop.
+- **Done, Gates B and C**: the readout costs about 1 ms a token; the
+  lens fitted on the base model (fetched pinned and converted without
+  Python, `scripts/fetch-lens.sh`) reads this fine-tune better than the
+  plain logit lens on all six of the reference's evaluation sets
+  (`scripts/phi-stream.sh lens eval`), and places the workspace band at
+  blocks 27 to 32
+  ([`docs/results/2026-10-01-lens-cost-transfer.md`](docs/results/2026-10-01-lens-cost-transfer.md)).
+- **Usable now**: `scripts/phi-stream.sh start --mind` reads what is on
+  its mind at every token it places (blocks 27, 29, 31; about 2.6 ms a
+  token in the stream); the terminal shows it in a strip and token by
+  token with `/mind`; `phi-stream tail --mind` prints it
+  ([`src/mind.md`](src/mind.md)).
+- Next: the reflection loop (the stream reasoning on what is on its mind
+  at the token it is placing, beside the live token, within a commit
+  horizon so shown text never changes), real time as the reference
+  frame for every token and control, and coding tasks with tests as the
+  measure.
 
 ## Measured (2026-10-01, [`docs/results/2026-10-01-phi-stream.md`](docs/results/2026-10-01-phi-stream.md))
 
@@ -137,6 +151,8 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/tui.rs` | the terminal, a client of the service |
 | `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence |
 | `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
+| `src/torch.rs`, `src/lens.rs`, `src/eval.rs`, `src/mind.rs` | the reference's lens file read without Python; the `.jlens` format; the lens against the logit lens on the reference's sets; what is on its mind at every token |
+| `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
 | `docs/results/` | measurements, with their commands |
 

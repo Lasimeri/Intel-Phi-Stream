@@ -33,6 +33,8 @@ pub struct Options {
     pub threads: i32,
     /// Blocks whose experts stay on the GPU; none: as many as fit.
     pub gpu_blocks: Option<usize>,
+    /// Blocks whose experts go to the GPU first (the blocks the mind reads).
+    pub keep_on_gpu: Vec<usize>,
     /// K and V as 8-bit blocks instead of float16 (half the cells' bytes).
     pub kv_q8: bool,
     /// Sequences the context can hold apart.
@@ -162,7 +164,7 @@ impl Llm {
                 + 768 * (1 << 20)
                 + opts.extra_reserve;
             let budget = (free as u64).saturating_sub(reserve);
-            let plan = split::plan(&sizes, budget, opts.gpu_blocks);
+            let plan = split::plan(&sizes, budget, opts.gpu_blocks, &opts.keep_on_gpu);
 
             let mut devices = Box::new([cuda, std::ptr::null_mut()]);
             let pattern = plan.pattern.as_deref().map(CString::new).transpose()?;

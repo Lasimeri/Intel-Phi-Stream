@@ -6,10 +6,89 @@
 
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::llm::{Lane, Llm};
+use crate::readout::{cuda_device, Group, Readout};
 use crate::split::gib;
+
+/// The per-token readout's cost in the probe: after every decode that
+/// asked for a token, the captured blocks are transported, normed,
+/// unembedded and ranked, as the live stream will do. The transports are
+/// synthetic (a deterministic pseudo-random float16 matrix per block, the
+/// size of a real one): this measures cost, not meaning.
+pub struct MindCost {
+    pub layers: Vec<i32>,
+    readout: Option<Readout>,
+    /// Readouts made, and the time they took (seconds).
+    pub n: usize,
+    pub secs: f64,
+}
+
+impl MindCost {
+    pub fn new(layers: Vec<i32>) -> Self {
+        Self {
+            layers,
+            readout: None,
+            n: 0,
+            secs: 0.0,
+        }
+    }
+
+    fn step(&mut self, llm: &mut Llm) -> Result<()> {
+        let t0 = Instant::now();
+        let cap = llm.capture().context("no capture installed")?;
+        if let Some(e) = &cap.error {
+            anyhow::bail!("the capture failed: {e}");
+        }
+        let (outputs, _) = cap.take();
+        if self.readout.is_none() {
+            let eps = cap
+                .norm_eps
+                .context("the output norm's epsilon was not seen")?;
+            let (unembed, norm) = (cap.unembed, cap.output_norm);
+            let d = 2048usize;
+            let mats: Vec<(i32, Vec<u16>)> = self
+                .layers
+                .iter()
+                .map(|&l| (l, synthetic_transport(d, l as u64)))
+                .collect();
+            let refs: Vec<(i32, &[u16])> = mats.iter().map(|(l, m)| (*l, m.as_slice())).collect();
+            self.readout = Some(Readout::new(cuda_device()?, unembed, norm, eps, &refs)?);
+        }
+        let r = self.readout.as_mut().unwrap();
+        for o in outputs {
+            let groups: Vec<Group> = o
+                .layers
+                .iter()
+                .map(|(l, h)| Group {
+                    transport: Some(*l),
+                    normed: false,
+                    columns: h.as_slice(),
+                })
+                .collect();
+            std::hint::black_box(r.top(&groups, 8)?);
+            self.n += 1;
+        }
+        self.secs += t0.elapsed().as_secs_f64();
+        Ok(())
+    }
+}
+
+/// A `d x d` float16 matrix of small pseudo-random entries (xorshift64),
+/// for timing only.
+fn synthetic_transport(d: usize, seed: u64) -> Vec<u16> {
+    let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ seed.wrapping_mul(0x2545_f491_4f6c_dd1d);
+    (0..d * d)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            // float16 with exponent 0b01001 (about 1/64) and a random mantissa and sign.
+            ((x as u16) & 0x83ff) | (0x09 << 10)
+        })
+        .collect()
+}
 
 /// Read `tokens` into `seq` from `pos0` in chunks of `chunk`, one cycle
 /// each; returns tokens per second and the batch row of the last token
@@ -34,7 +113,13 @@ fn read(llm: &mut Llm, seq: i32, tokens: &[i32], pos0: i32, chunk: usize) -> Res
     Ok((tokens.len() as f64 / t0.elapsed().as_secs_f64(), row))
 }
 
-pub fn probe(llm: &mut Llm, prompt: &str, n_gen: usize, chunks: &[usize]) -> Result<()> {
+pub fn probe(
+    llm: &mut Llm,
+    prompt: &str,
+    n_gen: usize,
+    chunks: &[usize],
+    mind: &mut Option<MindCost>,
+) -> Result<()> {
     let s = &llm.sizes;
     let p = &llm.split;
     println!(
@@ -44,16 +129,14 @@ pub fn probe(llm: &mut Llm, prompt: &str, n_gen: usize, chunks: &[usize]) -> Res
         gib(s.block.iter().sum::<u64>() + s.other)
     );
     println!(
-        "GPU: {:.2} GiB free of {:.2} at the plan; weights there {:.2} GiB: everything but experts, plus the experts of blocks 0..{}",
+        "GPU: {:.2} GiB free of {:.2} at the plan; weights there {:.2} GiB: everything but experts, plus the experts of blocks {}",
         gib(llm.vram.0),
         gib(llm.vram.1),
         gib(p.gpu_bytes),
-        p.gpu_blocks
+        crate::split::ranges(&p.gpu_set)
     );
     println!(
-        "host memory and the cards: the experts of blocks {}..{}, {:.2} GiB (the cards keep their share of these)",
-        p.gpu_blocks,
-        p.n_blocks,
+        "host memory and the cards: the experts of the other blocks, {:.2} GiB (the cards keep their share of these)",
         gib(p.host_bytes)
     );
     println!(
@@ -77,6 +160,13 @@ pub fn probe(llm: &mut Llm, prompt: &str, n_gen: usize, chunks: &[usize]) -> Res
     llm.clear();
 
     let (pp, row) = read(llm, 0, &tokens, 0, cap)?;
+    if let Some(m) = mind.as_mut() {
+        // The prompt's end asked for a token: its readout, untimed (the
+        // readout's first use starts its backend).
+        m.step(llm)?;
+        m.n = 0;
+        m.secs = 0.0;
+    }
     println!(
         "prompt alone, {} tokens in chunks of {}: {:.1} tok/s",
         tokens.len(),
@@ -96,9 +186,23 @@ pub fn probe(llm: &mut Llm, prompt: &str, n_gen: usize, chunks: &[usize]) -> Res
             logits: true,
         }])?;
         next = llm.greedy(rows[0], true)?;
+        if let Some(m) = mind.as_mut() {
+            m.step(llm)?;
+        }
         pos += 1;
     }
     let tg_ms = t0.elapsed().as_secs_f64() * 1000.0 / n_gen as f64;
+    if let Some(m) = mind.as_mut() {
+        println!(
+            "the readout of blocks {:?}, {} tokens: {:.2} ms per token of the {:.1} ms",
+            m.layers,
+            m.n,
+            m.secs * 1000.0 / m.n.max(1) as f64,
+            tg_ms
+        );
+        m.n = 0;
+        m.secs = 0.0;
+    }
     println!(
         "generation alone, {} tokens: {:.1} ms per token, {:.1} tok/s",
         n_gen,
@@ -138,6 +242,9 @@ pub fn probe(llm: &mut Llm, prompt: &str, n_gen: usize, chunks: &[usize]) -> Res
                 },
             ])?;
             live = llm.greedy(rows[0], true)?;
+            if let Some(m) = mind.as_mut() {
+                m.step(llm)?;
+            }
             pos += 1;
             rpos += c.len() as i32;
             read_tokens += c.len();

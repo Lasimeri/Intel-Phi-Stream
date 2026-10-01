@@ -123,6 +123,11 @@ move on) is decoded straight in, at most once in 256 tokens. A document
 is framed with an opening and a closing line so the join reads as its
 end.
 
+**The mind** (`--mind`, `mind.md`): after every decode that asked for a
+token, the residual of that token at the chosen blocks is read through
+the Jacobian lens, synchronously, and sent out as `Event::Mind`; the
+readout's time is `mind_ms` in the status.
+
 Rates: exponential averages over recent cycles (`stream_tps` over cycles
 that carried a live token, `side_tps` over those that read or caught up,
 `cycle_ms` over all), in `Event::Status` every `status_every` cycles.

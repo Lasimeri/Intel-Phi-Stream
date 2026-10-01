@@ -19,7 +19,9 @@ think|speak|given TEXT`, `status mode=... stream=... beside=... cycle=...
 pos=... ctx=... queued=... chunk=... rollovers=... notes=... frame=...`
 (mode is `thinking`, `speaking`, `reading:DONE/TOTAL`,
 `catching:DONE/TOTAL`, `summarizing:N` or `paused`), `note TEXT`, and
-`bye` when the service stops. `leaks` in the status counts the lines
+`bye` when the service stops; `mind pos=... ms=... tok=... lN=w:logp,...`
+when the service reads its mind (`mind.md`); the last 256 are shown to
+a new `tail`. `leaks` in the status counts the lines
 beginning with `«` that the mind wrote itself (the journal frame's one
 known leak: a line in someone else's voice).
 

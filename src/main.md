@@ -19,7 +19,9 @@ phi-stream chunk 16 | temp 0.8 | pause | resume | quit
 Subcommands that own the model (no service): `serve` (the service
 itself, `src/serve.md`), `probe` (`src/probe.md`), `gate` (`src/gate.md`),
 `lens check` (the capture and the readout reproduce the model's own
-logits, `src/check.md`),
+logits, `src/check.md`), `lens convert` and `lens info` (the lens file,
+`src/lens.md`; `scripts/fetch-lens.sh` fetches and converts), `lens eval`
+(the lens against the logit lens on the reference's sets, `src/eval.md`),
 `run` (the stream on stdout, stdin lines said to it, `/feed FILE`,
 `/chunk N`, `/quit`; `--max-tokens` to stop; for scripted tests). The
 clients take `--socket PATH` (or `PHI_STREAM_SOCKET`; `src/client.md`).
@@ -48,7 +50,9 @@ the composition), `--system FILE` (the whole persona verbatim, an
 experiment's override), `--first-words` (the journal's first words in its
 own voice after the seed, "Where was I. "), `--seed-text`
 (the first thing from outside), `--direct-max` 48, `--chunk` 0
-(adapting), `--rollover-at` 0.6, `--feed FILE` at the start.
+(adapting), `--rollover-at` 0.6, `--feed FILE` at the start; `--mind` (read what is
+on its mind at every token, `src/mind.md`) with `--lens`,
+`--mind-layers`, `--mind-k`. `tail --mind` prints the readings too.
 
 The cards' backend is named by `GGML_BACKEND_PATH` (the sibling
 repository's `scripts/phi-ggml.sh` sets it and starts the workers, which

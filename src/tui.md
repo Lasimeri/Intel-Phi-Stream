@@ -19,6 +19,11 @@ is. Closing the terminal leaves the stream running.
   rollover or a new persona), paused; then the rates (live tokens a
   second, tokens read or caught up a second, the cycle), how full its
   context is, the queue, the chunk, the rollovers.
+- When the service reads its mind (`--mind`, `mind.md`), a mind strip
+  above the status shows the last token placed and the words on its mind
+  at each block, with the readout's time; `/mind` switches the main area
+  to the readings token by token (PgUp and PgDn scroll them), `/mind`
+  again back to the stream.
 - The input line: Enter says the line to the stream (heard at once when
   short, read beside the thoughts when long); `/feed FILE` hands a file
   over; `/persona FILE` gives it a new persona (the context rolls over
