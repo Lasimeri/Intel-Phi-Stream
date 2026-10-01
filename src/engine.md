@@ -161,7 +161,9 @@ those lines, 1-based and inclusive):
   are dropped, with a note: the summary carries what they were for, and
   stale whole files would refill the new context at once.
 
-**Development** (`--dev REPO`, `docs/dev.md`). The persona gains a
+**Development** (`--dev REPO`, `docs/dev.md`). Its notes are checked against the code
+(`verify.md`): a name the repository does not hold marks the note
+`[unverified: ...]` and the stream is told; `[unnote: TEXT]` retracts. The persona gains a
 paragraph after the person's instructions and the frame's mechanics: the
 stream develops REPO (the program it runs in) as a peer with Claude.
 - `[read: PATH]` resolves PATH in REPO.

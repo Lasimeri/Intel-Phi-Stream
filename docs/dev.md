@@ -33,6 +33,9 @@ plus any serve options given after it.
   those lines only. Its memory is about 32 thousand tokens: a file that
   does not fit is refused with its size and a range that would fit
   (`src/engine.md`).
+- **Its notes are checked against the code** (`src/verify.md`): a note
+  naming code the repository does not hold is marked `[unverified: ...]`
+  and the stream is told what is there; `[unnote: TEXT]` retracts.
 - **`[prefer: ...]`** lines are kept in `preferences.md` in the workspace,
   next to `notes.md`. They are announced as `prefers: ...` and shown back
   to it with its notes, at a rollover and at a fresh start (the opening

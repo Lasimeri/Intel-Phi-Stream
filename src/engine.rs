@@ -27,6 +27,7 @@ use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
 use crate::playout::Playout;
 use crate::reflect::{self, Decision, Episode, Outcome, ReflectConfig, Reflector, Why};
+use crate::verify;
 
 /// What a piece of the stream is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,10 +220,10 @@ pub fn compose_task(base: &str) -> String {
 /// The journal's development mechanics (`--dev REPO`): the program it
 /// runs in, developed with Claude, by its own preferences within the
 /// person's instructions.
-const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
+const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time. A note that names code the repository does not hold is marked unverified and it is told what the repository holds; [unnote: TEXT] removes its notes containing TEXT. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
 
 /// The chat frame's development mechanics.
-const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
 
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
@@ -490,6 +491,33 @@ impl Engine {
             .with_context(|| format!("making {}", cfg.workspace.display()))?;
         let notes = read_notes(&cfg.workspace.join("notes.md"));
         let prefs = read_notes(&cfg.workspace.join("preferences.md"));
+        // In development, notes already kept are checked against the code too
+        // (`verify.md`): a false one carries its mark rather than being believed.
+        let notes = match &cfg.dev {
+            Some(root) => {
+                let repo = verify::Repo::load(root);
+                notes
+                    .into_iter()
+                    .map(|n| {
+                        let f = repo.check(&n);
+                        if f.clean() || n.contains("[unverified:") {
+                            n
+                        } else {
+                            let mut why = Vec::new();
+                            if !f.missing.is_empty() {
+                                why.push(format!(
+                                    "{} nowhere in the repository",
+                                    f.missing.join(", ")
+                                ));
+                            }
+                            why.extend(f.bad_refs);
+                            format!("{n} [unverified: {}]", why.join("; "))
+                        }
+                    })
+                    .collect()
+            }
+            None => notes,
+        };
         let log = OpenOptions::new()
             .create(true)
             .append(true)
@@ -861,6 +889,11 @@ impl Engine {
             if !body.is_empty() {
                 self.add_note(body);
             }
+        } else if let Some(body) = l.strip_prefix("[unnote:").and_then(|r| r.strip_suffix(']')) {
+            let body = body.trim();
+            if !body.is_empty() {
+                self.unnote(body);
+            }
         } else if let Some(body) = l.strip_prefix("[prefer:").and_then(|r| r.strip_suffix(']')) {
             let body = body.trim();
             if !body.is_empty() {
@@ -875,12 +908,62 @@ impl Engine {
     }
 
     fn add_note(&mut self, body: &str) {
-        self.notes.push(body.to_string());
+        // In development a note's code is checked against the code
+        // (`verify.md`): a name that is not there is marked on the note, and
+        // the stream is told what is.
+        let mut kept = body.to_string();
+        if let Some(root) = self.cfg.dev.clone() {
+            let f = verify::Repo::load(&root).check(body);
+            let mut said = Vec::new();
+            if !f.missing.is_empty() {
+                said.push(format!(
+                    "{} {} nowhere in the repository",
+                    f.missing.join(", "),
+                    if f.missing.len() == 1 { "is" } else { "are" }
+                ));
+            }
+            said.extend(f.bad_refs.iter().cloned());
+            for (p, n, l) in &f.lines {
+                said.push(format!("line {n} of {p} is: {l}"));
+            }
+            if !f.clean() {
+                kept = format!(
+                    "{body} [unverified: {}]",
+                    said[..said.len() - f.lines.len()].join("; ")
+                );
+            }
+            if !said.is_empty() {
+                let msg = self.framed_system(&format!(
+                    "your note checked against the code: {}{}",
+                    said.join("; "),
+                    if f.clean() {
+                        String::new()
+                    } else {
+                        " (marked unverified; [unnote: TEXT] removes notes containing TEXT)".into()
+                    }
+                ));
+                self.queue.push_back((msg, "checked a note".into()));
+            }
+        }
+        self.notes.push(kept.clone());
         let path = self.cfg.workspace.join("notes.md");
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(f, "- {body}");
+            let _ = writeln!(f, "- {kept}");
         }
-        self.note(format!("noted: {body}"));
+        self.note(format!("noted: {kept}"));
+    }
+
+    /// `[unnote: TEXT]`: its notes containing TEXT (any case) removed, from
+    /// memory and from `notes.md`.
+    fn unnote(&mut self, text: &str) {
+        let t = text.to_lowercase();
+        let before = self.notes.len();
+        self.notes.retain(|n| !n.to_lowercase().contains(&t));
+        let gone = before - self.notes.len();
+        let path = self.cfg.workspace.join("notes.md");
+        let body: String = self.notes.iter().map(|n| format!("- {n}\n")).collect();
+        let _ = fs::write(&path, body);
+        self.note(format!("unnoted {gone} notes containing {text:?}"));
     }
 
     /// A preference it stated: kept (`preferences.md`), shown to it again

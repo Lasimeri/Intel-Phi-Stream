@@ -25,6 +25,7 @@ mod split;
 mod sys;
 mod torch;
 mod tui;
+mod verify;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
