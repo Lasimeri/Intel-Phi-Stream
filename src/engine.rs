@@ -754,11 +754,24 @@ impl Engine {
         } else {
             format!("[{}] ", clock::datetime(clock::now_us()))
         };
-        // What it kept from before (a restart): its notes and preferences.
+        // What it kept from before (a restart): its last summary, its notes
+        // and preferences.
         let kept = if self.cfg.task {
             String::new()
         } else {
-            self.notes_block()
+            let summary = fs::read_to_string(self.cfg.workspace.join("summary.md"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let summary = match (summary.is_empty(), self.cfg.frame) {
+                (true, _) => String::new(),
+                (false, Frame::Journal) => {
+                    format!("« [your own summary, written before you were restarted:]\n{summary}\n")
+                }
+                (false, Frame::Chat) => {
+                    format!("Your own summary, written before you were restarted:\n{summary}\n")
+                }
+            };
+            format!("{summary}{}", self.notes_block())
         };
         match self.cfg.frame {
             Frame::Journal => format!(
@@ -1910,6 +1923,8 @@ impl Engine {
                 if let Some(i) = text.rfind("\n---") {
                     text.truncate(i);
                 }
+                // Kept on disk: a restart resumes from it, as a rollover does.
+                let _ = fs::write(self.cfg.workspace.join("summary.md"), text.trim());
                 let base = self.base_after(text.trim());
                 let tokens = self.tok(&base, true)?;
                 self.note(format!(

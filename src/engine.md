@@ -178,9 +178,9 @@ stream develops REPO (the program it runs in) as a peer with Claude.
 - What is said can name its speaker (`Command::SayAs`): `« [time] Claude:
   ...`.
 
-Its notes and preferences are shown to it in the opening as well as at a
-rollover, so a restarted stream starts from what it kept (not in a
-task).
+Its notes and preferences, and its last rollover summary (kept in
+`summary.md`), are shown to it in the opening, so a restarted stream
+resumes from what it kept, as after a rollover (not in a task).
 
 **The mind** (`--mind`, `mind.md`): after every decode that asked for a
 token, the residual of that token at the chosen blocks is read through
