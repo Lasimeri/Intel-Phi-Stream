@@ -485,6 +485,12 @@ impl Engine {
             .iter()
             .filter_map(|t| llm.special(t))
             .collect();
+            // Lines beginning with « come only from outside: the mind never
+            // writes the mark (in the dev session it wrote hundreds of bare «
+            // lines, a loop no nudge broke). Text from outside is tokenized
+            // apart from the sampler and keeps it.
+            let mut control = control;
+            control.extend(llm.tokens_containing("«"));
             llm.ban_tokens(&control, &cfg.sampling);
         }
         fs::create_dir_all(&cfg.workspace)

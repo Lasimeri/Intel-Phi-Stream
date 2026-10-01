@@ -51,6 +51,11 @@ what the architecture allows: llama.cpp cannot shift this model's cells
 (`get_can_shift` is false for M-RoPE) and a recurrent state cannot be
 cut.
 
+**The mark `«` is never sampled** in the journal frame (every token
+carrying it is banned, as the dash-carrying ones are): lines beginning
+with `«` come only from outside. In the dev session the stream wrote
+hundreds of bare `«` lines, a loop no nudge broke.
+
 **The journal frame** (the default; `--frame chat` keeps the model's
 template). The text is one continuous first-person journal with no
 turns: the persona is a paragraph at the top, what comes from outside is

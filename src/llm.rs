@@ -278,6 +278,12 @@ impl Llm {
         self.batch_cap
     }
 
+    /// The vocabulary's tokens whose text holds `needle` (a scan of every
+    /// token's piece, as for the dashes).
+    pub fn tokens_containing(&self, needle: &str) -> Vec<i32> {
+        tokens_with(self.vocab, self.n_vocab, needle.as_bytes())
+    }
+
     /// How many tokens the sampler never draws for carrying a dash.
     pub fn dash_tokens_banned(&self) -> usize {
         self.dash_tokens.len()
@@ -636,6 +642,33 @@ pub fn argmax(v: &[f32]) -> i32 {
     best as i32
 }
 
+/// The vocabulary's tokens whose text holds `needle`.
+fn tokens_with(vocab: *const sys::llama_vocab, n_vocab: usize, needle: &[u8]) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64];
+    for t in 0..n_vocab as i32 {
+        // SAFETY: `buf` holds 64 bytes; a longer piece is cut, which is
+        // fine for a test of its bytes.
+        let n = unsafe {
+            sys::llama_token_to_piece(
+                vocab,
+                t,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i32,
+                0,
+                false,
+            )
+        };
+        let n = if n < 0 { buf.len() } else { n as usize };
+        if buf[..n.min(buf.len())]
+            .windows(needle.len())
+            .any(|w| w == needle)
+        {
+            out.push(t);
+        }
+    }
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
