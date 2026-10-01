@@ -186,6 +186,9 @@ those lines, 1-based and inclusive, `END` or `end` for the last line):
 `[unverified: ...]` and the stream is told; `[unnote: TEXT]` retracts. The persona gains a
 paragraph after the person's instructions and the frame's mechanics: the
 stream develops REPO (the program it runs in) as a peer with Claude.
+- The size of its memory in the persona is the context's (`with_ctx`
+  fills `{ctx}` with the cells in thousands at start and after a new
+  persona): it was a fixed 32 thousand, false at any other `-c`.
 - `[read: PATH]` resolves PATH in REPO, and in the workspace when only
   the workspace holds it (`dev_path`): its own records (`reflect.log`,
   `notes.md`, `preferences.md`) are read by their bare names. The persona

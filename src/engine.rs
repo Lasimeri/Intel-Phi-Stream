@@ -221,10 +221,16 @@ pub fn compose_task(base: &str) -> String {
 /// The journal's development mechanics (`--dev REPO`): the program it
 /// runs in, developed with Claude, by its own preferences within the
 /// person's instructions.
-const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time; a path the repository does not hold is looked for in its workspace, where its own records are kept: reflect.log (one line per check of its words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and it is told what the repository holds; [unnote: TEXT] removes its notes containing TEXT. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
+const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about {ctx} thousand tokens, so it reads code a function at a time; a path the repository does not hold is looked for in its workspace, where its own records are kept: reflect.log (one line per check of its words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and it is told what the repository holds; [unnote: TEXT] removes its notes containing TEXT. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
 
 /// The chat frame's development mechanics.
-const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time; a path the repository does not hold is looked for in your workspace, where your own records are kept: reflect.log (one line per check of your words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about {ctx} thousand tokens, so read code a function at a time; a path the repository does not hold is looked for in your workspace, where your own records are kept: reflect.log (one line per check of your words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+
+/// The persona with its memory's size in it (`{ctx}`: the context's
+/// cells in thousands), so it is never told a size it does not have.
+pub fn with_ctx(system: &str, n_ctx: u32) -> String {
+    system.replace("{ctx}", &((n_ctx + 500) / 1000).to_string())
+}
 
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
@@ -465,7 +471,14 @@ const SUMMARY_MIN: usize = 96;
 const SUMMARY_START: &str = "What I was working on: ";
 
 impl Engine {
-    pub fn new(llm: Llm, cfg: Config, tx: Sender<Event>, rx: Receiver<Command>) -> Result<Self> {
+    pub fn new(
+        llm: Llm,
+        mut cfg: Config,
+        tx: Sender<Event>,
+        rx: Receiver<Command>,
+    ) -> Result<Self> {
+        // The persona names the size of its memory: the context's own.
+        cfg.system = with_ctx(&cfg.system, llm.n_ctx());
         let think_open = llm.special("<think>").unwrap_or(-1);
         let think_close = llm.special("</think>").unwrap_or(-1);
         let eot = llm.eot();
@@ -2241,7 +2254,10 @@ impl Engine {
                 self.llm.set_sampling(&s);
             }
             Command::Persona(text) => {
-                self.cfg.system = compose(&text, self.cfg.frame, self.cfg.dev.as_deref());
+                self.cfg.system = with_ctx(
+                    &compose(&text, self.cfg.frame, self.cfg.dev.as_deref()),
+                    self.llm.n_ctx(),
+                );
                 self.reseat = true;
                 let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
                 self.note("a new persona: the context rolls over onto it after a summary".into());
@@ -2562,6 +2578,10 @@ mod tests {
         let plain = compose(base, Frame::Journal, None);
         assert!(!plain.contains("[prefer:"));
         let dev = compose(base, Frame::Journal, Some(Path::new("/r/Intel Phi Stream")));
+        // Its memory's size is the context's, filled in at run time.
+        assert!(dev.contains("about {ctx} thousand tokens"));
+        assert!(with_ctx(&dev, 204800).contains("about 205 thousand tokens"));
+        assert!(with_ctx(&dev, 32768).contains("about 33 thousand tokens"));
         assert!(
             dev.contains("> Be concise.\n> No em dash.\n"),
             "the base quoted"
