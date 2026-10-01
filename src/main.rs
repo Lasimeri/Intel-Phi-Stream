@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::client::{default_socket, escape, parse, Client, Msg};
-use crate::engine::{default_persona, Command, Config, Engine, Event, Frame, Kind, Mode};
+use crate::engine::{compose, Command, Config, Engine, Event, Frame, Kind, Mode, DEFAULT_BASE};
 use crate::llm::{Llm, Options, Sampling};
 
 #[derive(Parser)]
@@ -89,6 +89,9 @@ struct ModelArgs {
     repeat_penalty: f32,
     #[arg(long, default_value_t = 256)]
     repeat_last_n: i32,
+    /// Let em and en dashes through (by default no token carrying one is ever sampled).
+    #[arg(long)]
+    allow_dashes: bool,
     /// Show llama.cpp's informational log.
     #[arg(short = 'v', long)]
     verbose: bool,
@@ -114,12 +117,18 @@ struct StreamArgs {
         default_value = "~/.local/share/phi-stream"
     )]
     workspace: String,
-    /// A file with the persona (default: the workspace's persona.md when it exists, else the frame's own).
+    /// The base of the personality: a person's standing instructions (default: ~/CLAUDE.md when it exists).
+    #[arg(long, env = "PHI_STREAM_PERSONALITY")]
+    personality: Option<String>,
+    /// The whole persona verbatim, composed with nothing (an experiment's override).
     #[arg(long)]
     system: Option<String>,
     /// The first thing from outside (default: the frame's own).
     #[arg(long)]
     seed_text: Option<String>,
+    /// The journal's first words in its own voice, after the seed.
+    #[arg(long, default_value = "Where was I. ")]
+    first_words: String,
     /// Said things up to this many tokens are heard at once.
     #[arg(long, default_value_t = 48)]
     direct_max: usize,
@@ -241,6 +250,7 @@ fn sampling(m: &ModelArgs) -> Sampling {
         }),
         repeat_penalty: m.repeat_penalty,
         repeat_last_n: m.repeat_last_n,
+        ban_dashes: !m.allow_dashes,
     }
 }
 
@@ -274,21 +284,32 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
             std::fs::read_to_string(expand_home(p)).with_context(|| format!("reading {p}"))?
         }
         None => {
-            let kept = workspace.join("persona.md");
-            match std::fs::read_to_string(&kept) {
-                Ok(t) if !t.trim().is_empty() => t,
-                _ => default_persona(frame).to_string(),
-            }
+            let base = match &s.personality {
+                Some(p) => std::fs::read_to_string(expand_home(p))
+                    .with_context(|| format!("reading {p}"))?,
+                None => {
+                    let home = expand_home("~/CLAUDE.md");
+                    match std::fs::read_to_string(&home) {
+                        Ok(t) if !t.trim().is_empty() => {
+                            eprintln!("phi-stream: the personality's base is {home}");
+                            t
+                        }
+                        _ => DEFAULT_BASE.to_string(),
+                    }
+                }
+            };
+            compose(&base, frame)
         }
     };
     let seed = s.seed_text.clone().unwrap_or_else(|| match frame {
-        Frame::Journal => "the room is quiet; no one has spoken yet.".to_string(),
+        Frame::Journal => "(the room is quiet; nothing has been said. The journal goes on from wherever its thoughts were.)".to_string(),
         Frame::Chat => "[The stream begins. Nobody has spoken yet.]".to_string(),
     });
     Ok(Config {
         frame,
         system,
         seed,
+        first_words: s.first_words.clone(),
         direct_max: s.direct_max,
         chunk: s.chunk,
         rollover_at: s.rollover_at,
@@ -508,7 +529,7 @@ fn main() -> Result<()> {
             let mut llm = load(&cli.model)?;
             let a = format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[The stream begins.]<|im_end|>\n<|im_start|>assistant\n<think>\n",
-                engine::PERSONA_CHAT
+                compose(DEFAULT_BASE, Frame::Chat)
             );
             let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
             gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)

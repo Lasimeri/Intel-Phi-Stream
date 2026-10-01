@@ -38,10 +38,13 @@ quiet stream falls into), `-v`.
 Stream options, after `serve` or `run`: `--frame journal|chat` (journal:
 one continuous first-person text, `«` from outside, `»` said aloud;
 chat: the model's template, `src/engine.md`), `--workspace DIR` (or
-`PHI_STREAM_WORKSPACE`, default `~/.local/share/phi-stream`: `persona.md`,
-`notes.md`, `stream.log`), `--system FILE` (the persona; default the
-workspace's `persona.md` when it exists, else the frame's own, so the
-persona is edited in place and reloaded with `persona`), `--seed-text`
+`PHI_STREAM_WORKSPACE`, default `~/.local/share/phi-stream`: `persona.md`
+as composed, `notes.md`, `stream.log`), `--personality FILE` (or
+`PHI_STREAM_PERSONALITY`: the base of the persona, a person's standing
+instructions; default `~/CLAUDE.md` when it exists; `src/engine.md` has
+the composition), `--system FILE` (the whole persona verbatim, an
+experiment's override), `--first-words` (the journal's first words in its
+own voice after the seed, "Where was I. "), `--seed-text`
 (the first thing from outside), `--direct-max` 48, `--chunk` 0
 (adapting), `--rollover-at` 0.6, `--feed FILE` at the start.
 

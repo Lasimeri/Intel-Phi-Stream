@@ -76,6 +76,8 @@ pub struct Sampling {
     /// (1: off).
     pub repeat_penalty: f32,
     pub repeat_last_n: i32,
+    /// Never sample a token that carries an em or en dash.
+    pub ban_dashes: bool,
 }
 
 /// One sequence's part of a cycle: `tokens` at positions `pos0..`, the
@@ -96,6 +98,10 @@ pub struct Llm {
     batch: sys::llama_batch,
     batch_cap: usize,
     sampler: *mut sys::llama_sampler,
+    /// Tokens whose text carries an em or en dash.
+    dash_tokens: Vec<i32>,
+    /// Tokens the engine asked never to sample (a frame's control tokens).
+    banned: Vec<i32>,
     // Kept alive for the model, which keeps the pointers.
     _devices: Box<[sys::ggml_backend_dev_t; 2]>,
     _pattern: Option<CString>,
@@ -204,7 +210,8 @@ impl Llm {
             let eog = (0..n_vocab as i32)
                 .filter(|&t| sys::llama_vocab_is_eog(vocab, t))
                 .collect();
-            let sampler = make_sampler(sampling);
+            let dash_tokens = dash_tokens(vocab, n_vocab);
+            let sampler = make_sampler(sampling, &dash_tokens, &[]);
             Ok(Self {
                 model: m,
                 ctx: c,
@@ -213,6 +220,8 @@ impl Llm {
                 batch,
                 batch_cap,
                 sampler,
+                dash_tokens,
+                banned: Vec::new(),
                 _devices: devices,
                 _pattern: pattern,
                 _overrides: overrides,
@@ -232,6 +241,18 @@ impl Llm {
 
     pub fn batch_cap(&self) -> usize {
         self.batch_cap
+    }
+
+    /// How many tokens the sampler never draws for carrying a dash.
+    pub fn dash_tokens_banned(&self) -> usize {
+        self.dash_tokens.len()
+    }
+
+    /// Never sample these tokens (a frame's control tokens); the chain is
+    /// rebuilt with the current sampling.
+    pub fn ban_tokens(&mut self, tokens: &[i32], s: &Sampling) {
+        self.banned.extend_from_slice(tokens);
+        self.set_sampling(s);
     }
 
     /// Text to tokens; `special` parses the template's control tokens.
@@ -388,7 +409,7 @@ impl Llm {
         // SAFETY: the old chain is freed once, the new one made once.
         unsafe {
             sys::llama_sampler_free(self.sampler);
-            self.sampler = make_sampler(s);
+            self.sampler = make_sampler(s, &self.dash_tokens, &self.banned);
         }
     }
 
@@ -427,8 +448,53 @@ impl Llm {
     }
 }
 
-unsafe fn make_sampler(s: &Sampling) -> *mut sys::llama_sampler {
+/// The vocabulary's tokens whose text carries U+2014 or U+2013.
+fn dash_tokens(vocab: *const sys::llama_vocab, n_vocab: usize) -> Vec<i32> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64];
+    for t in 0..n_vocab as i32 {
+        // SAFETY: `buf` holds 64 bytes; a longer piece is cut, which is
+        // fine for a test of its bytes.
+        let n = unsafe {
+            sys::llama_token_to_piece(
+                vocab,
+                t,
+                buf.as_mut_ptr() as *mut c_char,
+                buf.len() as i32,
+                0,
+                false,
+            )
+        };
+        let n = if n < 0 { buf.len() } else { n as usize };
+        let s = &buf[..n.min(buf.len())];
+        if s.windows(3)
+            .any(|w| w == "\u{2014}".as_bytes() || w == "\u{2013}".as_bytes())
+        {
+            out.push(t);
+        }
+    }
+    out
+}
+
+unsafe fn make_sampler(s: &Sampling, dashes: &[i32], banned: &[i32]) -> *mut sys::llama_sampler {
     let chain = sys::llama_sampler_chain_init(sys::llama_sampler_chain_default_params());
+    let mut never: Vec<i32> = banned.to_vec();
+    if s.ban_dashes {
+        never.extend_from_slice(dashes);
+    }
+    if !never.is_empty() {
+        let biases: Vec<sys::llama_logit_bias> = never
+            .iter()
+            .map(|&token| sys::llama_logit_bias {
+                token,
+                bias: f32::NEG_INFINITY,
+            })
+            .collect();
+        sys::llama_sampler_chain_add(
+            chain,
+            sys::llama_sampler_init_logit_bias(0, biases.len() as i32, biases.as_ptr()),
+        );
+    }
     if s.repeat_penalty > 1.0 && s.repeat_last_n != 0 {
         sys::llama_sampler_chain_add(
             chain,
@@ -449,6 +515,11 @@ unsafe fn make_sampler(s: &Sampling) -> *mut sys::llama_sampler {
     }
     chain
 }
+
+// `dash_tokens` scans the vocabulary once for tokens whose text carries
+// U+2014 or U+2013; `make_sampler` puts a logit bias of minus infinity
+// on every one of them at the head of the chain when `ban_dashes` is
+// set, so the rule the persona states is also enforced by the sampler.
 
 impl Drop for Llm {
     fn drop(&mut self) {

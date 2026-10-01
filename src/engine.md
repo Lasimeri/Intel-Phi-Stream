@@ -70,9 +70,34 @@ not. The workspace (`--workspace`) holds `persona.md` (written at start,
 reloaded by `persona`, edited in place between runs), `notes.md` and
 `stream.log` (everything shown, appended).
 
-**A new persona** (`Command::Persona`) takes effect the way a rollover
-does: the summary is asked for with nothing in flight, and the new base
-is the new persona, the summary and the notes.
+**The persona is composed** (`compose`): the frame's preamble, then the
+base quoted line by line (every line prefixed `> `, so it reads as a
+document the mind has read, never as its own voice; without the quoting
+the journal copied the base back as its first text), then the frame's
+mechanics. The base is a person's
+standing instructions, their `CLAUDE.md` (`--personality FILE`, else
+`~/CLAUDE.md` when it exists, else `DEFAULT_BASE`), taken verbatim; the
+preamble tells the mind to take the manner it prescribes (dense,
+analytical, neutral, no hedging, mechanism over judgment, no em or en
+dash) as its own, and to read its talk of responses, delimiters, tools
+and memory files as another harness's, memory being the `[note: ...]`
+line here. `--system FILE` replaces the whole composition verbatim. The journal's
+opening ends with a rule line, the seed, and the journal's first words in
+its own voice (`--first-words`, "Where was I. "): without them the model
+analysed the base as a task; with them it goes on as itself. In the
+journal frame the template's control tokens (`<think>`, `</think>`,
+`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`) are never sampled (a logit
+bias of minus infinity, `llm.md`), since the journal has no template. The
+sampler backs the dash rule: every vocabulary token whose text carries
+U+2014 or U+2013 gets a logit bias of minus infinity (`llm.md`), unless
+`--allow-dashes`.
+
+**A new persona** (`Command::Persona`, the text of a file) becomes the
+new base, recomposed with the same frame, and takes effect the way a
+rollover does: the summary is asked for with nothing in flight, and the
+new base is the new persona, the summary and the notes. The workspace's
+`persona.md` is the composed text as last written, a record to read,
+not read back.
 
 **Why one context.** The backend's lock is taken and dropped inside
 `phi_ggml_begin` and `phi_ggml_end` separately (`host/asm/common/lock.md`:

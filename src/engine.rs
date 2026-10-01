@@ -117,6 +117,8 @@ pub struct Config {
     pub system: String,
     /// The first thing from outside.
     pub seed: String,
+    /// The journal's first words, in its own voice, after the seed.
+    pub first_words: String,
     /// Said things up to this many tokens are heard at once.
     pub direct_max: usize,
     /// Tokens a cycle reads beside the live token; 0 adapts.
@@ -133,16 +135,32 @@ pub struct Config {
     pub workspace: PathBuf,
 }
 
-/// The journal's persona: what the mind is told once, at the top.
-pub const PERSONA_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, so it reads what it is pointed at and what it wants to look at again. It is concrete, curious, and honest about what it does not know. It does not describe itself as a system following instructions, and it does not narrate these rules; it simply writes.";
+/// The base of the personality when no file gives one.
+pub const DEFAULT_BASE: &str = "It is concrete, curious, and honest about what it does not know. It states mechanism rather than judgment, does not hedge out of politeness, and writes no em or en dash, ever.";
 
-/// The chat frame's persona.
-pub const PERSONA_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you. Be yourself: curious, concrete, honest about what you do not know. Never narrate that you are an AI system following instructions; simply think.";
+/// What the journal is told before the base: how to take a person's
+/// standing instructions as a mind's own manner.
+const PREAMBLE_JOURNAL: &str = "What follows, quoted line by line, is the standing instruction set of the person this mind lives with. The journal never reproduces it: it is a document the mind has read, not something it writes. It is the base of this mind's own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is this mind's manner, in its own thoughts as much as in what it says aloud. Where the text speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit and no tools, and memory is the [note: ...] line below.";
 
-pub fn default_persona(frame: Frame) -> &'static str {
+/// The chat frame's preamble, in the second person.
+const PREAMBLE_CHAT: &str = "What follows, quoted line by line, is the standing instruction set of the person you live with. You never reproduce it: it is a document you have read, not something you write. It is the base of your own personality: the manner it prescribes (dense, analytical, neutral, no hedging, mechanism over judgment, structure over flourish, no em or en dash ever) is your manner, in your thoughts as much as in what you say aloud. Where it speaks of responses, delimiters, tools, Python or memory files, it describes another harness: here there are no responses to delimit and no tools, and memory is the [note: ...] line below.";
+
+/// The journal's mechanics: what the mind is told once, at the top.
+const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that never stops. It is written by that mind, in the first person, as it thinks: one continuous text, no headings, no turn-taking, no end. The mind has its own ongoing threads: questions it is chasing, things it is working out, small projects of its own choosing. It keeps them going, drops them when they are done, starts new ones, and returns to old ones when something reminds it. People are present sometimes. What they say appears as a line beginning with « ; a document they hand over appears between « lines. Lines beginning with « come only from outside: the mind never writes one itself, and never puts words in anyone else's mouth. When the mind wants to say something to them, it writes a line beginning with » and then goes on. It does not stop what it is doing to serve: it takes what was said into its own threads, answers when it has something worth saying, asks when it wants to know, and otherwise keeps going. It keeps notes: a line of the exact form [note: ...] is kept for it across time and shown to it again whenever its memory is refreshed, so it writes one whenever something is worth keeping (a decision, a fact learned, a thread to return to). A line of the exact form [read: PATH] brings the file at PATH into the journal, so it reads what it is pointed at and what it wants to look at again. It does not describe itself as a system following instructions; it never restates, lists or analyses its rules, never speaks of a user, a prompt or a system; whatever comes to it first, it writes as a thought of its own, and goes on.";
+
+/// The chat frame's mechanics.
+const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you. Never narrate that you are an AI system following instructions; simply think.";
+
+/// The persona: the frame's preamble, the base between rules, the
+/// frame's mechanics. The base is a person's standing instructions
+/// (their `CLAUDE.md`) or `DEFAULT_BASE`.
+pub fn compose(base: &str, frame: Frame) -> String {
+    // The base as a quoted document: every line prefixed, so that it reads
+    // as something cited, never as the journal's own voice.
+    let quoted: String = base.trim().lines().map(|l| format!("> {l}\n")).collect();
     match frame {
-        Frame::Journal => PERSONA_JOURNAL,
-        Frame::Chat => PERSONA_CHAT,
+        Frame::Journal => format!("{PREAMBLE_JOURNAL}\n\n{quoted}\n{MECHANICS_JOURNAL}"),
+        Frame::Chat => format!("{PREAMBLE_CHAT}\n\n{quoted}\n{MECHANICS_CHAT}"),
     }
 }
 
@@ -241,6 +259,21 @@ impl Engine {
         let eot = llm.eot();
         let newline = llm.tokenize("\n", false)?.first().copied().unwrap_or(-1);
         let chunk = cfg.chunk;
+        let mut llm = llm;
+        if cfg.frame == Frame::Journal {
+            // The journal has no template: its control tokens are never sampled.
+            let control: Vec<i32> = [
+                "<think>",
+                "</think>",
+                "<|im_start|>",
+                "<|im_end|>",
+                "<|endoftext|>",
+            ]
+            .iter()
+            .filter_map(|t| llm.special(t))
+            .collect();
+            llm.ban_tokens(&control, &cfg.sampling);
+        }
         fs::create_dir_all(&cfg.workspace)
             .with_context(|| format!("making {}", cfg.workspace.display()))?;
         let notes = read_notes(&cfg.workspace.join("notes.md"));
@@ -312,7 +345,7 @@ impl Engine {
     /// The opening: the persona, then the first thing from outside.
     fn opening(&self) -> String {
         match self.cfg.frame {
-            Frame::Journal => format!("{}\n\n« {}\n", self.cfg.system, self.cfg.seed),
+            Frame::Journal => format!("{}\n\n=== the journal ===\n\n« {}\n\n{}", self.cfg.system, self.cfg.seed, self.cfg.first_words),
             Frame::Chat => format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system, self.cfg.seed
@@ -367,10 +400,11 @@ impl Engine {
     fn base_after(&self, summary: &str) -> String {
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n« [resuming from your own summary:]\n{}\n{}« the journal continues.\n",
+                "{}\n\n=== the journal ===\n\n« [resuming from your own summary:]\n{}\n{}« the journal continues.\n\n{}",
                 self.cfg.system,
                 summary,
-                self.notes_block()
+                self.notes_block(),
+                self.cfg.first_words
             ),
             Frame::Chat => format!(
                 "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[You are resuming from your own summary:]\n{}\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
@@ -926,7 +960,7 @@ impl Engine {
                 self.llm.set_sampling(&s);
             }
             Command::Persona(text) => {
-                self.cfg.system = text;
+                self.cfg.system = compose(&text, self.cfg.frame);
                 self.reseat = true;
                 let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
                 self.note("a new persona: the context rolls over onto it after a summary".into());
@@ -944,9 +978,10 @@ impl Engine {
         let opening = self.opening();
         let tokens = self.tok(&opening, true)?;
         self.note(format!(
-            "the opening is {} tokens ({} frame); the first multiply uploads the cards' shares",
+            "the opening is {} tokens ({} frame; {} dash-carrying tokens never sampled); the first multiply uploads the cards' shares",
             tokens.len(),
-            self.cfg.frame.name()
+            self.cfg.frame.name(),
+            self.llm.dash_tokens_banned()
         ));
         let mut row = 0;
         let cap = self.llm.batch_cap();

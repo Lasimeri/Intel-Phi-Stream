@@ -22,7 +22,12 @@ One model split three ways and one context over llama.cpp's C API.
   a batch into equal-share micro-batches by itself. `logits`, `sample`
   (the chain: top-k, top-p, temperature and the seeded draw, or greedy at
   temperature 0; the model's header recommends 20, 0.95 and 1) and
-  `greedy` read a row of the last decode.
+  `greedy` read a row of the last decode. With `ban_dashes` (the
+  default) the chain starts with a logit bias of minus infinity on every
+  vocabulary token whose text carries an em or en dash, found by one
+  scan of the vocabulary at load, so the no-dash rule holds in the
+  sampler and not only in the persona. `ban_tokens` adds a frame's control
+  tokens to the same bias (the journal frame bans the template's).
 - `seq_cp` gives one sequence another's cells in a range and the source's
   recurrent state (llama.cpp shares the state's cell and copies it on the
   next write); `seq_rm` drops a range (a whole sequence always goes, a

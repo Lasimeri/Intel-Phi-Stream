@@ -29,7 +29,12 @@ it a new persona, which it rolls its context over onto after a summary;
 `/chunk N`, `/temp T`, `/pause`, `/resume`, PgUp and PgDn
 ([`src/tui.md`](src/tui.md)).
 
-The text is a journal by default: one continuous first-person text with
+The persona's base is your own `~/CLAUDE.md` when it exists (or
+`--personality FILE`): its manner becomes the mind's manner, with a
+preamble that reads its talk of tools and memory files as another
+harness's, and the frame's mechanics after it; and the sampler never
+draws a token carrying an em or en dash. The text is a journal by
+default: one continuous first-person text with
 no turns, the mind's own threads kept and returned to, what comes from
 outside as `«` lines, what it says aloud as `»` lines; and two things it
 does by itself inside the text, `[note: ...]` (kept in the workspace and

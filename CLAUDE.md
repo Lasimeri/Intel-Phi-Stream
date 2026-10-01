@@ -13,6 +13,10 @@ Read `CONTRIBUTING.md` first; it is the authority. The non-obvious rules:
   from the sibling Intel-Phi-AVX512 (`scripts/avx512.md`: `PHI_AVX512_ROOT`,
   a checkout next to this one or in `$HOME`, under either name); never
   copy anything of it here.
+- The persona is composed from a personality base (`~/CLAUDE.md` of the
+  person, verbatim, between a preamble and the frame's mechanics;
+  `src/engine.md`); keep the base the person's own, never a copy edited
+  here; the sampler bans dash-carrying tokens.
 - Why one context: the backend's lock is per `begin` and `end`, so two
   contexts in two threads would interleave inside a multiply. Do not add
   a second context or thread on the model.
