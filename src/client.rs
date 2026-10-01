@@ -89,6 +89,13 @@ pub enum Msg {
     Mind(crate::mind::Reading),
     /// A check of a token, start to end (`reflect.rs`).
     Reflect(crate::reflect::Episode),
+    /// The deliberation's own text, as it is written beside the stream:
+    /// a check's start (the question it was asked), each piece of its
+    /// reasoning, its end (the outcome).
+    Delib(Delib),
+    /// What the stream is working toward, when it changes: its real time
+    /// and text.
+    Objective(i64, String),
     Ok(String),
     Err(String),
     Bye,
@@ -201,11 +208,75 @@ pub fn parse(line: &str) -> Msg {
             Some(e) => Msg::Reflect(e),
             None => Msg::Other(line.to_string()),
         },
+        // delib start|piece|end t=US pos=P TEXT
+        "delib" => {
+            let (kind, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+            let f: Vec<&str> = rest.splitn(3, ' ').collect();
+            let num = |i: usize, k: &str| -> i64 {
+                f.get(i)
+                    .and_then(|x| x.strip_prefix(k))
+                    .and_then(|x| x.parse().ok())
+                    .unwrap_or(0)
+            };
+            let kind = match kind {
+                "start" => DelibKind::Start,
+                "piece" => DelibKind::Piece,
+                "end" => DelibKind::End,
+                _ => return Msg::Other(line.to_string()),
+            };
+            Msg::Delib(Delib {
+                kind,
+                t_us: num(0, "t="),
+                pos: num(1, "pos=") as i32,
+                text: unescape(f.get(2).copied().unwrap_or("")),
+            })
+        }
+        // objective t=US TEXT
+        "objective" => match rest.strip_prefix("t=").and_then(|r| r.split_once(' ')) {
+            Some((t, text)) => Msg::Objective(t.parse().unwrap_or(0), unescape(text)),
+            None => Msg::Other(line.to_string()),
+        },
         "ok" => Msg::Ok(rest.to_string()),
         "err" => Msg::Err(rest.to_string()),
         "bye" => Msg::Bye,
         _ => Msg::Other(line.to_string()),
     }
+}
+
+/// Which part of a deliberation a `delib` line carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DelibKind {
+    Start,
+    Piece,
+    End,
+}
+
+/// One `delib` line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Delib {
+    pub kind: DelibKind,
+    pub t_us: i64,
+    pub pos: i32,
+    pub text: String,
+}
+
+/// A `delib` line as the service sends it.
+// Sent by the engine's next commit (the reasoning check); the terminal
+// reads these lines first, so a reloaded terminal shows them on the
+// service's restart.
+#[allow(dead_code)]
+pub fn delib_line(d: &Delib) -> String {
+    let kind = match d.kind {
+        DelibKind::Start => "start",
+        DelibKind::Piece => "piece",
+        DelibKind::End => "end",
+    };
+    format!(
+        "delib {kind} t={} pos={} {}",
+        d.t_us,
+        d.pos,
+        escape(&d.text)
+    )
 }
 
 /// `Status` as the service sends it.
@@ -350,5 +421,31 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn delib_and_objective_lines_round_trip() {
+        for (kind, text) in [
+            (DelibKind::Start, "a check on the next word:\n\"x\""),
+            (DelibKind::Piece, " the"),
+            (DelibKind::Piece, ""),
+            (DelibKind::End, "kept"),
+        ] {
+            let d = Delib {
+                kind,
+                t_us: 1790893948209724,
+                pos: 4011,
+                text: text.to_string(),
+            };
+            match parse(&delib_line(&d)) {
+                Msg::Delib(p) => assert_eq!(p, d),
+                other => panic!("{other:?}"),
+            }
+        }
+        match parse("objective t=17 finish the read fallback") {
+            Msg::Objective(17, t) => assert_eq!(t, "finish the read fallback"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(parse("delib sideways t=1 pos=2 x"), Msg::Other(_)));
     }
 }

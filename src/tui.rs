@@ -20,7 +20,7 @@ use crossterm::event::{self, Event as TEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Color, ResetColor};
 use crossterm::{cursor, execute, queue, terminal};
 
-use crate::client::{escape, parse, unescape, Client, Msg};
+use crate::client::{escape, parse, unescape, Client, Delib, DelibKind, Msg};
 use crate::engine::{Kind, Mode, Status};
 use crate::format::{self, Class};
 use crate::mind::Reading;
@@ -148,6 +148,14 @@ struct View {
     quitting: bool,
     /// `--follow`: the builds this terminal has reloaded onto.
     follow: Option<u32>,
+    /// The deliberation's text: each check's question, its reasoning,
+    /// its outcome, as pieces of the given, thought and spoken kinds.
+    delib: Vec<Piece>,
+    delib_chars: usize,
+    /// What the stream is working toward (`objective` lines), and since when.
+    objective: Option<(i64, String)>,
+    /// Kinds of line this terminal does not show, each noted once.
+    unknown: std::collections::HashSet<String>,
 }
 
 /// The service as this terminal sees it.
@@ -163,6 +171,7 @@ enum Link {
 const KEEP_MINDS: usize = 400;
 const KEEP_EPISODES: usize = 64;
 const KEEP_LOG: usize = 500;
+const KEEP_DELIB_CHARS: usize = 100_000;
 /// How often a missing service is looked for.
 const RETRY: Duration = Duration::from_secs(3);
 /// How often `--follow` looks at the binary.
@@ -302,6 +311,32 @@ fn episode_short(e: &Episode) -> String {
 const KEEP_CHARS: usize = 400_000;
 
 impl View {
+    /// A `delib` line into the deliberation's text: a check's start as a
+    /// header and the question it was asked (given), its pieces as thoughts,
+    /// its end as the outcome (spoken), the oldest dropped past
+    /// `KEEP_DELIB_CHARS`.
+    fn delib_push(&mut self, d: Delib) {
+        let (text, kind) = match d.kind {
+            DelibKind::Start => (
+                format!(
+                    "\n--- {} at {} ---\n{}\n",
+                    d.pos,
+                    crate::clock::hms(d.t_us),
+                    d.text.trim()
+                ),
+                Kind::Given,
+            ),
+            DelibKind::Piece => (d.text, Kind::Think),
+            DelibKind::End => (format!("\n=> {}\n", d.text.trim()), Kind::Speak),
+        };
+        self.delib_chars += text.chars().count();
+        self.delib.push(Piece { text, kind });
+        while self.delib_chars > KEEP_DELIB_CHARS && self.delib.len() > 1 {
+            let p = self.delib.remove(0);
+            self.delib_chars -= p.text.chars().count();
+        }
+    }
+
     /// A line of the log, the oldest dropped past `KEEP_LOG`.
     fn log_push(&mut self, t_us: i64, text: String) {
         self.log.push_back((t_us, text));
@@ -319,6 +354,7 @@ impl View {
                 Pane::Feed => 0,
                 Pane::Mind => 1,
                 Pane::Log => 2,
+                Pane::Delib => 3,
             },
             self.scroll,
             self.heard,
@@ -342,6 +378,7 @@ impl View {
                     self.view = match n {
                         1 => Pane::Mind,
                         2 => Pane::Log,
+                        3 => Pane::Delib,
                         _ => Pane::Feed,
                     }
                 }
@@ -372,22 +409,28 @@ impl View {
     /// wrapped by words under its own indentation, Markdown marks shown as
     /// styles (a word may span pieces, since a token can end inside one).
     fn rows(&self, width: usize) -> Vec<Vec<(String, Kind, Class)>> {
-        // Flatten into lines of characters with their kinds.
-        let mut lines: Vec<Vec<(char, Kind)>> = vec![Vec::new()];
-        for p in &self.pieces {
-            for ch in p.text.chars() {
-                if ch == '\n' {
-                    lines.push(Vec::new());
-                } else {
-                    lines.last_mut().unwrap().push((ch, p.kind));
-                }
+        piece_rows(&self.pieces, width)
+    }
+}
+
+/// Pieces of text (the stream's, or the deliberation's) as rows of styled
+/// runs for `width` columns, set by `format.rs`.
+fn piece_rows(pieces: &[Piece], width: usize) -> Vec<Vec<(String, Kind, Class)>> {
+    // Flatten into lines of characters with their kinds.
+    let mut lines: Vec<Vec<(char, Kind)>> = vec![Vec::new()];
+    for p in pieces {
+        for ch in p.text.chars() {
+            if ch == '\n' {
+                lines.push(Vec::new());
+            } else {
+                lines.last_mut().unwrap().push((ch, p.kind));
             }
         }
-        format::rows(&lines, width)
-            .iter()
-            .map(|r| runs(r))
-            .collect()
     }
+    format::rows(&lines, width)
+        .iter()
+        .map(|r| runs(r))
+        .collect()
 }
 
 /// Characters of one row as runs of one kind and class.
@@ -469,6 +512,9 @@ enum Pane {
     Mind,
     /// The checks and the engine's notes, over time.
     Log,
+    /// The deliberation's own text (its compartment under the feed from
+    /// `WIDE` columns; a view under it).
+    Delib,
 }
 
 impl Pane {
@@ -477,12 +523,14 @@ impl Pane {
             Pane::Feed => "FEED",
             Pane::Mind => "MIND",
             Pane::Log => "LOG",
+            Pane::Delib => "DELIBERATION",
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Pane::Feed => Pane::Mind,
+            Pane::Feed => Pane::Delib,
+            Pane::Delib => Pane::Mind,
             Pane::Mind => Pane::Log,
             Pane::Log => Pane::Feed,
         }
@@ -492,8 +540,10 @@ impl Pane {
 /// Where each compartment goes (`tui.md`), or none under the minimum.
 #[derive(Debug)]
 struct Layout {
-    /// The view chosen (feed, mind, log), framed.
+    /// The view chosen (feed, deliberation, mind, log), framed.
     main: Rect,
+    /// The deliberation under the view, when there is room for both.
+    delib: Option<Rect>,
     /// The last check, framed.
     assess: Rect,
     /// The log beside the view, framed, when there is room for a side column.
@@ -520,13 +570,21 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
     Some(if w >= WIDE {
         let left = w - SIDE_W;
         let assess_h = 12.min(body / 2);
+        // Both reasoning streams at once: the view over the deliberation.
+        let delib_h = (body * 2 / 5).max(6);
         Layout {
             main: Rect {
                 top: 1,
                 left: 0,
-                h: body,
+                h: body - delib_h,
                 w: left,
             },
+            delib: Some(Rect {
+                top: 1 + body - delib_h,
+                left: 0,
+                h: delib_h,
+                w: left,
+            }),
             assess: Rect {
                 top: 1,
                 left,
@@ -553,6 +611,7 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
                 h: body - assess_h,
                 w,
             },
+            delib: None,
             assess: Rect {
                 top: 1 + body - assess_h,
                 left: 0,
@@ -777,6 +836,73 @@ fn style_of(kind: Kind, class: Class) -> Style {
     }
 }
 
+/// Styled rows into the compartment inside `inner`, the newest at its
+/// bottom, `scroll` rows up from the end; a code block's background runs
+/// to the compartment's edge.
+fn draw_rows(s: &mut Screen, inner: Rect, rows: &[Vec<(String, Kind, Class)>], scroll: usize) {
+    let end = inner.left + inner.w;
+    let last = rows.len().saturating_sub(scroll);
+    let first = last.saturating_sub(inner.h);
+    for (r, row) in rows[first..last].iter().enumerate() {
+        let mut col = inner.left + 1;
+        for (text, kind, class) in row {
+            col = s.put_to(inner.top + r, col, end, text, style_of(*kind, *class));
+        }
+        if row.first().is_some_and(|x| x.2.in_block()) && col < end {
+            let pad = " ".repeat(end - col);
+            s.put_to(
+                inner.top + r,
+                col,
+                end,
+                &pad,
+                style_of(Kind::Think, Class::Plain),
+            );
+        }
+    }
+}
+
+/// The deliberation: what the stream is working toward on top (its
+/// `objective`), under it each check's question, its own reasoning and
+/// its outcome. Says what it lacks rather than leaving it blank.
+fn draw_delib(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
+    let end = inner.left + inner.w;
+    let width = inner.w.saturating_sub(2);
+    let head = match &v.objective {
+        Some((t, text)) => format!("OBJECTIVE ({}) {text}", crate::clock::hms(*t)),
+        None => "OBJECTIVE none sent by this service".to_string(),
+    };
+    let head = wrap(&head, width, 2);
+    let top_rows = head.len().min(inner.h / 2).max(1);
+    for (r, l) in head.iter().take(top_rows).enumerate() {
+        s.put_to(
+            inner.top + r,
+            inner.left + 1,
+            end,
+            l,
+            plain(theme::WHITE, theme::BG),
+        );
+    }
+    let rest = Rect {
+        top: inner.top + top_rows,
+        h: inner.h.saturating_sub(top_rows),
+        ..inner
+    };
+    if v.delib.is_empty() {
+        let why = "no deliberation from this service yet: one that reasons sends each check's question, its reasoning and its outcome here";
+        for (r, l) in wrap(why, width, 0).iter().take(rest.h).enumerate() {
+            s.put_to(
+                rest.top + r,
+                rest.left + 1,
+                end,
+                l,
+                plain(theme::GIVEN, theme::BG),
+            );
+        }
+        return;
+    }
+    draw_rows(s, rest, &piece_rows(&v.delib, width), scroll);
+}
+
 /// One frame: drawn into a fresh screen, then only what changed since
 /// `front` (the frame the terminal shows) is written (`screen.md`).
 fn draw(
@@ -838,29 +964,9 @@ fn draw(
     match v.view {
         Pane::Feed => {
             let rows = v.rows(inner.w.saturating_sub(2));
-            let last = rows.len().saturating_sub(v.scroll);
-            let first = last.saturating_sub(inner.h);
-            for r in 0..inner.h {
-                let Some(row) = rows.get(first + r) else {
-                    continue;
-                };
-                let mut col = inner.left + 1;
-                for (text, kind, class) in row {
-                    col = s.put_to(inner.top + r, col, end, text, style_of(*kind, *class));
-                }
-                // A code block's background runs to the compartment's edge.
-                if row.first().is_some_and(|x| x.2.in_block()) && col < end {
-                    let pad = " ".repeat(end - col);
-                    s.put_to(
-                        inner.top + r,
-                        col,
-                        end,
-                        &pad,
-                        style_of(Kind::Think, Class::Plain),
-                    );
-                }
-            }
+            draw_rows(&mut s, inner, &rows, v.scroll);
         }
+        Pane::Delib => draw_delib(&mut s, inner, v, v.scroll),
         Pane::Mind => {
             // The readings, newest at the bottom; a check beside the
             // reading it was asked from (the one before its token).
@@ -897,6 +1003,12 @@ fn draw(
                 );
             }
         }
+    }
+
+    // Both reasoning streams at once, when there is room.
+    if let Some(dr) = lay.delib {
+        s.frame(dr, g, edge, "DELIBERATION", label);
+        draw_delib(&mut s, dr.inner(), v, 0);
     }
 
     // The assessment: the last check, and whether one is in flight.
@@ -1169,6 +1281,10 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             socket: socket.display().to_string(),
             quitting: false,
             follow: build.as_ref().map(|_| 0),
+            delib: Vec::new(),
+            delib_chars: 0,
+            objective: None,
+            unknown: Default::default(),
         };
         if let Some(s) = &handed {
             v.restore(s);
@@ -1269,9 +1385,25 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         dirty = true;
                     }
                     Ok(Msg::Ok(_)) => {}
-                    Ok(Msg::Other(l)) => {
-                        v.notes.push(format!("the service said: {l}"));
+                    Ok(Msg::Delib(d)) => {
+                        v.delib_push(d);
                         dirty = true;
+                    }
+                    Ok(Msg::Objective(t, text)) => {
+                        v.log_push(t, format!("objective: {text}"));
+                        v.objective = Some((t, text));
+                        dirty = true;
+                    }
+                    Ok(Msg::Other(l)) => {
+                        // A newer service's line: noted once per kind, not
+                        // once per line (one may come at every token).
+                        let head = l.split(' ').next().unwrap_or("").to_string();
+                        if v.unknown.insert(head.clone()) {
+                            v.notes.push(format!(
+                                "the service sends {head:?} lines, which this terminal does not show"
+                            ));
+                            dirty = true;
+                        }
                     }
                     Ok(Msg::Bye) | Err(TryRecvError::Disconnected) => {
                         gone = true;
@@ -1377,6 +1509,10 @@ mod tests {
             socket: String::new(),
             quitting: false,
             follow: Some(0),
+            delib: Vec::new(),
+            delib_chars: 0,
+            objective: None,
+            unknown: Default::default(),
         }
     }
 
@@ -1395,6 +1531,7 @@ mod tests {
             let l = layout(w, h).unwrap();
             let mut rects = vec![l.main, l.assess];
             rects.extend(l.log);
+            rects.extend(l.delib);
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.top >= 1 && a.top + a.h <= l.mind, "{w}x{h} {a:?}");
                 assert!(a.left + a.w <= w, "{w}x{h} {a:?}");
@@ -1407,6 +1544,7 @@ mod tests {
                 }
             }
             assert_eq!(l.log.is_some(), w >= WIDE);
+            assert_eq!(l.delib.is_some(), w >= WIDE);
             assert_eq!(
                 (l.mind, l.status, l.input, l.hints),
                 (h - 4, h - 3, h - 2, h - 1)

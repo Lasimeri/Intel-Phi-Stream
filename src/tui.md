@@ -143,3 +143,20 @@ with room for the token frame, the side column from 120 columns;
 wrapping keeps to the width, CJK counted two; a reload hands the view,
 scroll, counts and the typed line over, and reads an older build's
 `mind=1`.
+
+## Both reasoning streams
+
+From 120 columns, the view's compartment stands over a DELIBERATION
+compartment (two fifths of the height, 6 rows at least); under 120
+columns DELIBERATION is a view (`Tab`: FEED, DELIBERATION, MIND, LOG).
+It shows what the stream is working toward (`objective` lines: the text
+and since when) and, for each check, the deliberation's own text as the
+service sends it (`delib` lines, `client.md`): a header with the token's
+position and time and the question it was asked (given), its reasoning
+(thought), its outcome (spoken), set by `format.md` like the feed, the
+last 100k characters. A service that sends none is said to send none;
+nothing is filled in for it.
+
+A kind of line this terminal does not know is noted once (`the service
+sends "X" lines, which this terminal does not show`) and then dropped
+quietly: a newer service may send one at every token.

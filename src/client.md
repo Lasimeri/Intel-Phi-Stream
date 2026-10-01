@@ -24,7 +24,12 @@ pos=... ctx=... queued=... chunk=... rollovers=... notes=... frame=... leaks=...
 `bye` when the service stops; `mind pos=... ms=... tok=... lN=w:logp,...`
 when the service reads its mind (`mind.md`); the last 256 are shown to
 a new `tail`. `reflect t=... pos=... why=... outcome=...` for every
-check of a token when it reflects (`reflect.md`: the episode line). `leaks` in the status counts the lines
+check of a token when it reflects (`reflect.md`: the episode line). `delib
+start|piece|end t=US pos=P TEXT`: the deliberation's own text for one
+check (its question, each piece of its reasoning, its outcome; `Delib`,
+`delib_line`), and `objective t=US TEXT`: what the stream is working
+toward, when it changes. Both are additive: a terminal from before them
+notes each kind once and drops it. `leaks` in the status counts the lines
 beginning with `«` that the mind wrote itself (the journal frame's one
 known leak: a line in someone else's voice).
 
