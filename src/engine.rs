@@ -328,6 +328,8 @@ struct Check {
     /// whether that newline was fed.
     choosing: bool,
     newline_fed: bool,
+    /// The choice held too little of the distribution to be an answer.
+    unanswered: bool,
     /// The three likeliest tokens at `Decision:` and their probabilities.
     top: Vec<(i32, f32)>,
     /// The held index of the first piece at or after the token: nothing
@@ -1331,6 +1333,7 @@ impl Engine {
             lane_next: Vec::new(),
             choosing: false,
             newline_fed: false,
+            unanswered: false,
             top: Vec::new(),
             hold_from: self.released + self.held.len() as u64,
             saved: self.save(),
@@ -1472,6 +1475,7 @@ impl Engine {
             .unwrap_or_default();
         let limit = self.reflector.as_ref().map_or(8, |r| r.cfg.answer_tokens);
         let keep_at = self.reflector.as_ref().map_or(0.5, |r| r.cfg.keep_at);
+        let min_fmt = self.reflector.as_ref().map_or(0.2, |r| r.cfg.min_fmt);
         let c = self.check.as_mut().unwrap();
         if in_question {
             c.fed += lane.len();
@@ -1491,7 +1495,10 @@ impl Engine {
             c.keep = keep;
             c.fmt = fmt;
             c.top = top;
-            if keep >= keep_at {
+            if fmt < min_fmt {
+                c.unanswered = true;
+                ended = true;
+            } else if keep >= keep_at {
                 ended = true;
             } else {
                 c.writing = true;
@@ -1534,8 +1541,13 @@ impl Engine {
         let outcome = if abandoned {
             Outcome::Abandoned
         } else {
-            let decision = if c.writing {
-                reflect::parse_answer(&answer)
+            let decision = if c.unanswered {
+                Decision::Unparsed
+            } else if c.writing {
+                match reflect::parse_answer(&answer) {
+                    Decision::Write(w) if reflect::is_protocol_word(&w) => Decision::Unparsed,
+                    d => d,
+                }
             } else {
                 Decision::Keep
             };

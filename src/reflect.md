@@ -67,6 +67,14 @@ token after `Decision:` was a newline (p 0.49 to 0.58): it answers on the
 next line. When the newline outweighs keep and write together, it is fed
 once and the choice is read on the next line, a cycle later.
 
+**No answer is no change.** A choice in which keep and write together
+hold less than `min_fmt` (0.2) of the distribution is not an answer: it
+is unparsed, and the token stays. A written word that is the protocol's
+own (`Decision`, `keep`, `write`) is unparsed too. In the dev session,
+after the newline, the model began its next line with the label again.
+Keep and write held little mass, the share between them was noise, and
+it "wrote" ` Decision` over ` is`.
+
 **The choice is read, not sampled.** The deliberation's next-token
 distribution after `Decision:` is summed over the one-token forms of
 each word (`KEEP_FORMS`: ` keep`, ` Keep`, `keep`, ...; `WRITE_FORMS`

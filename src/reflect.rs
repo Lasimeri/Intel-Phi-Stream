@@ -43,6 +43,10 @@ pub struct ReflectConfig {
     /// A check keeps when keep's share of the choice is at least this (above
     /// 1: every check writes, which tests the rewind).
     pub keep_at: f32,
+    /// A choice in which keep and write together hold less than this of the
+    /// deliberation's distribution is no answer: unparsed, and the token
+    /// stays (the model was writing something else, e.g. the label again).
+    pub min_fmt: f32,
     /// Read-only: deliberate fully, never change a token (the measurement's
     /// third arm: the lanes' cost and numerics without the loop's effect).
     pub dry: bool,
@@ -62,6 +66,7 @@ impl Default for ReflectConfig {
             changes_per_min: 4,
             answer_tokens: 8,
             keep_at: 0.5,
+            min_fmt: 0.2,
             words: 8,
             dry: false,
         }
@@ -421,6 +426,16 @@ pub fn parse_answer(answer: &str) -> Decision {
     Decision::Unparsed
 }
 
+/// Whether a written word is the protocol's own (`Decision`, `keep`,
+/// `write`): the model echoing the question, not naming a word.
+pub fn is_protocol_word(word: &str) -> bool {
+    let w = word
+        .trim()
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    matches!(w.as_str(), "decision" | "keep" | "write")
+}
+
 /// The text to place instead, with the chosen token's leading space when
 /// it had one (a word inside a sentence keeps its spacing).
 pub fn replacement_text(chosen: &str, word: &str) -> String {
@@ -682,6 +697,15 @@ mod tests {
         );
         assert_eq!(parse_answer("write: ;"), Decision::Write(";".into()));
         assert_eq!(parse_answer("write: x.y"), Decision::Write("x.y".into()));
+    }
+
+    #[test]
+    fn the_protocols_own_words_are_no_answer() {
+        assert!(is_protocol_word(" Decision"));
+        assert!(is_protocol_word("keep."));
+        assert!(is_protocol_word("`write`"));
+        assert!(!is_protocol_word(" usize"));
+        assert!(!is_protocol_word("decisions"));
     }
 
     #[test]
