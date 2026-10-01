@@ -152,6 +152,11 @@ struct View {
     /// its outcome, as pieces of the given, thought and spoken kinds.
     delib: Vec<Piece>,
     delib_chars: usize,
+    /// What it said aloud: each utterance under its time, as pieces.
+    output: Vec<Piece>,
+    output_chars: usize,
+    /// The last piece was speech (the next speech continues its utterance).
+    speaking: bool,
     /// What the stream is working toward (`objective` lines), and since when.
     objective: Option<(i64, String)>,
     /// Kinds of line this terminal does not show, each noted once.
@@ -311,6 +316,29 @@ fn episode_short(e: &Episode) -> String {
 const KEEP_CHARS: usize = 400_000;
 
 impl View {
+    /// Speech into the output: an utterance begins under its time, the
+    /// oldest dropped past `KEEP_DELIB_CHARS`.
+    fn output_push(&mut self, text: &str, t_us: i64) {
+        if !self.speaking {
+            let head = format!("\n[{}]\n", crate::clock::hms(t_us));
+            self.output_chars += head.chars().count();
+            self.output.push(Piece {
+                text: head,
+                kind: Kind::Given,
+            });
+        }
+        self.speaking = true;
+        self.output_chars += text.chars().count();
+        self.output.push(Piece {
+            text: text.to_string(),
+            kind: Kind::Speak,
+        });
+        while self.output_chars > KEEP_DELIB_CHARS && self.output.len() > 1 {
+            let p = self.output.remove(0);
+            self.output_chars -= p.text.chars().count();
+        }
+    }
+
     /// A `delib` line into the deliberation's text: a check's start as a
     /// header and the question it was asked (given), its pieces as thoughts,
     /// its end as the outcome (spoken), the oldest dropped past
@@ -355,6 +383,7 @@ impl View {
                 Pane::Mind => 1,
                 Pane::Log => 2,
                 Pane::Delib => 3,
+                Pane::Output => 4,
             },
             self.scroll,
             self.heard,
@@ -379,6 +408,7 @@ impl View {
                         1 => Pane::Mind,
                         2 => Pane::Log,
                         3 => Pane::Delib,
+                        4 => Pane::Output,
                         _ => Pane::Feed,
                     }
                 }
@@ -515,22 +545,27 @@ enum Pane {
     /// The deliberation's own text (its compartment under the feed from
     /// `WIDE` columns; a view under it).
     Delib,
+    /// What it says aloud, utterance by utterance (its compartment under the
+    /// deliberation from `WIDE` columns; a view under it).
+    Output,
 }
 
 impl Pane {
     fn name(self) -> &'static str {
         match self {
-            Pane::Feed => "FEED",
+            Pane::Feed => "REASONING",
             Pane::Mind => "MIND",
             Pane::Log => "LOG",
             Pane::Delib => "DELIBERATION",
+            Pane::Output => "OUTPUT",
         }
     }
 
     fn next(self) -> Self {
         match self {
             Pane::Feed => Pane::Delib,
-            Pane::Delib => Pane::Mind,
+            Pane::Delib => Pane::Output,
+            Pane::Output => Pane::Mind,
             Pane::Mind => Pane::Log,
             Pane::Log => Pane::Feed,
         }
@@ -544,6 +579,8 @@ struct Layout {
     main: Rect,
     /// The deliberation under the view, when there is room for both.
     delib: Option<Rect>,
+    /// The output under the deliberation, likewise.
+    output: Option<Rect>,
     /// The last check, framed.
     assess: Rect,
     /// The log beside the view, framed, when there is room for a side column.
@@ -570,19 +607,28 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
     Some(if w >= WIDE {
         let left = w - SIDE_W;
         let assess_h = 12.min(body / 2);
-        // Both reasoning streams at once: the view over the deliberation.
-        let delib_h = (body * 2 / 5).max(6);
+        // Both reasoning chains and the output at once: the view, the
+        // deliberation under it, what it says under that.
+        let delib_h = (body * 3 / 10).max(6);
+        let out_h = (body / 4).max(5);
+        let main_h = body - delib_h - out_h;
         Layout {
             main: Rect {
                 top: 1,
                 left: 0,
-                h: body - delib_h,
+                h: main_h,
                 w: left,
             },
             delib: Some(Rect {
-                top: 1 + body - delib_h,
+                top: 1 + main_h,
                 left: 0,
                 h: delib_h,
+                w: left,
+            }),
+            output: Some(Rect {
+                top: 1 + main_h + delib_h,
+                left: 0,
+                h: out_h,
                 w: left,
             }),
             assess: Rect {
@@ -612,6 +658,7 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
                 w,
             },
             delib: None,
+            output: None,
             assess: Rect {
                 top: 1 + body - assess_h,
                 left: 0,
@@ -861,6 +908,28 @@ fn draw_rows(s: &mut Screen, inner: Rect, rows: &[Vec<(String, Kind, Class)>], s
     }
 }
 
+/// What it said aloud, each utterance under its time; says so when it
+/// has said nothing yet.
+fn draw_output(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
+    if v.output.is_empty() {
+        let why = "nothing said aloud since this terminal connected";
+        s.put_to(
+            inner.top,
+            inner.left + 1,
+            inner.left + inner.w,
+            why,
+            plain(theme::GIVEN, theme::BG),
+        );
+        return;
+    }
+    draw_rows(
+        s,
+        inner,
+        &piece_rows(&v.output, inner.w.saturating_sub(2)),
+        scroll,
+    );
+}
+
 /// The deliberation: what the stream is working toward on top (its
 /// `objective`), under it each check's question, its own reasoning and
 /// its outcome. Says what it lacks rather than leaving it blank.
@@ -967,6 +1036,7 @@ fn draw(
             draw_rows(&mut s, inner, &rows, v.scroll);
         }
         Pane::Delib => draw_delib(&mut s, inner, v, v.scroll),
+        Pane::Output => draw_output(&mut s, inner, v, v.scroll),
         Pane::Mind => {
             // The readings, newest at the bottom; a check beside the
             // reading it was asked from (the one before its token).
@@ -1009,6 +1079,10 @@ fn draw(
     if let Some(dr) = lay.delib {
         s.frame(dr, g, edge, "DELIBERATION", label);
         draw_delib(&mut s, dr.inner(), v, 0);
+    }
+    if let Some(or) = lay.output {
+        s.frame(or, g, edge, "OUTPUT", label);
+        draw_output(&mut s, or.inner(), v, 0);
     }
 
     // The assessment: the last check, and whether one is in flight.
@@ -1283,6 +1357,9 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             follow: build.as_ref().map(|_| 0),
             delib: Vec::new(),
             delib_chars: 0,
+            output: Vec::new(),
+            output_chars: 0,
+            speaking: false,
             objective: None,
             unknown: Default::default(),
         };
@@ -1351,6 +1428,12 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         dirty = true;
                     }
                     Ok(Msg::Text(t, k, at)) => {
+                        // Speech is the output too; anything else ends an utterance.
+                        if k == Kind::Speak {
+                            v.output_push(&t, at);
+                        } else {
+                            v.speaking = false;
+                        }
                         v.push(t, k);
                         v.last_t_us = at;
                         dirty = true;
@@ -1511,6 +1594,9 @@ mod tests {
             follow: Some(0),
             delib: Vec::new(),
             delib_chars: 0,
+            output: Vec::new(),
+            output_chars: 0,
+            speaking: false,
             objective: None,
             unknown: Default::default(),
         }
@@ -1532,19 +1618,19 @@ mod tests {
             let mut rects = vec![l.main, l.assess];
             rects.extend(l.log);
             rects.extend(l.delib);
+            rects.extend(l.output);
             for (i, a) in rects.iter().enumerate() {
                 assert!(a.top >= 1 && a.top + a.h <= l.mind, "{w}x{h} {a:?}");
                 assert!(a.left + a.w <= w, "{w}x{h} {a:?}");
-                assert!(
-                    a.h >= 6 && a.w >= 13,
-                    "{w}x{h} {a:?}: room for the token frame"
-                );
+                assert!(a.h >= 5 && a.w >= 13, "{w}x{h} {a:?}: a row inside at least");
                 for b in &rects[i + 1..] {
                     assert!(!a.overlaps(*b), "{w}x{h} {a:?} {b:?}");
                 }
             }
             assert_eq!(l.log.is_some(), w >= WIDE);
             assert_eq!(l.delib.is_some(), w >= WIDE);
+            assert_eq!(l.output.is_some(), w >= WIDE);
+            assert!(l.assess.h >= 6, "{w}x{h}: room for the token frame");
             assert_eq!(
                 (l.mind, l.status, l.input, l.hints),
                 (h - 4, h - 3, h - 2, h - 1)

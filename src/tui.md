@@ -144,11 +144,14 @@ wrapping keeps to the width, CJK counted two; a reload hands the view,
 scroll, counts and the typed line over, and reads an older build's
 `mind=1`.
 
-## Both reasoning streams
+## Both reasoning chains and the output
 
-From 120 columns, the view's compartment stands over a DELIBERATION
-compartment (two fifths of the height, 6 rows at least); under 120
-columns DELIBERATION is a view (`Tab`: FEED, DELIBERATION, MIND, LOG).
+From 120 columns the left side holds three blocks: the view (REASONING,
+the live chain as the model has it, unless `Tab` chose another), then
+DELIBERATION (three tenths of the height, 6 rows at least), then OUTPUT
+(a quarter, 5 rows at least): what it says aloud, each utterance under
+the real time of its first piece, speech only. Under 120 columns these
+are views (`Tab`: REASONING, DELIBERATION, OUTPUT, MIND, LOG).
 It shows what the stream is working toward (`objective` lines: the text
 and since when) and, for each check, the deliberation's own text as the
 service sends it (`delib` lines, `client.md`): a header with the token's
