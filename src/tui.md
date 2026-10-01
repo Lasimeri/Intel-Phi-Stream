@@ -102,6 +102,9 @@ label in its top edge (the management plan's layout, 2.6):
 | row h-2 | input | |
 | row h-1 | keys and the last note | |
 
+- **FEED** is set by `format.md`: code blocks kept as written and
+  highlighted by language (TypeScript among them), prose wrapped by words
+  under its own indentation, headings, bold and inline code as styles.
 - **The view** is one of FEED (the stream), MIND (the readings token by
   token) and LOG; `Tab` cycles them, `/feed`, `/mind`, `/log` name one
   (`/feed FILE` still hands a file over; `/mind` again goes back to the

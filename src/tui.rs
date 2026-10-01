@@ -22,9 +22,10 @@ use crossterm::{cursor, execute, queue, terminal};
 
 use crate::client::{escape, parse, unescape, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
+use crate::format::{self, Class};
 use crate::mind::Reading;
 use crate::reflect::{Episode, Outcome};
-use crate::screen::{self, columns, text_columns, Glyphs, Rect, Screen, Style, Weight};
+use crate::screen::{self, text_columns, Glyphs, Rect, Screen, Style, Weight};
 use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
@@ -73,6 +74,25 @@ mod theme {
         r: 0xff,
         g: 0xff,
         b: 0xff,
+    };
+    /// Code blocks' background: a step above the background, so a block
+    /// reads as one.
+    pub const CODE_BG: Color = Color::Rgb {
+        r: 0x16,
+        g: 0x16,
+        b: 0x1e,
+    };
+    /// The Machine's yellow (plan 2.3): keywords.
+    pub const YELLOW: Color = Color::Rgb {
+        r: 0xee,
+        g: 0xe9,
+        b: 0x3c,
+    };
+    /// Its green: strings.
+    pub const GREEN: Color = Color::Rgb {
+        r: 0x39,
+        g: 0xb1,
+        b: 0x1c,
     };
     /// Its red, 4.44:1: frames and marks only, never text.
     pub const RED: Color = Color::Rgb {
@@ -347,11 +367,12 @@ impl View {
         }
     }
 
-    /// The stream as rows of styled runs, wrapped to `width` by words
-    /// (a word may span pieces, since a token can end inside one).
-    fn rows(&self, width: usize) -> Vec<Vec<(String, Kind)>> {
-        let width = width.max(8);
-        // Flatten into lines of styled characters.
+    /// The stream as rows of styled runs for `width` columns, set by
+    /// `format.rs`: code blocks kept as written and highlighted, prose
+    /// wrapped by words under its own indentation, Markdown marks shown as
+    /// styles (a word may span pieces, since a token can end inside one).
+    fn rows(&self, width: usize) -> Vec<Vec<(String, Kind, Class)>> {
+        // Flatten into lines of characters with their kinds.
         let mut lines: Vec<Vec<(char, Kind)>> = vec![Vec::new()];
         for p in &self.pieces {
             for ch in p.text.chars() {
@@ -362,59 +383,20 @@ impl View {
                 }
             }
         }
-        let mut rows: Vec<Vec<(String, Kind)>> = Vec::new();
-        for line in lines {
-            let mut row: Vec<(char, Kind)> = Vec::new();
-            // Its width in terminal columns (a CJK character takes two).
-            let mut cols = 0;
-            // Words: a run of non-spaces with the spaces that follow it.
-            let mut i = 0;
-            while i < line.len() {
-                let mut j = i;
-                while j < line.len() && line[j].0 != ' ' {
-                    j += 1;
-                }
-                while j < line.len() && line[j].0 == ' ' {
-                    j += 1;
-                }
-                let word = &line[i..j];
-                let w: usize = word
-                    .iter()
-                    .filter(|c| c.0 != ' ')
-                    .map(|c| columns(c.0))
-                    .sum();
-                if cols + w > width && !row.is_empty() {
-                    rows.push(runs(&row));
-                    row.clear();
-                    cols = 0;
-                }
-                for &c in word {
-                    if cols + columns(c.0) > width {
-                        rows.push(runs(&row));
-                        row.clear();
-                        cols = 0;
-                    }
-                    if c.0 == ' ' && row.is_empty() {
-                        continue;
-                    }
-                    row.push(c);
-                    cols += columns(c.0);
-                }
-                i = j;
-            }
-            rows.push(runs(&row));
-        }
-        rows
+        format::rows(&lines, width)
+            .iter()
+            .map(|r| runs(r))
+            .collect()
     }
 }
 
-/// Characters of one row as runs of one kind.
-fn runs(row: &[(char, Kind)]) -> Vec<(String, Kind)> {
-    let mut out: Vec<(String, Kind)> = Vec::new();
-    for &(c, k) in row {
+/// Characters of one row as runs of one kind and class.
+fn runs(row: &[format::Cell]) -> Vec<(String, Kind, Class)> {
+    let mut out: Vec<(String, Kind, Class)> = Vec::new();
+    for &(c, k, cl) in row {
         match out.last_mut() {
-            Some((s, kind)) if *kind == k => s.push(c),
-            _ => out.push((c.to_string(), k)),
+            Some((s, kind, class)) if *kind == k && *class == cl => s.push(c),
+            _ => out.push((c.to_string(), k, cl)),
         }
     }
     out
@@ -750,6 +732,51 @@ fn log_rows(log: &VecDeque<(i64, String)>, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// A run's style: its kind's for prose (thoughts warm, speech lifted and
+/// bold, what was given cool and italic on the surface), the code palette
+/// inside a block and for inline code (`format.rs`).
+fn style_of(kind: Kind, class: Class) -> Style {
+    let code = |fg| Style {
+        fg,
+        bg: theme::CODE_BG,
+        weight: Weight::Plain,
+    };
+    match class {
+        Class::Prose => match kind {
+            Kind::Think => plain(theme::TEXT, theme::BG),
+            Kind::Speak => Style {
+                fg: theme::BRIGHT,
+                bg: theme::BG,
+                weight: Weight::Bold,
+            },
+            Kind::Given => Style {
+                fg: theme::GIVEN,
+                bg: theme::SURFACE,
+                weight: Weight::Italic,
+            },
+        },
+        Class::Bold => Style {
+            weight: Weight::Bold,
+            ..style_of(kind, Class::Prose)
+        },
+        Class::Heading => Style {
+            fg: theme::BRIGHT,
+            bg: theme::BG,
+            weight: Weight::Bold,
+        },
+        Class::Code | Class::Plain => code(theme::BRIGHT),
+        Class::Fence => code(theme::GIVEN),
+        Class::Keyword => code(theme::YELLOW),
+        Class::Str => code(theme::GREEN),
+        Class::Number => code(theme::WHITE),
+        Class::Comment => Style {
+            fg: theme::GIVEN,
+            bg: theme::CODE_BG,
+            weight: Weight::Italic,
+        },
+    }
+}
+
 /// One frame: drawn into a fresh screen, then only what changed since
 /// `front` (the frame the terminal shows) is written (`screen.md`).
 fn draw(
@@ -808,11 +835,6 @@ fn draw(
     s.frame(lay.main, g, edge, &views, label);
     let inner = lay.main.inner();
     let end = inner.left + inner.w;
-    let given = Style {
-        fg: theme::GIVEN,
-        bg: theme::SURFACE,
-        weight: Weight::Italic,
-    };
     match v.view {
         Pane::Feed => {
             let rows = v.rows(inner.w.saturating_sub(2));
@@ -823,17 +845,19 @@ fn draw(
                     continue;
                 };
                 let mut col = inner.left + 1;
-                for (text, kind) in row {
-                    let style = match kind {
-                        Kind::Think => base,
-                        Kind::Speak => Style {
-                            fg: theme::BRIGHT,
-                            bg: theme::BG,
-                            weight: Weight::Bold,
-                        },
-                        Kind::Given => given,
-                    };
-                    col = s.put_to(inner.top + r, col, end, text, style);
+                for (text, kind, class) in row {
+                    col = s.put_to(inner.top + r, col, end, text, style_of(*kind, *class));
+                }
+                // A code block's background runs to the compartment's edge.
+                if row.first().is_some_and(|x| x.2.in_block()) && col < end {
+                    let pad = " ".repeat(end - col);
+                    s.put_to(
+                        inner.top + r,
+                        col,
+                        end,
+                        &pad,
+                        style_of(Kind::Think, Class::Plain),
+                    );
                 }
             }
         }
@@ -1432,5 +1456,44 @@ mod tests {
         let mut c = view();
         c.restore("mind=1 scroll=0 heard=0 up=5 reloads=0 input=");
         assert_eq!(c.view, Pane::Mind);
+    }
+}
+
+#[cfg(test)]
+mod contrast {
+    use super::*;
+
+    /// WCAG 2 contrast of two colours.
+    fn ratio(a: Color, b: Color) -> f64 {
+        let lum = |c: Color| {
+            let Color::Rgb { r, g, b } = c else {
+                panic!("not RGB")
+            };
+            let ch = |v: u8| {
+                let s = v as f64 / 255.0;
+                if s <= 0.03928 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn every_text_style_reads_at_4_5_to_1() {
+        use Class::*;
+        for kind in [Kind::Think, Kind::Speak, Kind::Given] {
+            for class in [
+                Prose, Bold, Heading, Code, Fence, Plain, Keyword, Str, Comment, Number,
+            ] {
+                let s = style_of(kind, class);
+                let r = ratio(s.fg, s.bg);
+                assert!(r >= 4.5, "{kind:?} {class:?}: {r:.2}");
+            }
+        }
     }
 }

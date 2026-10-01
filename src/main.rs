@@ -11,6 +11,7 @@ mod clock;
 mod code;
 mod engine;
 mod eval;
+mod format;
 mod gate;
 mod lens;
 mod llm;
