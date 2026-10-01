@@ -973,6 +973,14 @@ impl Engine {
         let body: String = self.notes.iter().map(|n| format!("- {n}\n")).collect();
         let _ = fs::write(&path, body);
         self.note(format!("unnoted {gone} notes containing {text:?}"));
+        // It hears the outcome, so it does not ask again (in the dev session
+        // it repeated the same retractions every minute, unanswered).
+        let msg = self.framed_system(&match gone {
+            0 => format!("no note of yours contains {text:?}: nothing to remove"),
+            1 => format!("removed your one note containing {text:?}"),
+            n => format!("removed your {n} notes containing {text:?}"),
+        });
+        self.queue.push_back((msg, "unnoted".into()));
     }
 
     /// A preference it stated: kept (`preferences.md`), shown to it again
