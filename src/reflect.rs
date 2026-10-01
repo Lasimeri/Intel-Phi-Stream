@@ -65,7 +65,9 @@ impl Default for ReflectConfig {
             checks_per_min: 12,
             changes_per_min: 4,
             answer_tokens: 8,
-            keep_at: 0.5,
+            // The stream's own choice in the first dev session: a write needs
+            // a share of 0.55 ("prefers: write threshold 0.55").
+            keep_at: 0.45,
             min_fmt: 0.2,
             words: 8,
             dry: false,

@@ -112,6 +112,8 @@ pub enum Command {
     Resume,
     /// Tokens a cycle reads beside the live token; 0 adapts to the amount.
     Chunk(usize),
+    /// The reflection loop's keep threshold, set while it runs (`reflect.md`).
+    KeepAt(f32),
     Temp(f32),
     /// A new persona: the context is rolled over onto it.
     Persona(String),
@@ -1945,6 +1947,15 @@ impl Engine {
             Command::Pause => self.paused = true,
             Command::Resume => self.paused = false,
             Command::Chunk(c) => self.chunk = c,
+            Command::KeepAt(p) => {
+                if let Some(rf) = self.reflector.as_mut() {
+                    rf.cfg.keep_at = p;
+                    self.note(format!(
+                        "checks keep at a share of {p} now (a write needs {:.2})",
+                        1.0 - p
+                    ));
+                }
+            }
             Command::Temp(t) => {
                 self.cfg.sampling.temp = t;
                 let s = self.cfg.sampling.clone();

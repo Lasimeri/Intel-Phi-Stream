@@ -231,6 +231,10 @@ fn connection(
                     .map_err(|_| "the engine is gone".to_string()),
                 Err(e) => Err(e),
             },
+            "keep-at" => match arg.parse::<f32>() {
+                Ok(p) if (0.0..=2.0).contains(&p) => ctx.send(Command::KeepAt(p)).map(|_| format!("keep at {p}")).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("keep-at takes a share between 0 and 2 (above 1 every check writes)".to_string()),
+            },
             "chunk" => match arg.parse::<usize>() {
                 Ok(n) => ctx.send(Command::Chunk(n)).map(|_| format!("chunk {n}")).map_err(|_| "the engine is gone".to_string()),
                 Err(_) => Err("chunk takes a number (0 adapts)".to_string()),

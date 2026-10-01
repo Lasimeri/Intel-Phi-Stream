@@ -204,9 +204,10 @@ struct MindArgs {
     /// As --reflect, read-only: every deliberation runs, no token changes.
     #[arg(long, conflicts_with = "reflect")]
     reflect_dry: bool,
-    /// A check keeps when keep's share of its choice is at least this (0.5;
-    /// above 1 every check writes: a test of the rewind, reflect.md).
-    #[arg(long, default_value_t = 0.5)]
+    /// A check keeps when keep's share of its choice is at least this (0.45,
+    /// the stream's own choice: a write needs 0.55; above 1 every check
+    /// writes: a test of the rewind, reflect.md).
+    #[arg(long, default_value_t = 0.45)]
     reflect_keep_at: f32,
 }
 
@@ -279,6 +280,11 @@ enum Cmd {
     },
     /// The last status line.
     Status,
+    /// The checks' keep threshold, live: a check keeps at a keep share of
+    /// at least P (a write needs 1 - P; reflect.md).
+    KeepAt {
+        p: f32,
+    },
     /// Tokens read beside the live token each cycle (0 adapts).
     Chunk {
         n: usize,
@@ -966,6 +972,7 @@ fn main() -> Result<()> {
         } => converse(&socket, who.as_deref(), &text.join(" "), timeout, thoughts),
         Cmd::Listen => listen(&socket),
         Cmd::Feed { path } => ask(&socket, &format!("feed {}", expand_home(&path))),
+        Cmd::KeepAt { p } => ask(&socket, &format!("keep-at {p}")),
         Cmd::Tail { status, mind } => tail(&socket, status, mind),
         Cmd::Status => {
             let mut c = Client::connect(&socket)?;

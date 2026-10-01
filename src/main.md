@@ -61,7 +61,8 @@ on its mind at every token, `src/mind.md`) with `--lens`,
 `--mind-layers`, `--mind-k`; `--reflect` (needs `--mind`: check the
 tokens it places, `src/reflect.md`) or `--reflect-dry` (deliberate, never
 change), `--reflect-keep-at P` (keep's share of the choice at which a
-check keeps, 0.5; above 1 every check writes, a test of the rewind); `--horizon SECS` (show the text that far behind its placement at
+check keeps, 0.45, the stream's own choice; above 1 every check writes, a test of the rewind); `keep-at P` sets it
+while the service runs; `--horizon SECS` (show the text that far behind its placement at
 an even pace, `src/playout.md`; 0 by default, 1 with `--reflect`). The mind's and the loop's options are
 one group (`MindArgs`), the same for `serve`, `run` and `code stream`, so
 a measurement runs what the stream runs; the configuration is checked

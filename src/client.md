@@ -11,7 +11,7 @@ returns are escaped (`\\`, `\n`, `\r`) so that one piece is one line.
 
 From the client: `say TEXT`, `say-as NAME TEXT` (named: the stream
 hears `NAME: TEXT`, `docs/dev.md`), `feed PATH`, `persona PATH`, `chunk N`,
-`temp T`, `pause`, `resume`, `status`, `recent`, `tail`, `quit`.
+`temp T`, `keep-at P` (the checks' keep threshold, live), `pause`, `resume`, `status`, `recent`, `tail`, `quit`.
 
 From the service: `info model=... gpu_blocks=N n_blocks=N gpu_gib=X
 host_gib=X n_ctx=N frame=journal|chat workspace=PATH` once on connect;

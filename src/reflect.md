@@ -84,8 +84,15 @@ share of the whole distribution the two classes hold (`fmt`), which
 shows how far the model was answering the question at all.
 
 
-The threshold is `keep_at` (`--reflect-keep-at`, 0.5): a check keeps at
-or above it. Above 1 every check writes, which is how the engine's
+The threshold is `keep_at` (`--reflect-keep-at`, live with `phi-stream
+keep-at P`): a check keeps at or above it. Its default, 0.45 (a write
+needs a share of 0.55), is the stream's own choice. In the first dev
+session it was asked whether a write should need 0.7. It answered no
+(0.7 would have removed every change it had made), weighed the
+counterpoint that a wrong write costs more than a missed one, and
+settled it with `[prefer: write threshold 0.55]`. On that session's six
+changes, 0.55 keeps four of them (the coin flips, \"2\" to \"3\" among
+them) and lets two through. Above 1 every check writes, which is how the engine's
 rewind is tested live. Each episode keeps the three likeliest tokens
 of the deliberation at `Decision:` (`top1`..`top3`), so the firing audit
 can see where the mass `fmt` misses went. In a task (`code stream`)
