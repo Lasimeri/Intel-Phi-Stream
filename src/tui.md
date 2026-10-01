@@ -33,7 +33,9 @@ is. Closing the terminal leaves the stream running.
   workspace and the engine's last note.
 - The title: the model, the frame, the placement (blocks on the GPU, the
   bytes the cards and the host hold), the cells, the time up, things
-  heard.
+  heard, and the stream's clock: the real time of its newest piece, to
+  the microsecond (`clock.md`). The mind view shows each reading's time
+  the same way.
 
 Nothing is drawn with ratatui or any widget library: rows of styled runs
 are queued and flushed, the screen redrawn when something changed or

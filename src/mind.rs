@@ -40,6 +40,8 @@ pub struct Reading {
     pub layers: Vec<(i32, Vec<(String, f32)>)>,
     /// The readout's own time, milliseconds.
     pub ms: f32,
+    /// When the token existed (its decode done), microseconds of real time.
+    pub t_us: i64,
 }
 
 pub struct Mind {
@@ -118,6 +120,7 @@ impl Mind {
     /// The reading of the token just decoded at `pos`, from the capture's
     /// output row; none when the decode asked for no token.
     pub fn read(&mut self, llm: &mut Llm, pos: i32, token: &str) -> Result<Option<Reading>> {
+        let t_us = crate::clock::now_us();
         let t0 = Instant::now();
         let cap = llm.capture().context("no capture installed")?;
         if let Some(e) = &cap.error {
@@ -154,6 +157,7 @@ impl Mind {
             token: token.to_string(),
             layers,
             ms: t0.elapsed().as_secs_f32() * 1000.0,
+            t_us,
         };
         if let Some(f) = &mut self.log {
             let _ = writeln!(f, "{}", line(&reading));
@@ -163,10 +167,12 @@ impl Mind {
 }
 
 /// A reading as one line (the socket's `mind` line and `mind.log`):
-/// `pos=P ms=M tok=TEXT l20=w:logp,w:logp l26=...`, the token escaped.
+/// `t=MICROSECONDS pos=P ms=M tok=TEXT l27=w:logp,w:logp l29=...`, the
+/// token escaped.
 pub fn line(r: &Reading) -> String {
     let mut s = format!(
-        "pos={} ms={:.2} tok={}",
+        "t={} pos={} ms={:.2} tok={}",
+        r.t_us,
         r.pos,
         r.ms,
         crate::client::escape(&r.token).replace(' ', "\\s")
@@ -182,12 +188,14 @@ pub fn line(r: &Reading) -> String {
 pub fn parse_line(s: &str) -> Option<Reading> {
     let mut pos = None;
     let mut ms = 0.0;
+    let mut t_us = 0i64;
     let mut token = String::new();
     let mut layers = Vec::new();
     for field in s.split(' ') {
         let (k, v) = field.split_once('=')?;
         match k {
             "pos" => pos = v.parse().ok(),
+            "t" => t_us = v.parse().unwrap_or(0),
             "ms" => ms = v.parse().unwrap_or(0.0),
             "tok" => token = crate::client::unescape(&v.replace("\\s", " ")),
             _ if k.starts_with('l') => {
@@ -212,6 +220,7 @@ pub fn parse_line(s: &str) -> Option<Reading> {
         token,
         layers,
         ms,
+        t_us,
     })
 }
 
@@ -247,6 +256,7 @@ mod tests {
                 (26, vec![]),
             ],
             ms: 0.75,
+            t_us: 1_790_000_000_123_456,
         };
         let back = parse_line(&line(&r)).unwrap();
         assert_eq!(back.pos, 12);
@@ -254,5 +264,6 @@ mod tests {
         assert_eq!(back.layers[0].1[1].0, "loss");
         assert!((back.layers[0].1[1].1 + 2.5).abs() < 1e-6);
         assert!(back.layers[1].1.is_empty());
+        assert_eq!(back.t_us, 1_790_000_000_123_456);
     }
 }

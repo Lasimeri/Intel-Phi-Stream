@@ -93,6 +93,8 @@ struct View {
     notes: Vec<String>,
     started: Instant,
     heard: u32,
+    /// The real time of the newest piece of the stream (microseconds).
+    last_t_us: i64,
     /// The last readings of its mind, newest last.
     minds: VecDeque<Reading>,
     /// The main area shows the readings token by token instead of the stream.
@@ -116,7 +118,12 @@ fn mind_row(r: &Reading) -> String {
             format!("{l}: {}", words.join(" "))
         })
         .collect();
-    format!("{:>14}  {}", shown(&r.token), blocks.join("  ·  "))
+    format!(
+        "{}  {:>14}  {}",
+        crate::clock::hms(r.t_us),
+        shown(&r.token),
+        blocks.join("  ·  ")
+    )
 }
 
 const KEEP_CHARS: usize = 400_000;
@@ -254,7 +261,7 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
     queue!(out, cursor::Hide, SetBackgroundColor(theme::BG))?;
     // Title.
     let title = format!(
-        " phi-stream · {} · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {}",
+        " phi-stream · {} · {} · GPU {}/{} blocks {:.1} GiB · cards+host {:.1} GiB · {}k cells · up {}m · heard {} · {}",
         p.model,
         p.frame,
         p.gpu_blocks,
@@ -263,7 +270,8 @@ fn draw(out: &mut impl Write, v: &View, p: &Placement, tick: u64) -> io::Result<
         p.host_gib,
         p.n_ctx / 1000,
         v.started.elapsed().as_secs() / 60,
-        v.heard
+        v.heard,
+        if v.last_t_us > 0 { crate::clock::hms(v.last_t_us) } else { String::new() }
     );
     queue!(
         out,
@@ -479,6 +487,7 @@ pub fn run(socket: &Path) -> Result<()> {
             notes: Vec::new(),
             started: Instant::now(),
             heard: 0,
+            last_t_us: 0,
             minds: VecDeque::new(),
             mind_view: false,
         };
@@ -502,8 +511,9 @@ pub fn run(socket: &Path) -> Result<()> {
                         };
                         dirty = true;
                     }
-                    Ok(Msg::Text(t, k)) => {
+                    Ok(Msg::Text(t, k, at)) => {
                         v.push(t, k);
+                        v.last_t_us = at;
                         dirty = true;
                     }
                     Ok(Msg::Status(s)) => {

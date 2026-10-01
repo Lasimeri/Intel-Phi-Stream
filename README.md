@@ -97,6 +97,11 @@ gated steps, each usable and recorded:
   token in the stream); the terminal shows it in a strip and token by
   token with `/mind`; `phi-stream tail --mind` prints it
   ([`src/mind.md`](src/mind.md)).
+- **On the real-time clock**: every piece of the stream, every reading
+  and every status is stamped to the microsecond; the chain carries the
+  time of what it hears and of its silences; the engine's intervals are
+  real time, not cycles
+  ([`docs/results/2026-10-01-clock.md`](docs/results/2026-10-01-clock.md)).
 - Next: the reflection loop (the stream reasoning on what is on its mind
   at the token it is placing, beside the live token, within a commit
   horizon so shown text never changes), real time as the reference
@@ -151,6 +156,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/tui.rs` | the terminal, a client of the service |
 | `src/probe.rs`, `src/gate.rs` | the rates on this machine; the composition against a straight sequence |
 | `src/capture.rs`, `src/readout.rs`, `src/check.rs` | the residual of the token being placed, read through llama.cpp's eval callback; the lens readout on the GPU; the gate that both reproduce the model's own logits |
+| `src/clock.rs` | the wall clock the stream is kept against, to the microsecond |
 | `src/torch.rs`, `src/lens.rs`, `src/eval.rs`, `src/mind.rs` | the reference's lens file read without Python; the `.jlens` format; the lens against the logit lens on the reference's sets; what is on its mind at every token |
 | `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |

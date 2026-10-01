@@ -50,7 +50,9 @@ the composition), `--system FILE` (the whole persona verbatim, an
 experiment's override), `--first-words` (the journal's first words in its
 own voice after the seed, "Where was I. "), `--seed-text`
 (the first thing from outside), `--direct-max` 48, `--chunk` 0
-(adapting), `--rollover-at` 0.6, `--feed FILE` at the start; `--mind` (read what is
+(adapting), `--rollover-at` 0.6, `--time-every` 60 (seconds of quiet before the
+clock is put into the chain; 0 never), `--nudge-every` 60 (seconds
+between nudges), `--feed FILE` at the start; `--mind` (read what is
 on its mind at every token, `src/mind.md`) with `--lens`,
 `--mind-layers`, `--mind-k`. `tail --mind` prints the readings too.
 

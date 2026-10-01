@@ -7,6 +7,7 @@
 mod capture;
 mod check;
 mod client;
+mod clock;
 mod engine;
 mod eval;
 mod gate;
@@ -150,6 +151,13 @@ struct StreamArgs {
     /// Roll the context over past this share of it.
     #[arg(long, default_value_t = 0.6)]
     rollover_at: f32,
+    /// Put the wall clock into the chain after this many seconds with
+    /// nothing from outside (0: never).
+    #[arg(long, default_value_t = 60.0)]
+    time_every: f64,
+    /// Nudge circling thoughts at most once in this many seconds.
+    #[arg(long, default_value_t = 60.0)]
+    nudge_every: f64,
     /// Hand over a file at the start.
     #[arg(long)]
     feed: Option<String>,
@@ -426,6 +434,8 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         summary_max: 1024,
         sampling,
         status_every: 8,
+        time_every_us: (s.time_every * 1e6) as i64,
+        nudge_every_us: (s.nudge_every * 1e6) as i64,
         workspace,
         mind: s.mind.then(|| mind::MindConfig {
             lens: expand_home(&s.lens),
@@ -494,7 +504,12 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     if let Some(f) = &s.feed {
         let text =
             std::fs::read_to_string(expand_home(f)).with_context(|| format!("reading {f}"))?;
-        ctx.send(Command::Feed(text, format!("the file {f}"))).ok();
+        ctx.send(Command::Feed(
+            text,
+            format!("the file {f}"),
+            clock::now_us(),
+        ))
+        .ok();
     }
     let engine = Engine::new(llm, cfg, etx, crx)?;
     let worker = std::thread::spawn(move || engine.run());
@@ -515,7 +530,12 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
     if let Some(f) = &s.feed {
         let text =
             std::fs::read_to_string(expand_home(f)).with_context(|| format!("reading {f}"))?;
-        ctx.send(Command::Feed(text, format!("the file {f}"))).ok();
+        ctx.send(Command::Feed(
+            text,
+            format!("the file {f}"),
+            clock::now_us(),
+        ))
+        .ok();
     }
     let engine = Engine::new(llm, cfg, etx, crx)?;
     let worker = std::thread::spawn(move || engine.run());
@@ -532,7 +552,11 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
                 match std::fs::read_to_string(expand_home(p.trim())) {
                     Ok(t) => {
                         stdin_tx
-                            .send(Command::Feed(t, format!("the file {}", p.trim())))
+                            .send(Command::Feed(
+                                t,
+                                format!("the file {}", p.trim()),
+                                clock::now_us(),
+                            ))
                             .ok();
                     }
                     Err(e) => eprintln!("/feed: {e}"),
@@ -545,7 +569,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
                     stdin_tx.send(Command::Chunk(n)).ok();
                 }
             } else {
-                stdin_tx.send(Command::Say(line)).ok();
+                stdin_tx.send(Command::Say(line, clock::now_us())).ok();
             }
         }
     });
@@ -553,7 +577,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
     let mut live = 0usize;
     loop {
         match erx.recv() {
-            Ok(Event::Text(t, kind)) => {
+            Ok(Event::Text(t, kind, _)) => {
                 match kind {
                     Kind::Given => write!(out, "\x1b[33m{t}\x1b[0m")?,
                     Kind::Speak => write!(out, "\x1b[1m{t}\x1b[0m")?,
@@ -609,9 +633,9 @@ fn tail(socket: &Path, with_status: bool, with_mind: bool) -> Result<()> {
     let mut out = std::io::stdout();
     while let Some(line) = c.line()? {
         match parse(&line) {
-            Msg::Text(t, Kind::Given) => write!(out, "\x1b[33m{t}\x1b[0m")?,
-            Msg::Text(t, Kind::Speak) => write!(out, "\x1b[1m{t}\x1b[0m")?,
-            Msg::Text(t, Kind::Think) => write!(out, "{t}")?,
+            Msg::Text(t, Kind::Given, _) => write!(out, "\x1b[33m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Speak, _) => write!(out, "\x1b[1m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Think, _) => write!(out, "{t}")?,
             Msg::Status(st) => {
                 if with_status {
                     eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st));

@@ -29,7 +29,7 @@ const REPLAY_CHARS: usize = 12_000;
 const KEEP_MINDS: usize = 256;
 
 struct Hub {
-    recent: VecDeque<(String, Kind)>,
+    recent: VecDeque<(String, Kind, i64)>,
     chars: usize,
     last_status: Option<String>,
     subs: Vec<Sender<String>>,
@@ -38,11 +38,11 @@ struct Hub {
 }
 
 impl Hub {
-    fn push_text(&mut self, text: &str, kind: Kind) {
+    fn push_text(&mut self, text: &str, kind: Kind, t_us: i64) {
         self.chars += text.chars().count();
-        self.recent.push_back((text.to_string(), kind));
+        self.recent.push_back((text.to_string(), kind, t_us));
         while self.chars > KEEP_CHARS && self.recent.len() > 1 {
-            let (t, _) = self.recent.pop_front().unwrap();
+            let (t, _, _) = self.recent.pop_front().unwrap();
             self.chars -= t.chars().count();
         }
     }
@@ -63,7 +63,7 @@ impl Hub {
             .recent
             .iter()
             .skip(start)
-            .map(|(t, k)| format!("text {} {}", kind_name(*k), escape(t)))
+            .map(|(t, k, at)| format!("text {} t={at} {}", kind_name(*k), escape(t)))
             .collect();
         out.extend(self.minds.iter().cloned());
         if let Some(s) = &self.last_status {
@@ -114,9 +114,9 @@ pub fn serve(
             while let Ok(ev) = erx.recv() {
                 let mut h = hub.lock().unwrap();
                 match ev {
-                    Event::Text(t, k) => {
-                        h.push_text(&t, k);
-                        let line = format!("text {} {}", kind_name(k), escape(&t));
+                    Event::Text(t, k, at) => {
+                        h.push_text(&t, k, at);
+                        let line = format!("text {} t={at} {}", kind_name(k), escape(&t));
                         h.broadcast(&line);
                     }
                     Event::Status(s) => {
@@ -202,12 +202,12 @@ fn connection(
                 if arg.is_empty() {
                     Err("say what?".to_string())
                 } else {
-                    ctx.send(Command::Say(crate::client::unescape(arg))).map(|_| "heard".to_string()).map_err(|_| "the engine is gone".to_string())
+                    ctx.send(Command::Say(crate::client::unescape(arg), crate::clock::now_us())).map(|_| "heard".to_string()).map_err(|_| "the engine is gone".to_string())
                 }
             }
             "feed" => match read_file(arg) {
                 Ok((text, label)) => ctx
-                    .send(Command::Feed(text, label.clone()))
+                    .send(Command::Feed(text, label.clone(), crate::clock::now_us()))
                     .map(|_| format!("handed over {label}"))
                     .map_err(|_| "the engine is gone".to_string()),
                 Err(e) => Err(e),

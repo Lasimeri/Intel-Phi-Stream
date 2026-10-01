@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context as _, Result};
 
+use crate::clock;
 use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
 
@@ -67,10 +68,16 @@ pub struct Status {
     pub leaks: u32,
     /// The mind readout's time per token, milliseconds (0: not read).
     pub mind_ms: f64,
+    /// When this status was taken (microseconds of real time).
+    pub t_us: i64,
+    /// Failed reads kept out of the chain (one failure per nudge interval goes in).
+    pub reads_quiet: u32,
 }
 
 pub enum Event {
-    Text(String, Kind),
+    /// A piece of the stream, the real time it exists at (microseconds
+    /// since the epoch, `clock.rs`).
+    Text(String, Kind, i64),
     Status(Status),
     Note(String),
     /// What was on its mind at a token it placed (`mind.rs`).
@@ -79,10 +86,10 @@ pub enum Event {
 }
 
 pub enum Command {
-    /// Something said to the stream.
-    Say(String),
-    /// A document handed over, with its label.
-    Feed(String, String),
+    /// Something said to the stream, and when it was heard (microseconds).
+    Say(String, i64),
+    /// A document handed over, with its label and when it was handed over.
+    Feed(String, String, i64),
     Pause,
     Resume,
     /// Tokens a cycle reads beside the live token; 0 adapts to the amount.
@@ -136,6 +143,11 @@ pub struct Config {
     pub sampling: Sampling,
     /// Cycles between status events.
     pub status_every: u32,
+    /// Put the clock into the chain after this long without anything from
+    /// outside (microseconds of real time; 0: never).
+    pub time_every_us: i64,
+    /// Nudge circling thoughts at most this often (microseconds).
+    pub nudge_every_us: i64,
     /// Where the persona, the notes and the log live.
     pub workspace: PathBuf,
     /// Read what is on its mind at every token it places (`mind.rs`);
@@ -244,7 +256,6 @@ pub struct Engine {
     /// The last live tokens sampled, for the circling check.
     generated: VecDeque<i32>,
     gen_count: usize,
-    last_nudge: usize,
     eog_streak: u32,
     leaks: u32,
     stream_rate: Ema,
@@ -256,6 +267,18 @@ pub struct Engine {
     eot: i32,
     newline: i32,
     log: Option<File>,
+    /// Each piece of the stream with its microseconds (`chain.log`).
+    chain: Option<File>,
+    /// When something last came from outside, when the clock was last put
+    /// into the chain, and when the thoughts were last nudged: microseconds
+    /// of the monotonic clock (durations; the wall clock may step).
+    last_outside_mono: i64,
+    last_anchor_mono: i64,
+    last_nudge_mono: i64,
+    /// When a failed read was last put into the chain, and how many have
+    /// been kept out of it since the start.
+    last_read_failure_mono: i64,
+    read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
     mind_ms: Ema,
@@ -293,6 +316,7 @@ impl Engine {
             .append(true)
             .open(cfg.workspace.join("stream.log"))
             .ok();
+        let cfg_chain_path = cfg.workspace.join("chain.log");
         Ok(Self {
             llm,
             cfg,
@@ -318,7 +342,6 @@ impl Engine {
             chunk,
             generated: VecDeque::new(),
             gen_count: 0,
-            last_nudge: 0,
             eog_streak: 0,
             leaks: 0,
             stream_rate: Ema { v: 0.0, n: 0 },
@@ -330,16 +353,38 @@ impl Engine {
             eot,
             newline,
             log,
+            chain: OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(cfg_chain_path)
+                .ok(),
+            last_outside_mono: clock::mono_us(),
+            last_anchor_mono: clock::mono_us(),
+            last_nudge_mono: i64::MIN / 2,
+            last_read_failure_mono: i64::MIN / 2,
+            read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
         })
     }
 
+    /// Out with a piece of the stream, stamped with the real time it exists
+    /// at: to `stream.log` (the text), `chain.log` (each piece with its
+    /// microseconds) and the clients.
     fn say(&mut self, text: String, kind: Kind) {
+        let t = clock::now_us();
         if let Some(f) = &mut self.log {
             let _ = f.write_all(text.as_bytes());
         }
-        let _ = self.tx.send(Event::Text(text, kind));
+        if let Some(f) = &mut self.chain {
+            let k = match kind {
+                Kind::Think => "think",
+                Kind::Speak => "speak",
+                Kind::Given => "given",
+            };
+            let _ = writeln!(f, "{t}\t{k}\t{}", crate::client::escape(&text));
+        }
+        let _ = self.tx.send(Event::Text(text, kind, t));
     }
 
     fn note(&self, text: String) {
@@ -355,41 +400,51 @@ impl Engine {
         self.llm.tokenize(text, control && !self.journal())
     }
 
-    /// The opening: the persona, then the first thing from outside.
+    /// The opening: the persona, then the first thing from outside, with
+    /// the date and time it begins at.
     fn opening(&self) -> String {
+        let when = clock::datetime(clock::now_us());
         match self.cfg.frame {
-            Frame::Journal => format!("{}\n\n=== the journal ===\n\n« {}\n\n{}", self.cfg.system, self.cfg.seed, self.cfg.first_words),
+            Frame::Journal => format!(
+                "{}\n\n=== the journal ===\n\n« [{when}] {}\n\n{}",
+                self.cfg.system, self.cfg.seed, self.cfg.first_words
+            ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{when}] {}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system, self.cfg.seed
             ),
         }
     }
 
-    fn framed_say(&self, text: &str) -> String {
+    /// Something said, with the real time it was heard at (`t_us`).
+    fn framed_say(&self, text: &str, t_us: i64) -> String {
+        let at = clock::hms(t_us);
         match self.cfg.frame {
-            Frame::Journal => format!("\n« {}\n", text.trim()),
-            Frame::Chat => format!("\n[they say: \"{}\"]\n", text.trim()),
+            Frame::Journal => format!("\n« [{at}] {}\n", text.trim()),
+            Frame::Chat => format!("\n[at {at} they say: \"{}\"]\n", text.trim()),
         }
     }
 
-    fn framed_doc(&self, text: &str, what: &str) -> String {
+    fn framed_doc(&self, text: &str, what: &str, t_us: i64) -> String {
+        let at = clock::hms(t_us);
         match self.cfg.frame {
             Frame::Journal => format!(
-                "\n« {what}. It reads:\n{}\n« that is the end of it.\n",
+                "\n« [{at}] {what}. It reads:\n{}\n« that is the end of it.\n",
                 text.trim_end()
             ),
             Frame::Chat => format!(
-                "\n[{what}. It reads:\n{}\n--- that is the end of it ---]\n",
+                "\n[at {at} {what}. It reads:\n{}\n--- that is the end of it ---]\n",
                 text.trim_end()
             ),
         }
     }
 
+    /// A line from the system, with the real time it is written at.
     fn framed_system(&self, text: &str) -> String {
+        let at = clock::hms(clock::now_us());
         match self.cfg.frame {
-            Frame::Journal => format!("\n« [from the system: {text}]\n"),
-            Frame::Chat => format!("\n[{text}]\n"),
+            Frame::Journal => format!("\n« [{at}] [from the system: {text}]\n"),
+            Frame::Chat => format!("\n[at {at}: {text}]\n"),
         }
     }
 
@@ -413,15 +468,17 @@ impl Engine {
     fn base_after(&self, summary: &str) -> String {
         match self.cfg.frame {
             Frame::Journal => format!(
-                "{}\n\n=== the journal ===\n\n« [resuming from your own summary:]\n{}\n{}« the journal continues.\n\n{}",
+                "{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}« the journal continues.\n\n{}",
                 self.cfg.system,
+                clock::datetime(clock::now_us()),
                 summary,
                 self.notes_block(),
                 self.cfg.first_words
             ),
             Frame::Chat => format!(
-                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[You are resuming from your own summary:]\n{}\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+                "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
+                clock::datetime(clock::now_us()),
                 summary,
                 self.notes_block()
             ),
@@ -648,6 +705,8 @@ impl Engine {
             } else {
                 0.0
             },
+            t_us: clock::now_us(),
+            reads_quiet: self.read_failures_quiet,
         }
     }
 
@@ -877,15 +936,33 @@ impl Engine {
         });
         match outcome {
             Ok(text) => {
-                let framed =
-                    self.framed_doc(&text, &format!("the file {} is brought in", p.display()));
+                let framed = self.framed_doc(
+                    &text,
+                    &format!("the file {} is brought in", p.display()),
+                    clock::now_us(),
+                );
                 self.queue
                     .push_back((framed, format!("read {}", p.display())));
                 self.note(format!("reading {} for it", p.display()));
             }
             Err(e) => {
-                let msg = self.framed_system(&format!("{} could not be read: {e}", p.display()));
-                self.put(msg)?;
+                // At most one failure line in the chain per nudge interval:
+                // a failure line prompts another guess, and guesses would
+                // feed on their own failures. The rest are notes outside it.
+                let mono = clock::mono_us();
+                if mono - self.last_read_failure_mono >= self.cfg.nudge_every_us {
+                    self.last_read_failure_mono = mono;
+                    let msg =
+                        self.framed_system(&format!("{} could not be read: {e}", p.display()));
+                    self.put(msg)?;
+                } else {
+                    self.read_failures_quiet += 1;
+                    self.note(format!(
+                        "{} could not be read: {e} (not put into the chain: one failure per {} s)",
+                        p.display(),
+                        self.cfg.nudge_every_us / 1_000_000
+                    ));
+                }
             }
         }
         Ok(())
@@ -960,9 +1037,33 @@ impl Engine {
             return Ok(());
         }
 
-        // Thoughts going round: a nudge, at most once in 256 tokens.
-        if idle && self.gen_count >= self.last_nudge + 256 && self.circling() {
-            self.last_nudge = self.gen_count;
+        // The clock: after a stretch with nothing from outside, the time is
+        // put into the chain, so the thoughts stand on the wall clock.
+        let mono = clock::mono_us();
+        let now = clock::now_us();
+        if idle
+            && self.cfg.time_every_us > 0
+            && mono - self.last_outside_mono.max(self.last_anchor_mono) >= self.cfg.time_every_us
+        {
+            self.last_anchor_mono = mono;
+            let quiet = clock::span(mono - self.last_outside_mono);
+            let line = match self.cfg.frame {
+                Frame::Journal => format!(
+                    "\n« [{}] (nothing from outside for {quiet})\n",
+                    clock::hms(now)
+                ),
+                Frame::Chat => format!(
+                    "\n[at {}: nothing from outside for {quiet}]\n",
+                    clock::hms(now)
+                ),
+            };
+            self.put(line)?;
+            return Ok(());
+        }
+
+        // Thoughts going round: a nudge, at most once per `nudge_every_us`.
+        if idle && mono - self.last_nudge_mono >= self.cfg.nudge_every_us && self.circling() {
+            self.last_nudge_mono = mono;
             let msg = self.framed_system("your thoughts have been circling the same words; move on to something else, concretely");
             self.put(msg)?;
             self.note("the thoughts were circling; nudged".into());
@@ -988,12 +1089,14 @@ impl Engine {
 
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
-            Command::Say(s) => {
-                let text = self.framed_say(&s);
+            Command::Say(s, t) => {
+                self.last_outside_mono = clock::mono_us();
+                let text = self.framed_say(&s, t);
                 self.queue.push_back((text, "heard".into()));
             }
-            Command::Feed(s, label) => {
-                let text = self.framed_doc(&s, &format!("{label} is handed over"));
+            Command::Feed(s, label, t) => {
+                self.last_outside_mono = clock::mono_us();
+                let text = self.framed_doc(&s, &format!("{label} is handed over"), t);
                 self.queue.push_back((text, format!("read {label}")));
             }
             Command::Pause => self.paused = true,

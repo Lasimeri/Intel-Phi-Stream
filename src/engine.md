@@ -66,7 +66,10 @@ lines the mind writes for itself: `[note: ...]` is kept in the workspace's
 `notes.md` and shown to it again in every new base (a rollover, a new
 persona), and `[read: PATH]` brings the file (a regular file under 1 MiB,
 relative to the workspace or absolute) in as a reading, or tells it why
-not. The workspace (`--workspace`) holds `persona.md` (written at start,
+not: at most one failure line per `--nudge-every` interval goes into the
+chain (a failure prompts another guess, and guesses would feed on their
+own failures; seen live with invented paths), the rest are notes outside
+it, counted in the status as `reads_quiet`. The workspace (`--workspace`) holds `persona.md` (written at start,
 reloaded by `persona`, edited in place between runs), `notes.md` and
 `stream.log` (everything shown, appended).
 
@@ -122,6 +125,19 @@ times is circling, and a nudge (a bracketed line asking the thoughts to
 move on) is decoded straight in, at most once in 256 tokens. A document
 is framed with an opening and a closing line so the join reads as its
 end.
+
+**Real time** (`clock.md`). The chain is placed on the wall clock, not
+the cycles: the opening carries its date and time to the microsecond,
+every line from outside the time it was heard or handed over (`« [HH:MM:SS.uuuuuu] ...`),
+every line from the system the time it was written, a rollover base the
+date and time; after `--time-every` seconds (60) with nothing from
+outside, the time and the length of the quiet are put in (`« [HH:MM:SS.uuuuuu]
+(nothing from outside for 2 min 0 s)`), so the mind can reason about
+when, not only what. Every piece of the stream goes out stamped with the
+microsecond it exists at (`chain.log`: `t_us<TAB>kind<TAB>text`, and
+the socket); circling thoughts are nudged at most once per
+`--nudge-every` seconds (60). Intervals are taken on the monotonic
+clock.
 
 **The mind** (`--mind`, `mind.md`): after every decode that asked for a
 token, the residual of that token at the chosen blocks is read through

@@ -81,7 +81,8 @@ pub struct Info {
 #[derive(Debug)]
 pub enum Msg {
     Info(Info),
-    Text(String, Kind),
+    /// A piece of the stream, its kind and the real time it exists at (us).
+    Text(String, Kind, i64),
     Status(Status),
     Note(String),
     /// What was on its mind at one token (`mind.rs`).
@@ -125,13 +126,18 @@ pub fn parse(line: &str) -> Msg {
             })
         }
         "text" => {
-            let (kind, text) = rest.split_once(' ').unwrap_or((rest, ""));
+            // text KIND t=MICROSECONDS TEXT
+            let (kind, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+            let (t, text) = match rest.strip_prefix("t=").and_then(|r| r.split_once(' ')) {
+                Some((t, text)) => (t.parse().unwrap_or(0), text),
+                None => (0, rest),
+            };
             let kind = match kind {
                 "speak" => Kind::Speak,
                 "given" => Kind::Given,
                 _ => Kind::Think,
             };
-            Msg::Text(unescape(text), kind)
+            Msg::Text(unescape(text), kind, t)
         }
         "status" => {
             let f = fields(rest);
@@ -176,6 +182,8 @@ pub fn parse(line: &str) -> Msg {
                 },
                 leaks: field(&f, "leaks").parse().unwrap_or(0),
                 mind_ms: field(&f, "mind_ms").parse().unwrap_or(0.0),
+                t_us: field(&f, "t").parse().unwrap_or(0),
+                reads_quiet: field(&f, "reads_quiet").parse().unwrap_or(0),
             })
         }
         "note" => Msg::Note(unescape(rest)),
@@ -201,8 +209,8 @@ pub fn status_line(s: &Status) -> String {
         Mode::Paused => "paused".to_string(),
     };
     format!(
-        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2}",
-        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks, s.mind_ms
+        "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2} t={} reads_quiet={}",
+        s.stream_tps, s.side_tps, s.cycle_ms, s.pos, s.n_ctx, s.queued, s.chunk, s.rollovers, s.notes, s.frame, s.leaks, s.mind_ms, s.t_us, s.reads_quiet
     )
 }
 
@@ -305,6 +313,8 @@ mod tests {
             frame: "journal",
             leaks: 0,
             mind_ms: 0.0,
+            t_us: 0,
+            reads_quiet: 0,
         };
         match parse(&status_line(&st)) {
             Msg::Status(s) => {
@@ -315,8 +325,11 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match parse("text speak hello\\nthere") {
-            Msg::Text(t, Kind::Speak) => assert_eq!(t, "hello\nthere"),
+        match parse("text speak t=1790000000000001 hello\\nthere") {
+            Msg::Text(t, Kind::Speak, at) => {
+                assert_eq!(t, "hello\nthere");
+                assert_eq!(at, 1_790_000_000_000_001);
+            }
             other => panic!("{other:?}"),
         }
     }
