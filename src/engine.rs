@@ -449,6 +449,11 @@ pub struct Engine {
 
 const MAX_READ_BYTES: u64 = 1 << 20;
 
+/// A summary's end mark counts only after this many tokens, and the ask
+/// ends with these first words in its own voice.
+const SUMMARY_MIN: usize = 96;
+const SUMMARY_START: &str = "What I was working on: ";
+
 impl Engine {
     pub fn new(llm: Llm, cfg: Config, tx: Sender<Event>, rx: Receiver<Command>) -> Result<Self> {
         let think_open = llm.special("<think>").unwrap_or(-1);
@@ -828,7 +833,14 @@ impl Engine {
     }
 
     fn summary_ask(&self) -> String {
-        self.framed_system("your memory is nearly full. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---")
+        // The ask, then the summary's first words in its own voice: in the
+        // dev session it restated the instruction one word a line and ended
+        // it with --- after 34 tokens, losing its thread at the rollover.
+        format!(
+            "{}{}",
+            self.framed_system("your memory is nearly full. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---"),
+            SUMMARY_START
+        )
     }
 
     /// Its notes and its preferences, as it is shown them again (a
@@ -1952,10 +1964,13 @@ impl Engine {
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
             s.push(self.next);
-            let done = s.len() >= self.cfg.summary_max || {
-                let tail = self.llm.text(&s[s.len().saturating_sub(6)..]);
-                tail.contains("\n---") || self.next == self.eot || self.next == self.think_close
-            };
+            // Its end mark, or the end of its turn, counts only once the summary
+            // has some length: an early --- is not a summary.
+            let done = s.len() >= self.cfg.summary_max
+                || (s.len() >= SUMMARY_MIN && {
+                    let tail = self.llm.text(&s[s.len().saturating_sub(6)..]);
+                    tail.contains("\n---") || self.next == self.eot || self.next == self.think_close
+                });
             if done {
                 let s = self.summary.take().unwrap();
                 let mut text = self.llm.text(&s);

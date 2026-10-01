@@ -38,6 +38,12 @@ while reading][...]`: what arrived is placed where the stream was when
 it arrived, and the text already shown is unchanged. A `Given` mark names
 the join.
 
+**The summary at a rollover** is asked for with its first words already
+written in its own voice ("What I was working on: "), and its end mark
+(`---`, or the end of its turn) counts only after 96 tokens. In the dev
+session it once restated the ask one word a line and ended it with `---`
+after 34 tokens, losing its thread.
+
 **Rollover.** Past `rollover_at` of the pool (0.6) with nothing in
 flight, the engine decodes a request for a summary straight in and
 collects what the stream writes until its `---` line (or `summary_max`
