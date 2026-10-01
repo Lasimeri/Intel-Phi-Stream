@@ -1900,8 +1900,14 @@ impl Engine {
             let lines = text.lines().count().max(1);
             let fit = (room.min(2048) * lines / n).max(1);
             let first = range.map_or(1, |(a, _)| a);
+            // In development the path as the repository names it: short, and
+            // nothing to mistype (a long absolute path came back mangled).
+            let short = match &self.cfg.dev {
+                Some(root) => p.strip_prefix(root).unwrap_or(&p).display().to_string(),
+                None => path.to_string(),
+            };
             let msg = self.framed_system(&format!(
-                "{} is {n} tokens in {lines} lines and there is room for about {room} now: read it by lines, [read: {path}:{first}-{}]",
+                "{} is {n} tokens in {lines} lines and there is room for about {room} now: read it by lines, [read: {short}:{first}-{}]",
                 p.display(),
                 first + fit - 1
             ));
