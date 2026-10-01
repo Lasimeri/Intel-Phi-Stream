@@ -37,6 +37,21 @@ fn local(t_us: i64) -> (libc::tm, i64) {
     (tm, micros)
 }
 
+/// The local zone at `t_us`: its abbreviation (`CDT`) and its offset from
+/// UTC in seconds, as the C library has them (TZ, else /etc/localtime).
+pub fn zone(t_us: i64) -> (String, i64) {
+    let (tm, _) = local(t_us);
+    let name = if tm.tm_zone.is_null() {
+        String::new()
+    } else {
+        // SAFETY: localtime_r points tm_zone at a static NUL-terminated name.
+        unsafe { std::ffi::CStr::from_ptr(tm.tm_zone) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    (name, tm.tm_gmtoff)
+}
+
 /// `HH:MM:SS.uuuuuu`, local time.
 pub fn hms(t_us: i64) -> String {
     let (tm, us) = local(t_us);

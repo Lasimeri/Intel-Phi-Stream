@@ -393,3 +393,17 @@ a second chain (`Chain`), which reflects on each line the journal ends.
 - A reflection repeats a recent one when their words overlap (Jaccard) by
   half or more: rewordings of one reflection were inserted again and again
   under the earlier test of their first 60 characters.
+
+## Where and when (the opening and every rollover)
+
+Before the self-model, the context opens with where and when it runs
+(`situation.md`): the date and time to the microsecond with its zone and
+UTC offset, the computer as read from the system (name, system, kernel,
+processor, memory, GPUs, the Xeon Phi cards, uptime), the model as loaded
+(its blocks on the GPU, where the rest are, the context's cells), its
+workspace and repository, and who is present. All of it is read when the
+text is written, so a rollover carries the time of the rollover. A
+reflection's weight is measured against a placebo: a copy given the same
+frame with nothing in it, so the weight is what the reflection says, not
+that a line came (the frame alone moved the next token, measured at first
+as 7 to 14 nats).

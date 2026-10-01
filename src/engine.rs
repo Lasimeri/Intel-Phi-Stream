@@ -973,7 +973,7 @@ impl Engine {
             Frame::Journal => format!(
                 "{}{}\n\n=== the journal ===\n\n« {when}{}\n{kept}{}\n{}",
                 self.cfg.system,
-                self.about(),
+                self.situation() + &self.about(),
                 self.cfg.seed,
                 self.changed_since,
                 self.cfg.first_words
@@ -981,11 +981,75 @@ impl Engine {
             Frame::Chat => format!(
                 "<|im_start|>system\n{}{}<|im_end|>\n<|im_start|>user\n{when}{}{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
-                self.about(),
+                self.situation() + &self.about(),
                 self.changed_since,
                 self.cfg.seed,
                 if kept.is_empty() { String::new() } else { format!("\n{kept}") }
             ),
+        }
+    }
+
+    /// Where and when it runs (`situation.md`), read from the running system
+    /// at this moment: the date and time with its zone, the host, the model
+    /// as loaded and its context, its workspace and repository, who is
+    /// present. Nothing in a task (a measurement's text must not move).
+    fn situation(&self) -> String {
+        if self.cfg.task {
+            return String::new();
+        }
+        let host = crate::situation::host();
+        let now = crate::situation::now_line(clock::now_us(), host.zone.as_deref());
+        let model = Path::new(&self.llm.opts.model)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        // The cards hold rows of this run only when its backend is loaded
+        // (phi-ggml.sh names it to ggml, `avx512.md`).
+        let cards_on = std::env::var("GGML_BACKEND_PATH").is_ok_and(|p| p.contains("ggml_phi"));
+        let rest = match (&host.cards, cards_on) {
+            (Some(_), true) => "the rest on the host and the Xeon Phi cards",
+            _ => "the rest on the host",
+        };
+        let (gpu, blocks) = (self.llm.split.gpu_blocks, self.llm.split.n_blocks);
+        let ws = self.cfg.workspace.display();
+        let journal = self.journal();
+        let repo = match &self.cfg.dev {
+            Some(r) if journal => format!(", developing the repository {}", r.display()),
+            Some(r) => format!(", developing the repository {}", r.display()),
+            None => String::new(),
+        };
+        let present = match (&self.cfg.dev, journal) {
+            (Some(_), true) => "the person whose standing instructions are above, and Claude (an AI coding agent), whose lines say Claude",
+            (Some(_), false) => "the person whose standing instructions are above, and Claude (an AI coding agent), whose words are marked Claude",
+            (None, _) => "the person whose standing instructions are above",
+        };
+        let host_line = host.sentence();
+        let lines = [
+            format!("Now: {now}; each line from outside carries the time it arrived, read from the same clock."),
+            if host_line.is_empty() {
+                String::new()
+            } else {
+                format!("The computer: {host_line}.")
+            },
+            format!(
+                "The model: {model}, {gpu} of its {blocks} blocks on the GPU, {rest}; its context holds {} tokens.",
+                self.llm.n_ctx()
+            ),
+            format!("Its workspace: {ws}{repo}."),
+            format!("Present: {present}."),
+        ];
+        let body: Vec<&str> = lines
+            .iter()
+            .map(String::as_str)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if journal {
+            format!(
+                "\n\n=== where and when this mind is ===\n{}",
+                body.join("\n")
+            )
+        } else {
+            format!("\n\nWhere and when you are:\n{}", body.join("\n"))
         }
     }
 
@@ -997,19 +1061,6 @@ impl Engine {
         if self.cfg.task {
             return String::new();
         }
-        let model = Path::new(&self.llm.opts.model)
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        // phi-ggml.sh names the cards' backend to ggml (`avx512.md`).
-        let cards = std::env::var("GGML_BACKEND_PATH").is_ok_and(|p| p.contains("ggml_phi"));
-        let rest = if cards {
-            "the rest on the host and two Xeon Phi co-processor cards"
-        } else {
-            "the rest on the host"
-        };
-        let (gpu, blocks) = (self.llm.split.gpu_blocks, self.llm.split.n_blocks);
-        let ctx = (self.llm.n_ctx() + 500) / 1000;
         let ws = self.cfg.workspace.display();
         let journal = self.journal();
         let (it, its) = if journal {
@@ -1035,11 +1086,11 @@ impl Engine {
         };
         if journal {
             format!(
-                "\n\n=== what this mind is ===\nThis mind is a language model, {model}, running without pause on one computer: {gpu} of its {blocks} blocks on a GPU, {rest}. Its memory is its context, about {ctx} thousand tokens. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+                "\n\n=== what this mind is ===\nThis mind is the language model named above, running without pause where it says; its memory is its context. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         } else {
             format!(
-                "\n\nWhat you are: a language model, {model}, running without pause on one computer: {gpu} of your {blocks} blocks on a GPU, {rest}. Your memory is your context, about {ctx} thousand tokens. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+                "\n\nWhat you are: the language model named above, running without pause where it says; your memory is your context. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         }
     }
@@ -1141,7 +1192,7 @@ impl Engine {
             Frame::Journal => format!(
                 "{}{}\n\n=== the journal ===\n\n« [{}] [resuming from your own summary:]\n{}\n{}{}« the journal continues.\n\n{}",
                 self.cfg.system,
-                self.about(),
+                self.situation() + &self.about(),
                 clock::datetime(clock::now_us()),
                 summary,
                 self.checked_line(summary),
@@ -1151,7 +1202,7 @@ impl Engine {
             Frame::Chat => format!(
                 "<|im_start|>system\n{}{}<|im_end|>\n<|im_start|>user\n[{}] [You are resuming from your own summary:]\n{}\n{}{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
                 self.cfg.system,
-                self.about(),
+                self.situation() + &self.about(),
                 clock::datetime(clock::now_us()),
                 summary,
                 self.checked_line(summary),
@@ -1270,8 +1321,16 @@ impl Engine {
                 Frame::Chat => format!("\n[at {at}, beside your thoughts: {text}]\n"),
             };
             // Its weight on the main chain: the next-token distribution with
-            // it, against a copy's without it (`weigh`).
-            let without = self.logits_without()?;
+            // it, against a copy's with the same frame and nothing in it
+            // (a placebo): what the reflection says, not that a line came
+            // (the frame alone moved the next token, at first measured as
+            // 7 to 14 nats).
+            let empty = match self.cfg.frame {
+                Frame::Journal => format!("\n« [{at}] [beside the journal: ]\n"),
+                Frame::Chat => format!("\n[at {at}, beside your thoughts: ]\n"),
+            };
+            let placebo = self.tok(&empty, false)?;
+            let without = self.logits_without(&placebo)?;
             let tokens = self.tok(&line, false)?;
             let with = self.direct_logits(&tokens)?;
             self.say(line, Kind::Given);
@@ -1279,7 +1338,7 @@ impl Engine {
                 let (kl, a, b) = weigh(&with, &without);
                 let (a, b) = (self.llm.text(&[a as i32]), self.llm.text(&[b as i32]));
                 let said = format!(
-                    "weight on the journal: {kl:.3} nats; its likeliest next token {a:?}, without the reflection {b:?}"
+                    "weight on the journal: {kl:.3} nats; its likeliest next token {a:?}, with an empty one {b:?}"
                 );
                 self.note(format!("a reflection joined the journal: {said}"));
                 let _ = self.tx.send(Event::Delib(crate::client::Delib {
@@ -1693,18 +1752,20 @@ impl Engine {
         Ok(())
     }
 
-    /// The live sequence's next-token logits if nothing were put in now: a
-    /// copy decodes the pending token alone (`weigh`); none when no
-    /// sequence is free.
-    fn logits_without(&mut self) -> Result<Option<Vec<f32>>> {
+    /// The live sequence's next-token logits had `placebo` been put in now
+    /// instead: a copy decodes the pending token and it (`weigh`); none when
+    /// no sequence is free.
+    fn logits_without(&mut self, placebo: &[i32]) -> Result<Option<Vec<f32>>> {
         let Some(w) = self.free_seqs.pop() else {
             return Ok(None);
         };
         self.llm.seq_rm(w, -1, -1);
         self.llm.seq_cp(self.live, w, -1, -1);
+        let mut tokens = vec![self.next];
+        tokens.extend_from_slice(placebo);
         let rows = self.llm.decode(&[Lane {
             seq: w,
-            tokens: &[self.next],
+            tokens: &tokens,
             pos0: self.pos(),
             logits: true,
         }])?;

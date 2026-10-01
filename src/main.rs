@@ -23,6 +23,7 @@ mod reflect;
 mod rotlog;
 mod screen;
 mod serve;
+mod situation;
 mod split;
 mod sys;
 mod term;
