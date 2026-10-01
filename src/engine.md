@@ -186,7 +186,10 @@ those lines, 1-based and inclusive, `END` or `end` for the last line):
 `[unverified: ...]` and the stream is told; `[unnote: TEXT]` retracts. The persona gains a
 paragraph after the person's instructions and the frame's mechanics: the
 stream develops REPO (the program it runs in) as a peer with Claude.
-- `[read: PATH]` resolves PATH in REPO.
+- `[read: PATH]` resolves PATH in REPO, and in the workspace when only
+  the workspace holds it (`dev_path`): its own records (`reflect.log`,
+  `notes.md`, `preferences.md`) are read by their bare names. The persona
+  says so.
 - `[prefer: ...]` lines are its preferences: kept in `preferences.md`,
   announced as `prefers: ...`, and shown back with its notes. Claude
   follows them within the person's instructions.
@@ -228,7 +231,12 @@ sampler chooses a live token and before that token is decoded:
 2. If a trigger fires with nothing else beside the live sequence, two
    sequences are copied from the live one: the snapshot S (the state
    before the token, never decoded unless the token changes) and the
-   deliberation D.
+   deliberation D. A reading or a chase counts as beside it in the very
+   cycle that feeds it: each is back in place before the live token
+   advances (a check that started while one was out of place took the
+   last two sequences, and the reading's composition then found none:
+   "no free sequence for the composition" stopped the service on
+   2026-10-01).
 3. The token is placed and held as usual. A check holds that piece, and
    every piece after it, until the check ends.
 4. The next cycle decodes D's first question token alone. D shares the

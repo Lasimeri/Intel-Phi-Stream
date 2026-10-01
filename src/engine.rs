@@ -221,10 +221,10 @@ pub fn compose_task(base: &str) -> String {
 /// The journal's development mechanics (`--dev REPO`): the program it
 /// runs in, developed with Claude, by its own preferences within the
 /// person's instructions.
-const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time. A note that names code the repository does not hold is marked unverified and it is told what the repository holds; [unnote: TEXT] removes its notes containing TEXT. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
+const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program this mind runs in, its own stream, the reading of its own mind and the checks of its own words. Claude's words come in « lines that begin with Claude:, the person's in « lines with no name. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file in, and [read: PATH:START-END] only those lines: its memory holds about 32 thousand tokens, so it reads code a function at a time; a path the repository does not hold is looked for in its workspace, where its own records are kept: reflect.log (one line per check of its words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and it is told what the repository holds; [unnote: TEXT] removes its notes containing TEXT. The mind works on what it judges worth working on, by its own preferences, and states them as lines of the exact form [prefer: ...]: they are kept like notes, shown to it again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. In » lines it says what it proposes, concretely (the file, the function, the change and why), what it finds when it reads the code, where it disagrees, and what it wants to see; between them it keeps its own threads.";
 
 /// The chat frame's development mechanics.
-const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about 32 thousand tokens, so read code a function at a time; a path the repository does not hold is looked for in your workspace, where your own records are kept: reflect.log (one line per check of your words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
 
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
@@ -1327,9 +1327,11 @@ impl Engine {
             ])?;
             c.fed += n;
             side_tokens += n;
+            // Back in place before the live token advances: `consider` must
+            // see the chase, or a check starts on a sequence being replaced.
+            self.chase = Some(c);
             self.advance(rows[0])?;
             live_advanced = true;
-            self.chase = Some(c);
             self.finish_cycle(t0, side_tokens, live_advanced);
             return Ok(());
         }
@@ -1341,13 +1343,14 @@ impl Engine {
             let rpos = (r.prefix + r.fed) as i32;
             // The first chunk goes alone: the new sequence shares the live
             // one's recurrent state until it writes its own.
-            if r.fed == 0 {
+            let row = if r.fed == 0 {
                 self.llm.decode(&[Lane {
                     seq: r.seq,
                     tokens: &chunk,
                     pos0: rpos,
                     logits: false,
                 }])?;
+                None
             } else {
                 let rows = self.llm.decode(&[
                     Lane {
@@ -1363,15 +1366,23 @@ impl Engine {
                         logits: false,
                     },
                 ])?;
-                self.advance(rows[0])?;
-                live_advanced = true;
-            }
+                Some(rows[0])
+            };
             r.fed += n;
             side_tokens += n;
+            // The reading back in place (or its composition begun) before
+            // the live token advances: `consider` must see it. A check that
+            // started while the reading was out of `self` took the last two
+            // sequences, and the composition found none (the service
+            // stopped on "no free sequence for the composition").
             if r.fed == r.tokens.len() {
                 self.finish_reading(r)?;
             } else {
                 self.reading = Some(r);
+            }
+            if let Some(row) = row {
+                self.advance(row)?;
+                live_advanced = true;
             }
             self.finish_cycle(t0, side_tokens, live_advanced);
             return Ok(());
@@ -1873,8 +1884,14 @@ impl Engine {
     /// it can ask for a range.
     fn read_request(&mut self, spec: &str) -> Result<()> {
         let (path, range) = read_range(spec);
-        // In development, paths are the repository's (`docs/dev.md`).
-        let p = resolve(path, self.cfg.dev.as_deref().unwrap_or(&self.cfg.workspace));
+        // In development, paths are the repository's (`docs/dev.md`); one
+        // the repository lacks is looked for in the workspace next, where
+        // its own records are (it asked for reflect.log and was told the
+        // repository's listing).
+        let p = match &self.cfg.dev {
+            Some(root) => dev_path(path, root, &self.cfg.workspace),
+            None => resolve(path, &self.cfg.workspace),
+        };
         // And they stay in it (closed by default): its reads are logged and
         // shown, so nothing outside the repository and its workspace (a key,
         // a private file) is brought in. `..` and symbolic links are resolved
@@ -2441,6 +2458,21 @@ fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
     (spec, None)
 }
 
+/// A path the stream wrote while developing: the repository's, or the
+/// workspace's when only the workspace holds it.
+fn dev_path(path: &str, repo: &Path, workspace: &Path) -> PathBuf {
+    let p = resolve(path, repo);
+    if p.exists() {
+        return p;
+    }
+    let w = resolve(path, workspace);
+    if w.exists() {
+        w
+    } else {
+        p
+    }
+}
+
 /// A path the mind wrote: `~` expanded, relative to the workspace.
 fn resolve(path: &str, workspace: &Path) -> PathBuf {
     let p = match path.strip_prefix("~/") {
@@ -2553,6 +2585,24 @@ mod tests {
             vec!["first".to_string(), "second".to_string()]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dev_reads_fall_back_to_the_workspace() {
+        let dir = std::env::temp_dir().join(format!("phi-stream-devpath-{}", std::process::id()));
+        let (repo, ws) = (dir.join("repo"), dir.join("ws"));
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(repo.join("src/a.rs"), "").unwrap();
+        fs::write(ws.join("reflect.log"), "").unwrap();
+        fs::write(ws.join("notes.md"), "").unwrap();
+        fs::write(repo.join("notes.md"), "").unwrap();
+        assert_eq!(dev_path("src/a.rs", &repo, &ws), repo.join("src/a.rs"));
+        assert_eq!(dev_path("reflect.log", &repo, &ws), ws.join("reflect.log"));
+        // The repository first when both hold it, and its path when neither.
+        assert_eq!(dev_path("notes.md", &repo, &ws), repo.join("notes.md"));
+        assert_eq!(dev_path("nope.c", &repo, &ws), repo.join("nope.c"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
