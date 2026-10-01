@@ -512,6 +512,9 @@ pub struct Episode {
     /// model was not answering the question).
     pub keep: f32,
     pub fmt: f32,
+    /// The comparison that decided it, in words (`keep 0.62 >= 0.45: kept`);
+    /// empty when no choice was read (abandoned).
+    pub rule: String,
     /// The three likeliest next tokens of the deliberation at `Decision:`,
     /// with their probabilities (where the mass `fmt` misses went).
     pub top: Vec<(String, f32)>,
@@ -559,6 +562,9 @@ pub fn line(e: &Episode) -> String {
     for (i, (t, p)) in e.top.iter().enumerate() {
         s.push_str(&format!(" top{n}={} top{n}p={p:.4}", field(t), n = i + 1));
     }
+    if !e.rule.is_empty() {
+        s.push_str(&format!(" rule={}", field(&e.rule)));
+    }
     s.push_str(&format!(
         " chosen={} to={} words={} answer={}",
         field(&e.chosen),
@@ -581,6 +587,7 @@ pub fn parse_line(s: &str) -> Option<Episode> {
         words: Vec::new(),
         keep: 0.0,
         fmt: 0.0,
+        rule: String::new(),
         top: Vec::new(),
         answer: String::new(),
         outcome: Outcome::Kept,
@@ -620,6 +627,7 @@ pub fn parse_line(s: &str) -> Option<Episode> {
                     .collect()
             }
             "answer" => e.answer = unfield(v),
+            "rule" => e.rule = unfield(v),
             k if k.starts_with("top") => {
                 let (n, prob) = match k[3..].strip_suffix('p') {
                     Some(n) => (n, true),
@@ -851,6 +859,7 @@ mod tests {
             words: vec!["usize".into(), "index".into()],
             keep: 0.1875,
             fmt: 0.9312,
+            rule: "keep 0.19 < 0.45: write".into(),
             top: vec![
                 (" write".into(), 0.7),
                 ("\n".into(), 0.05),

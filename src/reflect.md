@@ -125,7 +125,11 @@ answer as written, the
 outcome, what was placed instead, how long the check took, the live
 tokens placed meanwhile, and on a rewind the positions taken back
 (`back=A-B`: readings of those positions were shown and belong to text
-that never went out). Outcomes: `kept`, `changed`, `same` (wrote the
+that never went out), and `rule`: the comparison that decided it, in
+words (`keep 0.62 >= 0.45: kept`, `keep 0.31 < 0.45: write`, `fmt 0.18 <
+0.20: no answer`), so the record says which threshold was in force now
+that `keep-at` changes it live (proposed by the stream itself in the dev
+session, at the exact lines). Outcomes: `kept`, `changed`, `same` (wrote the
 token it was about to write), `unparsed`, `dry` (read-only: would have
 changed), `abandoned` (the stream paused or stopped first). One line
 each (`line`, `parse_line`; text escaped, spaces as `\s`):

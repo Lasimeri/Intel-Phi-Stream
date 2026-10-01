@@ -335,6 +335,9 @@ struct Check {
     unanswered: bool,
     /// The three likeliest tokens at `Decision:` and their probabilities.
     top: Vec<(i32, f32)>,
+    /// The comparison that decided the check, in words (the stream's own
+    /// proposal: which threshold, and why it ended as it did).
+    rule: String,
     /// The held index of the first piece at or after the token: nothing
     /// from it on goes out until the check ends.
     hold_from: u64,
@@ -1426,6 +1429,7 @@ impl Engine {
             newline_fed: false,
             unanswered: false,
             top: Vec::new(),
+            rule: String::new(),
             hold_from: self.released + self.held.len() as u64,
             saved: self.save(),
             t_us,
@@ -1590,11 +1594,14 @@ impl Engine {
             c.fmt = fmt;
             c.top = top;
             if fmt < min_fmt {
+                c.rule = format!("fmt {fmt:.2} < {min_fmt:.2}: no answer");
                 c.unanswered = true;
                 ended = true;
             } else if keep >= keep_at {
+                c.rule = format!("keep {keep:.2} >= {keep_at:.2}: kept");
                 ended = true;
             } else {
+                c.rule = format!("keep {keep:.2} < {keep_at:.2}: write");
                 c.writing = true;
                 c.lane_next = prefix;
             }
@@ -1710,6 +1717,7 @@ impl Engine {
             words: c.words,
             keep: c.keep,
             fmt: c.fmt,
+            rule: c.rule,
             top: c
                 .top
                 .iter()
