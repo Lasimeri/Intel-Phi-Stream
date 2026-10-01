@@ -1,0 +1,17 @@
+# parquet-jsonl: one parquet file to JSON lines, for the evaluation sets
+# that are distributed only as parquet (MultiPL-E). A helper of its own,
+# so the stream's binary does not carry a parquet reader.
+[package]
+name = "parquet-jsonl"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+parquet = { version = "59", default-features = false, features = ["snap", "zstd", "json"] }
+serde_json = "1"
+
+[profile.release]
+debug = 0

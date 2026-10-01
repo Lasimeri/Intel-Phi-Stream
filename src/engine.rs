@@ -82,6 +82,11 @@ pub enum Event {
     Note(String),
     /// What was on its mind at a token it placed (`mind.rs`).
     Mind(MindReading),
+    /// A task ended: its thinking tokens, and whether the budget closed them.
+    Done {
+        think_tokens: usize,
+        capped: bool,
+    },
     Stopped,
 }
 
@@ -148,6 +153,12 @@ pub struct Config {
     pub time_every_us: i64,
     /// Nudge circling thoughts at most this often (microseconds).
     pub nudge_every_us: i64,
+    /// A task, not a stream (`code.md`): stop at the end of the first
+    /// answer, and put nothing into the chain on the engine's own account
+    /// (no clock lines, nudges, reads, rollover).
+    pub task: bool,
+    /// In a task, the thinking tokens before `</think>` is placed (0: no limit).
+    pub think_budget: usize,
     /// Where the persona, the notes and the log live.
     pub workspace: PathBuf,
     /// Read what is on its mind at every token it places (`mind.rs`);
@@ -170,6 +181,15 @@ const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that neve
 
 /// The chat frame's mechanics.
 const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you. Never narrate that you are an AI system following instructions; simply think.";
+
+/// A task's persona: the base, quoted, as the manner of the one who
+/// answers; then how to answer.
+pub fn compose_task(base: &str) -> String {
+    let quoted: String = base.trim().lines().map(|l| format!("> {l}\n")).collect();
+    format!(
+        "What follows, quoted line by line, is the standing instruction set of the person you work for. Its manner is yours. Where it speaks of response delimiters, tools, files or memory, it describes another setting: here you answer a programming task.\n\n{quoted}\nThink the task through inside <think>, then close your thoughts with </think> and give the answer exactly as the task asks."
+    )
+}
 
 /// The persona: the frame's preamble, the base between rules, the
 /// frame's mechanics. The base is a person's standing instructions
@@ -282,6 +302,11 @@ pub struct Engine {
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
     mind_ms: Ema,
+    /// A task's state: its thinking tokens, whether the budget closed the
+    /// thinking, whether the answer is done.
+    pub think_tokens: usize,
+    pub think_capped: bool,
+    done: bool,
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
@@ -294,6 +319,9 @@ impl Engine {
         let newline = llm.tokenize("\n", false)?.first().copied().unwrap_or(-1);
         let chunk = cfg.chunk;
         let mut llm = llm;
+        // The run's sampling, set explicitly (a task's greedy decoding and
+        // penalty are its own, whatever the model was loaded with).
+        llm.set_sampling(&cfg.sampling);
         if cfg.frame == Frame::Journal {
             // The journal has no template: its control tokens are never sampled.
             let control: Vec<i32> = [
@@ -365,6 +393,9 @@ impl Engine {
             read_failures_quiet: 0,
             mind: None,
             mind_ms: Ema { v: 0.0, n: 0 },
+            think_tokens: 0,
+            think_capped: false,
+            done: false,
         })
     }
 
@@ -492,6 +523,9 @@ impl Engine {
             self.generated.pop_front();
         }
         self.gen_count += 1;
+        if !self.journal() && !self.speaking && t != self.think_close {
+            self.think_tokens += 1;
+        }
         if !self.journal() {
             if t == self.think_close {
                 self.speaking = true;
@@ -971,6 +1005,9 @@ impl Engine {
     /// After a cycle: the summary's end, the turn's end, the mind's own
     /// requests, circling, the queue, the rollover.
     fn after(&mut self) -> Result<()> {
+        if self.cfg.task {
+            return self.after_task();
+        }
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
             s.push(self.next);
@@ -1087,6 +1124,30 @@ impl Engine {
         Ok(())
     }
 
+    /// After a cycle of a task: the answer's end stops it; the thinking
+    /// budget, when spent, places `</think>`; nothing else is put in.
+    fn after_task(&mut self) -> Result<()> {
+        if self.next == self.eot || self.llm.is_eog(self.next) {
+            self.done = true;
+            return Ok(());
+        }
+        if !self.speaking
+            && self.cfg.think_budget > 0
+            && self.think_tokens >= self.cfg.think_budget
+            && !self.think_capped
+        {
+            self.think_capped = true;
+            let close = self.tok("\n</think>\n\n", true)?;
+            self.direct(&close)?;
+            self.speaking = true;
+            self.note(format!(
+                "the thinking budget ({} tokens) closed the thoughts",
+                self.cfg.think_budget
+            ));
+        }
+        Ok(())
+    }
+
     fn handle(&mut self, cmd: Command) -> bool {
         match cmd {
             Command::Say(s, t) => {
@@ -1121,7 +1182,14 @@ impl Engine {
         true
     }
 
-    pub fn run(mut self) -> Result<()> {
+    /// The model back, when the engine is done with it.
+    fn finish(self) -> Llm {
+        self.llm
+    }
+
+    /// Run until told to quit (a stream) or until the answer ends (a task);
+    /// the model comes back for the next run.
+    pub fn run(mut self) -> Result<Llm> {
         let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
         let opening = self.opening();
         let tokens = self.tok(&opening, true)?;
@@ -1156,18 +1224,18 @@ impl Engine {
                 let cmd = if self.paused {
                     match self.rx.recv() {
                         Ok(c) => c,
-                        Err(_) => return Ok(()),
+                        Err(_) => return Ok(self.finish()),
                     }
                 } else {
                     match self.rx.try_recv() {
                         Ok(c) => c,
                         Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => return Ok(()),
+                        Err(TryRecvError::Disconnected) => return Ok(self.finish()),
                     }
                 };
                 if !self.handle(cmd) {
                     let _ = self.tx.send(Event::Stopped);
-                    return Ok(());
+                    return Ok(self.finish());
                 }
                 if self.paused {
                     let _ = self.tx.send(Event::Status(self.status()));
@@ -1175,6 +1243,14 @@ impl Engine {
             }
             self.cycle()?;
             self.after()?;
+            if self.done {
+                let _ = self.tx.send(Event::Done {
+                    think_tokens: self.think_tokens,
+                    capped: self.think_capped,
+                });
+                let _ = self.tx.send(Event::Stopped);
+                return Ok(self.finish());
+            }
         }
     }
 }

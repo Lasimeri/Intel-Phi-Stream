@@ -83,11 +83,11 @@ case "$sub" in
     attach)
         exec "$bin" tui
         ;;
-    serve|probe|gate|run|lens)
+    serve|probe|gate|run|lens|code)
         launch "$@"
         ;;
     "")
-        echo "usage: $0 start|stop|attach|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens ..." >&2
+        echo "usage: $0 start|stop|attach|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
         exit 2
         ;;
     *)

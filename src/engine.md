@@ -139,6 +139,14 @@ the socket); circling thoughts are nudged at most once per
 `--nudge-every` seconds (60). Intervals are taken on the monotonic
 clock.
 
+**A task** (`Config::task`, `code.md`): the same engine stopped at the end
+of its first answer (`Event::Done` with its thinking tokens, then
+`Stopped`), with nothing put into the chain on the engine's account (no
+clock lines, nudges, reads, rollover), and a thinking budget after which
+`</think>` is placed; `run` hands the model back, so one load serves a
+whole set of tasks. The run's sampling is set explicitly when the engine
+starts.
+
 **The mind** (`--mind`, `mind.md`): after every decode that asked for a
 token, the residual of that token at the chosen blocks is read through
 the Jacobian lens, synchronously, and sent out as `Event::Mind`; the

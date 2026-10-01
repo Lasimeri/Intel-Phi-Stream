@@ -8,6 +8,7 @@ mod capture;
 mod check;
 mod client;
 mod clock;
+mod code;
 mod engine;
 mod eval;
 mod gate;
@@ -249,6 +250,12 @@ enum Cmd {
         #[arg(long, default_value_t = 32)]
         compare: usize,
     },
+    /// Whether the stream writes code that works: MultiPL-E's HumanEval in
+    /// Rust, compiled and tested in a sandbox (code.md; no service).
+    Code {
+        #[command(subcommand)]
+        cmd: CodeCmd,
+    },
     /// The lens: its checks and readouts (no service).
     Lens {
         #[command(subcommand)]
@@ -261,6 +268,49 @@ enum Cmd {
         /// Stop after this many live tokens (0: never).
         #[arg(long, default_value_t = 0)]
         max_tokens: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum CodeCmd {
+    /// The benchmark's own protocol: the raw prompt, greedy, stopped at the
+    /// dataset's stop sequence; the number comparable with published ones.
+    Anchor {
+        /// The tasks (scripts/fetch-code-eval.sh makes them).
+        #[arg(long, default_value = "~/models/code-eval/humaneval-rs.jsonl")]
+        tasks: String,
+        /// Only the first N tasks.
+        #[arg(long)]
+        first: Option<usize>,
+        /// Only these tasks, by name.
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// The most tokens a completion may run to.
+        #[arg(long, default_value_t = 512)]
+        max_tokens: usize,
+    },
+    /// The stream's own way: each task through the engine (chat frame,
+    /// thinking, greedy), the answer's code extracted by the stated rule.
+    Stream {
+        #[arg(long, default_value = "~/models/code-eval/humaneval-rs.jsonl")]
+        tasks: String,
+        #[arg(long)]
+        first: Option<usize>,
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// The persona's base: claude-md (~/CLAUDE.md, as the stream runs),
+        /// neutral (a built-in paragraph), or a file.
+        #[arg(long, default_value = "neutral")]
+        base: String,
+        /// Thinking tokens before </think> is placed (0: no limit).
+        #[arg(long, default_value_t = 2048)]
+        think_budget: usize,
+        /// The repetition penalty (1: off).
+        #[arg(long, default_value_t = 1.0)]
+        penalty: f32,
+        /// Read the mind at every token while answering.
+        #[arg(long)]
+        mind: bool,
     },
 }
 
@@ -436,6 +486,8 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         status_every: 8,
         time_every_us: (s.time_every * 1e6) as i64,
         nudge_every_us: (s.nudge_every * 1e6) as i64,
+        task: false,
+        think_budget: 0,
         workspace,
         mind: s.mind.then(|| mind::MindConfig {
             lens: expand_home(&s.lens),
@@ -515,7 +567,7 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     let worker = std::thread::spawn(move || engine.run());
     let r = serve::serve(erx, ctx, &socket, info);
     match worker.join() {
-        Ok(Ok(())) => r,
+        Ok(Ok(_)) => r,
         Ok(Err(e)) => Err(e),
         Err(_) => anyhow::bail!("the engine thread panicked"),
     }
@@ -594,11 +646,12 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st)),
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
+            Ok(Event::Done { .. }) => {}
             Ok(Event::Stopped) | Err(_) => break,
         }
     }
     match worker.join() {
-        Ok(r) => r,
+        Ok(r) => r.map(|_| ()),
         Err(_) => anyhow::bail!("the engine thread panicked"),
     }
 }
@@ -729,6 +782,93 @@ fn main() -> Result<()> {
             let b = format!("\n[they hand you a document:\n{}\n]\n", PARAGRAPH.repeat(6));
             gate::gate(&mut llm, &a, &b, thoughts, chunk, compare)
         }
+        Cmd::Code { cmd } => match cmd {
+            CodeCmd::Stream {
+                tasks,
+                first,
+                only,
+                base,
+                think_budget,
+                penalty,
+                mind,
+            } => {
+                let all = code::load_tasks(&expand_home(&tasks))?;
+                let sel = code::select(all, first, &only)?;
+                let (base_text, label) = match base.as_str() {
+                    "neutral" => (engine::DEFAULT_BASE.to_string(), "neutral".to_string()),
+                    "claude-md" => (
+                        std::fs::read_to_string(expand_home("~/CLAUDE.md"))
+                            .context("reading ~/CLAUDE.md")?,
+                        "claude-md".to_string(),
+                    ),
+                    f => (
+                        std::fs::read_to_string(expand_home(f))
+                            .with_context(|| format!("reading {f}"))?,
+                        f.to_string(),
+                    ),
+                };
+                let dir = code::run_dir(&format!("stream-{}", label.replace('/', "_")))?;
+                std::fs::write(
+                    dir.join("run.json"),
+                    serde_json::json!({"base": label, "think_budget": think_budget, "repeat_penalty": penalty, "mind": mind, "temp": 0, "frame": "chat", "tasks": sel.len(), "model": cli.model.model}).to_string(),
+                )?;
+                println!("{} tasks through the stream's engine: base {label}, thinking budget {think_budget}, penalty {penalty}, greedy{}; run directory {}", sel.len(), if mind { ", the mind read" } else { "" }, dir.display());
+                let mind_cfg = mind.then(|| mind::MindConfig {
+                    lens: expand_home("~/models/jlens/qwen3.6-35B-A3B/lens.jlens"),
+                    layers: vec![27, 29, 31],
+                    k: 6,
+                });
+                let llm = if mind {
+                    let lens = lens::Lens::open(&expand_home(
+                        "~/models/jlens/qwen3.6-35B-A3B/lens.jlens",
+                    ))?;
+                    let d = lens.header.d_model as u64;
+                    load_with(
+                        &cli.model,
+                        Some(capture::CaptureConfig {
+                            layers: vec![27, 29, 31],
+                            all_rows: false,
+                            keep_logits: false,
+                        }),
+                        READOUT_RESERVE + 3 * d * d * 2,
+                    )?
+                } else {
+                    load(&cli.model)?
+                };
+                let opts = code::StreamOpts {
+                    base: base_text,
+                    base_label: label,
+                    think_budget,
+                    repeat_penalty: penalty,
+                    mind: mind_cfg,
+                };
+                let (out, _llm) = code::stream(llm, &sel, &opts, &dir)?;
+                let s = code::summary(&out);
+                std::fs::write(
+                    dir.join("summary.txt"),
+                    format!("base {}\n{s}\n", opts.base_label),
+                )?;
+                println!("{s}");
+                Ok(())
+            }
+            CodeCmd::Anchor {
+                tasks,
+                first,
+                only,
+                max_tokens,
+            } => {
+                let all = code::load_tasks(&expand_home(&tasks))?;
+                let sel = code::select(all, first, &only)?;
+                let dir = code::run_dir("anchor")?;
+                println!("{} tasks, the benchmark's protocol (raw prompt, greedy, at most {max_tokens} tokens); run directory {}", sel.len(), dir.display());
+                let mut llm = load(&cli.model)?;
+                let out = code::anchor(&mut llm, &sel, max_tokens, &dir)?;
+                let s = code::summary(&out);
+                std::fs::write(dir.join("summary.txt"), format!("{s}\n"))?;
+                println!("{s}");
+                Ok(())
+            }
+        },
         Cmd::Lens { cmd } => match cmd {
             LensCmd::Convert { src, out } => {
                 let h = lens::convert(&expand_home(&src), &expand_home(&out))?;

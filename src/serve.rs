@@ -136,6 +136,7 @@ pub fn serve(
                         }
                         h.broadcast(&line);
                     }
+                    Event::Done { .. } => {}
                     Event::Stopped => {
                         h.broadcast("bye");
                         break;

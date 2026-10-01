@@ -355,6 +355,15 @@ impl Llm {
         }
     }
 
+    /// Tokens as text, control tokens left out (what a program sees).
+    pub fn text_plain(&self, tokens: &[i32]) -> String {
+        let mut bytes = Vec::new();
+        for &t in tokens {
+            self.piece(t, false, &mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// Tokens as text, control tokens shown.
     pub fn text(&self, tokens: &[i32]) -> String {
         let mut bytes = Vec::new();

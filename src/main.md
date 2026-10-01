@@ -22,6 +22,10 @@ itself, `src/serve.md`), `probe` (`src/probe.md`), `gate` (`src/gate.md`),
 logits, `src/check.md`), `lens convert` and `lens info` (the lens file,
 `src/lens.md`; `scripts/fetch-lens.sh` fetches and converts), `lens eval`
 (the lens against the logit lens on the reference's sets, `src/eval.md`),
+`code anchor` and `code stream` (whether the model, and the stream,
+write working code: MultiPL-E's HumanEval in Rust, compiled and tested
+in a sandbox, `src/code.md`; `scripts/fetch-code-eval.sh` fetches the
+tasks),
 `run` (the stream on stdout, stdin lines said to it, `/feed FILE`,
 `/chunk N`, `/quit`; `--max-tokens` to stop; for scripted tests). The
 clients take `--socket PATH` (or `PHI_STREAM_SOCKET`; `src/client.md`).

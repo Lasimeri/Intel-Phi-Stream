@@ -102,6 +102,12 @@ gated steps, each usable and recorded:
   time of what it hears and of its silences; the engine's intervals are
   real time, not cycles
   ([`docs/results/2026-10-01-clock.md`](docs/results/2026-10-01-clock.md)).
+- **Writes working code**: by MultiPL-E's HumanEval in Rust (156 tasks,
+  compiled and tested in a sandbox), the model through the split passes
+  74.4 percent greedy by the benchmark's protocol
+  (`scripts/phi-stream.sh code anchor`), and the stream itself is
+  measured the same way (`code stream`)
+  ([`docs/results/2026-10-01-code.md`](docs/results/2026-10-01-code.md)).
 - Next: the reflection loop (the stream reasoning on what is on its mind
   at the token it is placing, beside the live token, within a commit
   horizon so shown text never changes), real time as the reference
@@ -159,6 +165,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `src/clock.rs` | the wall clock the stream is kept against, to the microsecond |
 | `src/torch.rs`, `src/lens.rs`, `src/eval.rs`, `src/mind.rs` | the reference's lens file read without Python; the `.jlens` format; the lens against the logit lens on the reference's sets; what is on its mind at every token |
 | `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
+| `src/code.rs`, `scripts/fetch-code-eval.sh`, `tools/parquet-jsonl` | whether it writes working code: MultiPL-E's HumanEval in Rust, fetched pinned, compiled and tested in a sandbox |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
 | `docs/results/` | measurements, with their commands |
 
