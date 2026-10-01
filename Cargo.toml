@@ -1,0 +1,27 @@
+# phi-stream: a thought stream over llama.cpp (read, never changed): one
+# model split over the GPU, the Xeon Phi cards and host memory, a live
+# sequence that never stops while what it is given is read beside it.
+[package]
+name = "phi-stream"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Lasimeri/Intel-Phi-Stream"
+rust-version = "1.85"
+description = "A continuous thought stream over llama.cpp: the GPU, the Xeon Phi cards and host memory together"
+
+[[bin]]
+name = "phi-stream"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.72"
+
+[profile.release]
+debug = 1
