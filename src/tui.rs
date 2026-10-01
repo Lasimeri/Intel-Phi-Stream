@@ -6,9 +6,12 @@
 //! rates and how full its context is. crossterm only, the family's
 //! palette. See tui.md.
 
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -17,11 +20,11 @@ use crossterm::event::{self, Event as TEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Color, ResetColor};
 use crossterm::{cursor, execute, queue, terminal};
 
-use crate::client::{escape, parse, Client, Msg};
+use crate::client::{escape, parse, unescape, Client, Msg};
 use crate::engine::{Kind, Mode, Status};
 use crate::mind::Reading;
 use crate::reflect::{Episode, Outcome};
-use crate::screen::{Screen, Style, Weight};
+use crate::screen::{columns, text_columns, Screen, Style, Weight};
 use std::collections::VecDeque;
 
 /// seaof.glass's palette, as Mechanical Jev's tui draws it.
@@ -101,10 +104,123 @@ struct View {
     mind_view: bool,
     /// The last checks of its tokens (`reflect.rs`), newest last.
     episodes: VecDeque<Episode>,
+    /// Whether the service answers, and since when it has not.
+    link: Link,
+    socket: String,
+    /// `/quit` was sent: its `bye` ends this terminal too.
+    quitting: bool,
+    /// `--follow`: the builds this terminal has reloaded onto.
+    follow: Option<u32>,
+}
+
+/// The service as this terminal sees it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Link {
+    Up,
+    /// Not answered since this terminal started.
+    Connecting,
+    /// Gone at this real time (microseconds): looked for every `RETRY`.
+    Gone(i64),
 }
 
 const KEEP_MINDS: usize = 400;
 const KEEP_EPISODES: usize = 64;
+/// How often a missing service is looked for.
+const RETRY: Duration = Duration::from_secs(3);
+/// How often `--follow` looks at the binary.
+const LOOK: Duration = Duration::from_millis(500);
+/// The view handed from a terminal to the build that replaces it.
+const STATE_VAR: &str = "PHI_STREAM_TUI_STATE";
+
+/// A connection: commands go out through `w`; the service's lines come
+/// from `rx`, read on a thread of their own, which ends with `Bye`.
+struct Conn {
+    w: UnixStream,
+    rx: mpsc::Receiver<Msg>,
+}
+
+fn connect(socket: &Path) -> Option<Conn> {
+    let mut c = Client::connect(socket).ok()?;
+    c.send("tail").ok()?;
+    let (reader, w) = c.split();
+    let (tx, rx) = mpsc::channel::<Msg>();
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if tx.send(parse(&line)).is_err() {
+                break;
+            }
+        }
+        tx.send(Msg::Bye).ok();
+    });
+    Some(Conn { w, rx })
+}
+
+/// A file's identity: a build replaces the binary with a new file at the
+/// same path (a new inode), so this differs from the running one's.
+fn identity(m: &fs::Metadata) -> (u64, u64, i64) {
+    (m.ino(), m.len(), m.mtime() * 1_000_000_000 + m.mtime_nsec())
+}
+
+/// `--follow`: the binary this terminal runs, watched for a new build.
+struct Build {
+    path: PathBuf,
+    running: (u64, u64, i64),
+    /// A new file seen at the last look; it is run when the next look
+    /// finds it unchanged (the build is done writing it).
+    seen: Option<(u64, u64, i64)>,
+    next_look: Instant,
+}
+
+impl Build {
+    fn new() -> Option<Self> {
+        // The path it was started from; "(deleted)" when a build has
+        // already replaced it.
+        let exe = fs::read_link("/proc/self/exe").ok()?;
+        let exe = exe.to_string_lossy();
+        let path = PathBuf::from(exe.strip_suffix(" (deleted)").unwrap_or(&exe));
+        let running = identity(&fs::metadata("/proc/self/exe").ok()?);
+        Some(Self {
+            path,
+            running,
+            seen: None,
+            next_look: Instant::now() + LOOK,
+        })
+    }
+
+    /// Whether a new build is there and finished.
+    fn ready(&mut self) -> bool {
+        if Instant::now() < self.next_look {
+            return false;
+        }
+        self.next_look = Instant::now() + LOOK;
+        match fs::metadata(&self.path).ok().map(|m| identity(&m)) {
+            Some(id) if id != self.running => {
+                let done = self.seen == Some(id);
+                self.seen = Some(id);
+                done
+            }
+            _ => {
+                self.seen = None;
+                false
+            }
+        }
+    }
+
+    /// The new build in this terminal's place, with the same arguments and
+    /// the view handed over. The alternate screen stays, so nothing
+    /// flashes; raw mode is left first, so the new process records the
+    /// terminal's own mode to restore when it ends. Returns only on failure.
+    fn reload(&self, v: &View) -> io::Error {
+        let _ = terminal::disable_raw_mode();
+        let e = std::process::Command::new(&self.path)
+            .args(std::env::args_os().skip(1))
+            .env(STATE_VAR, v.state())
+            .exec();
+        let _ = terminal::enable_raw_mode();
+        e
+    }
+}
 
 /// A token as shown in the mind's rows: newlines and tabs visible.
 fn shown(token: &str) -> String {
@@ -148,6 +264,44 @@ fn episode_short(e: &Episode) -> String {
 const KEEP_CHARS: usize = 400_000;
 
 impl View {
+    /// What a reload hands over (`STATE_VAR`): the view, the counts and
+    /// the line being typed, last and escaped, so it may hold anything.
+    fn state(&self) -> String {
+        format!(
+            "mind={} scroll={} heard={} up={} reloads={} input={}",
+            self.mind_view as u8,
+            self.scroll,
+            self.heard,
+            self.started.elapsed().as_secs(),
+            self.follow.unwrap_or(0),
+            escape(&self.input)
+        )
+    }
+
+    /// The state a reload handed over, back in place.
+    fn restore(&mut self, s: &str) {
+        let (fields, input) = s.split_once(" input=").unwrap_or((s, ""));
+        self.input = unescape(input);
+        for f in fields.split(' ') {
+            let Some((k, val)) = f.split_once('=') else {
+                continue;
+            };
+            let n: u64 = val.parse().unwrap_or(0);
+            match k {
+                "mind" => self.mind_view = n == 1,
+                "scroll" => self.scroll = n as usize,
+                "heard" => self.heard = n as u32,
+                "up" => {
+                    self.started = Instant::now()
+                        .checked_sub(Duration::from_secs(n))
+                        .unwrap_or(self.started)
+                }
+                "reloads" => self.follow = self.follow.map(|_| n as u32 + 1),
+                _ => {}
+            }
+        }
+    }
+
     fn push(&mut self, text: String, kind: Kind) {
         self.chars += text.chars().count();
         self.pieces.push(Piece { text, kind });
@@ -175,6 +329,8 @@ impl View {
         let mut rows: Vec<Vec<(String, Kind)>> = Vec::new();
         for line in lines {
             let mut row: Vec<(char, Kind)> = Vec::new();
+            // Its width in terminal columns (a CJK character takes two).
+            let mut cols = 0;
             // Words: a run of non-spaces with the spaces that follow it.
             let mut i = 0;
             while i < line.len() {
@@ -186,20 +342,27 @@ impl View {
                     j += 1;
                 }
                 let word = &line[i..j];
-                let w = word.iter().filter(|c| c.0 != ' ').count();
-                if row.len() + w > width && !row.is_empty() {
+                let w: usize = word
+                    .iter()
+                    .filter(|c| c.0 != ' ')
+                    .map(|c| columns(c.0))
+                    .sum();
+                if cols + w > width && !row.is_empty() {
                     rows.push(runs(&row));
                     row.clear();
+                    cols = 0;
                 }
                 for &c in word {
-                    if row.len() >= width {
+                    if cols + columns(c.0) > width {
                         rows.push(runs(&row));
                         row.clear();
+                        cols = 0;
                     }
                     if c.0 == ' ' && row.is_empty() {
                         continue;
                     }
                     row.push(c);
+                    cols += columns(c.0);
                 }
                 i = j;
             }
@@ -370,9 +533,24 @@ fn draw(
         s.line(h - 4, &strip, plain(theme::GIVEN, theme::SURFACE));
     }
     // The strip: what it is doing, and the rates.
-    let (mode, rates) = match &v.status {
-        Some(s) => mode_line(s, tick),
-        None => ("· waking".to_string(), String::new()),
+    let (mode, rates) = match (v.link, &v.status) {
+        (Link::Up, Some(s)) => mode_line(s, tick),
+        (Link::Up, None) => (
+            "· waking (the model may be loading)".to_string(),
+            String::new(),
+        ),
+        (Link::Connecting, _) => (
+            "CONNECTING".to_string(),
+            format!("no answer yet at {}; looking every 3 s", v.socket),
+        ),
+        (Link::Gone(t), _) => (
+            "NO SERVICE".to_string(),
+            format!(
+                "gone at {}; looking every 3 s at {} (a restart reconnects here)",
+                crate::clock::hms(t),
+                v.socket
+            ),
+        ),
     };
     let note = v.notes.last().cloned().unwrap_or_default();
     s.line(
@@ -387,26 +565,36 @@ fn draw(
         plain(theme::BRIGHT, theme::BG),
     );
     // Hints and the last note.
+    let follows = match v.follow {
+        Some(0) => " follows the build ·".to_string(),
+        Some(n) => format!(" follows the build ({n} reloaded) ·"),
+        None => String::new(),
+    };
     let hints = format!(
-        " Enter speaks · /feed FILE · /persona FILE · /mind · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        "{follows} Enter speaks · /feed FILE · /persona FILE · /mind · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
     s.line(h - 1, &hints, plain(theme::ACCENT_DIM, theme::BG));
     queue!(out, cursor::Hide)?;
     s.diff(front.as_ref(), out)?;
-    let cx = (3 + v.input.chars().count()).min(w - 1) as u16;
+    let cx = (3 + text_columns(&v.input)).min(w - 1) as u16;
     queue!(out, cursor::MoveTo(cx, (h - 2) as u16), cursor::Show)?;
     out.flush()?;
     *front = Some(s);
     Ok(())
 }
 
-/// A typed line: a command, or something said; sent to the service.
-fn submit(line: &str, w: &mut UnixStream, v: &mut View) {
+/// A typed line: a command, or something said; sent to the service
+/// (none: nothing is sent, and it says so).
+fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
     let line = line.trim();
     if line.is_empty() {
         return;
     }
+    let Some(w) = w else {
+        v.notes.push(format!("no service: {line:?} was not sent"));
+        return;
+    };
     let msg = if let Some(p) = line.strip_prefix("/feed ") {
         v.notes.push(format!("handing over {}", p.trim()));
         format!("feed {}", crate::expand_home(p.trim()))
@@ -430,6 +618,7 @@ fn submit(line: &str, w: &mut UnixStream, v: &mut View) {
         });
         return;
     } else if line == "/quit" {
+        v.quitting = true;
         "quit".to_string()
     } else if line.starts_with('/') {
         v.notes.push(format!("unknown command {line}"));
@@ -443,22 +632,27 @@ fn submit(line: &str, w: &mut UnixStream, v: &mut View) {
     }
 }
 
-/// The terminal, as a client of the service at `socket`.
-pub fn run(socket: &Path) -> Result<()> {
-    let mut c = Client::connect(socket)?;
-    c.send("tail")?;
-    let (reader, mut w) = c.split();
-    // The service's lines, read on a thread of their own.
-    let (tx, rx) = mpsc::channel::<Msg>();
-    std::thread::spawn(move || {
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if tx.send(parse(&line)).is_err() {
-                break;
-            }
-        }
-        tx.send(Msg::Bye).ok();
-    });
+/// The terminal, as a client of the service at `socket`. It outlives the
+/// service: when it goes (a restart, a crash) the terminal says so and
+/// reconnects when it is back. With `follow`, it also reloads onto each
+/// new build of its own binary, keeping its view and the line being typed.
+pub fn run(socket: &Path, follow: bool) -> Result<()> {
+    let mut conn = connect(socket);
+    let mut build = if follow { Build::new() } else { None };
+    // Started by a reload: the terminal is already in the alternate screen.
+    let handed = std::env::var(STATE_VAR).ok();
+    // A panic leaves the terminal as it found it, so its message is legible.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(
+            io::stdout(),
+            ResetColor,
+            cursor::Show,
+            terminal::LeaveAlternateScreen
+        );
+        let _ = terminal::disable_raw_mode();
+        default_hook(info);
+    }));
     let mut placement = Placement {
         model: String::new(),
         gpu_blocks: 0,
@@ -471,11 +665,13 @@ pub fn run(socket: &Path) -> Result<()> {
     };
     let mut out = io::stdout();
     terminal::enable_raw_mode()?;
-    execute!(
-        out,
-        terminal::EnterAlternateScreen,
-        terminal::Clear(terminal::ClearType::All)
-    )?;
+    if handed.is_none() {
+        execute!(
+            out,
+            terminal::EnterAlternateScreen,
+            terminal::Clear(terminal::ClearType::All)
+        )?;
+    }
     let result = (|| -> Result<()> {
         let mut v = View {
             pieces: Vec::new(),
@@ -490,16 +686,66 @@ pub fn run(socket: &Path) -> Result<()> {
             minds: VecDeque::new(),
             mind_view: false,
             episodes: VecDeque::new(),
+            link: if conn.is_some() {
+                Link::Up
+            } else {
+                Link::Connecting
+            },
+            socket: socket.display().to_string(),
+            quitting: false,
+            follow: build.as_ref().map(|_| 0),
         };
+        if let Some(s) = &handed {
+            v.restore(s);
+            v.notes.push(format!(
+                "reloaded onto the new build at {}",
+                crate::clock::hms(crate::clock::now_us())
+            ));
+        } else if follow && build.is_none() {
+            v.notes
+                .push("--follow: its own binary could not be found; not following".into());
+        }
+        let mut last_try = Instant::now();
         let mut tick = 0u64;
         let mut dirty = true;
         // The frame the terminal shows (none: unknown, so all of it is drawn).
         let mut front: Option<Screen> = None;
         let mut last_draw = Instant::now();
         loop {
+            // No service: looked for every RETRY; when it answers, its tail
+            // replays the stream's last characters, so the old ones go.
+            if conn.is_none() && last_try.elapsed() >= RETRY {
+                last_try = Instant::now();
+                if let Some(c) = connect(socket) {
+                    conn = Some(c);
+                    if let Link::Gone(_) = v.link {
+                        v.notes.push(format!(
+                            "the service is back at {}",
+                            crate::clock::hms(crate::clock::now_us())
+                        ));
+                    }
+                    v.link = Link::Up;
+                    v.status = None;
+                    v.pieces.clear();
+                    v.chars = 0;
+                    dirty = true;
+                }
+            }
+            // A new build of this terminal: run it in this one's place.
+            if let Some(b) = build.as_mut() {
+                if b.ready() {
+                    let e = b.reload(&v);
+                    // Only on failure: the next finished build is tried.
+                    b.seen = None;
+                    v.notes.push(format!("the new build did not start: {e}"));
+                    front = None;
+                    dirty = true;
+                }
+            }
             // The service's messages, all that are waiting.
-            loop {
-                match rx.try_recv() {
+            let mut gone = false;
+            while let Some(c) = &conn {
+                match c.rx.try_recv() {
                     Ok(Msg::Info(i)) => {
                         placement = Placement {
                             model: i.model,
@@ -549,10 +795,24 @@ pub fn run(socket: &Path) -> Result<()> {
                         v.notes.push(format!("the service said: {l}"));
                         dirty = true;
                     }
-                    Ok(Msg::Bye) => return Ok(()),
+                    Ok(Msg::Bye) | Err(TryRecvError::Disconnected) => {
+                        gone = true;
+                        break;
+                    }
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => return Ok(()),
                 }
+            }
+            if gone {
+                conn = None;
+                // Stopped by /quit from here: this terminal ends with it.
+                if v.quitting {
+                    return Ok(());
+                }
+                v.link = Link::Gone(crate::clock::now_us());
+                v.notes
+                    .push("the service went away; looking for it every 3 s".into());
+                last_try = Instant::now();
+                dirty = true;
             }
             if event::poll(Duration::from_millis(40))? {
                 match event::read()? {
@@ -570,7 +830,11 @@ pub fn run(socket: &Path) -> Result<()> {
                             }
                             KeyCode::Enter => {
                                 let line = std::mem::take(&mut v.input);
-                                submit(&line, &mut w, &mut v);
+                                // /quit with no service: nothing to stop; it leaves.
+                                if conn.is_none() && line.trim() == "/quit" {
+                                    return Ok(());
+                                }
+                                submit(&line, conn.as_mut().map(|c| &mut c.w), &mut v);
                                 v.scroll = 0;
                             }
                             KeyCode::Esc => v.input.clear(),

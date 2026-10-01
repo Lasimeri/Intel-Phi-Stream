@@ -48,3 +48,41 @@ the frame the terminal shows are written (`screen.md`, after BF++'s
 double-buffered TUI runtime). A frame is drawn when something changed or
 every quarter second for the pulse, and in full after a resize. The service's lines are read on a
 thread and handed to the drawing loop through a channel.
+
+## It outlives the service, and follows the build
+
+- **No service is a state, not an exit.** When the service goes (a
+  restart, a crash) the strip says `NO SERVICE`, when it went and the
+  socket, and the terminal looks for it every 3 s; when it answers, the
+  stream's tail replays and the title and strip fill again. Started with
+  no service yet, it says `CONNECTING`; while the model loads, `waking`.
+  `/quit` stops the service and ends the terminal with it; with no
+  service, `/quit` just leaves. A line typed with no service is not sent,
+  and the last line says so.
+- **`--follow`** (`scripts/phi-stream.sh attach --follow`, what the
+  desktop window runs): the terminal looks at its own binary every
+  500 ms. A build replaces the file at that path with a new one (a new
+  inode); seen unchanged at two looks in a row (the build is done
+  writing it), the new build is `exec`ed in this process's place, with
+  the same arguments and the view handed over in `PHI_STREAM_TUI_STATE`:
+  the view (`/mind`), the scroll, the counts, the time up, and the line
+  being typed. The alternate screen stays, so nothing flashes; raw mode
+  is left just before, so the new process records the terminal's own
+  mode to restore when it ends. The last line counts the reloads. If
+  the exec fails, the old build goes on and the next finished build is
+  tried. The service is not touched: a client-only change reaches the
+  terminal within a second of the build, while the stream runs on.
+- **Version skew.** A reloaded terminal is often newer than the running
+  service, which restarts only at a natural break (its restart costs the
+  stream its context). So every feature of the terminal degrades against
+  an older service: a command it does not know comes back as one `err`
+  line on the last line, and a line it does not send yet is shown as not
+  offered by this service, never as an empty or invented value.
+- **A panic** restores the terminal before its message is printed; the
+  launcher's `--follow` loop then resets the terminal (a crash by signal
+  leaves raw mode and the alternate screen), says why it stopped, and
+  runs the next build when there is one.
+- Verified on the live service (2026-10-01) with one client in a tmux
+  pane: a half-typed line survived a rebuild (same pid, the new inode
+  running, `(1 reloaded)`); after the client was aborted by pid the loop
+  reset the pane, waited, and ran the next build.

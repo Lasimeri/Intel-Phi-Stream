@@ -242,8 +242,13 @@ enum Cmd {
         #[command(flatten)]
         stream: StreamArgs,
     },
-    /// The terminal, talking to the service.
-    Tui,
+    /// The terminal, talking to the service (it waits for one, and reconnects after a restart).
+    Tui {
+        /// Reload onto each new build of this binary, keeping the view and the line being typed
+        /// (`scripts/phi-stream.sh attach --follow`; developing the terminal while using it).
+        #[arg(long)]
+        follow: bool,
+    },
     /// Say something to the stream.
     Say {
         /// Who is speaking (the stream hears the name; default: no name).
@@ -964,7 +969,7 @@ fn main() -> Result<()> {
     let socket = cli.socket.clone().unwrap_or_else(default_socket);
     match cli.cmd {
         Cmd::Serve { stream } => serve_cmd(&cli.model, &stream, socket),
-        Cmd::Tui => tui::run(&socket),
+        Cmd::Tui { follow } => tui::run(&socket, follow),
         Cmd::Say { who, text } => ask(&socket, &say_line(who.as_deref(), &text.join(" "))),
         Cmd::Ask {
             who,

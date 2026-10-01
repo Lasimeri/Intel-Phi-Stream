@@ -28,12 +28,25 @@ changed with it (the status line's rates, the clock in the title). It
 never writes the whole screen, which the terminal did before at every
 token: about 2 KB a frame at 80x24, more on a large terminal.
 
-Columns are counted in characters, as everywhere in the terminal; a
-character two columns wide would shift its row.
+Columns are terminal columns (`columns`, from `unicode-width`): a wide
+character (CJK, which the stream's tokens hold) takes two cells, itself
+and a second-column cell that is never written (the terminal draws the
+character over both); a zero-width character (a combining mark) takes
+none; a wide character that does not fit the last column is a space. A
+wide character half overwritten leaves a space in its other half, and
+one whose second column changed is written again whole. Counting
+characters, as before, put a mind strip of CJK tokens past the right
+edge onto the next row (seen on the live service, 2026-10-01). The
+terminal wraps the stream by the same widths.
 
 Tests:
 - an unchanged frame writes nothing;
 - one changed word writes under 80 bytes where the whole screen is over
   1900;
 - another size, or no last frame, redraws everything;
-- text is clipped at the edge and newlines are blanked.
+- text is clipped at the edge and newlines are blanked;
+- wide characters take two columns and stay in their row, and the bytes
+  written hold no second-column cell;
+- a wide character that does not fit is a space; half overwritten ones
+  leave spaces; a changed second column rewrites its character;
+- a combining mark takes no column.
