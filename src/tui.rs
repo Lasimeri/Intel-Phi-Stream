@@ -658,26 +658,26 @@ fn layout(w: usize, h: usize) -> Option<Layout> {
     Some(if w >= WIDE {
         let left = w - SIDE_W;
         let assess_h = 12.min(body / 2);
-        // Both reasoning chains and the output at once: the view, the
-        // deliberation under it, what it says under that.
-        let delib_h = (body * 3 / 10).max(6);
+        // Both reasoning chains side by side (the view on the left, the
+        // deliberation on the right), what it says aloud under both.
         let out_h = (body / 4).max(5);
-        let main_h = body - delib_h - out_h;
+        let chains_h = body - out_h;
+        let half = left / 2;
         Layout {
             main: Rect {
                 top: 1,
                 left: 0,
-                h: main_h,
-                w: left,
+                h: chains_h,
+                w: half,
             },
             delib: Some(Rect {
-                top: 1 + main_h,
-                left: 0,
-                h: delib_h,
-                w: left,
+                top: 1,
+                left: half,
+                h: chains_h,
+                w: left - half,
             }),
             output: Some(Rect {
-                top: 1 + main_h + delib_h,
+                top: 1 + chains_h,
                 left: 0,
                 h: out_h,
                 w: left,

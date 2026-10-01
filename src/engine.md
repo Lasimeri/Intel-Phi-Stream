@@ -374,3 +374,22 @@ a second chain (`Chain`), which reflects on each line the journal ends.
   in DELIBERATION; the service replays the last 400 to a new tail.
 - `chain on|off` on the socket turns it on or off live, so its cost is
   measured interleaved on one service (`docs/results`).
+
+## What each thing weighs on the main chain
+
+- **A reflection** that joins the journal is weighed when it does: a copy
+  of the live sequence decodes the pending token alone (the journal
+  without the reflection), the live one decodes the reflection, and the
+  divergence of the first next-token distribution from the second is its
+  weight, in nats (`weigh`), with the likeliest next token of each. It is
+  sent as a note (LOG) and as the end of its `delib` lines (DELIBERATION).
+  One single-token decode per reflection.
+- **A check's choice** (`reflect.md`): the deliberation's likeliest token
+  at `Decision:` was a quote, 37 to 56 percent, on the live service at
+  200K (it answers `"keep"`), and keep and write together under a fifth:
+  30 percent of the checks went unread. The format token it wants first,
+  a newline or a quote (whichever is likelier, when it outweighs keep and
+  write), is fed once, and the choice read after it.
+- A reflection repeats a recent one when their words overlap (Jaccard) by
+  half or more: rewordings of one reflection were inserted again and again
+  under the earlier test of their first 60 characters.

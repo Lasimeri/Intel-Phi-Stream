@@ -146,10 +146,11 @@ scroll, counts and the typed line over, and reads an older build's
 
 ## Both reasoning chains and the output
 
-From 120 columns the left side holds three blocks: the view (REASONING,
-the live chain as the model has it, unless `Tab` chose another), then
-DELIBERATION (three tenths of the height, 6 rows at least), then OUTPUT
-(a quarter, 5 rows at least): what it says aloud, each utterance under
+From 120 columns the left side holds the two reasoning chains side by
+side, the view (REASONING, the live chain as the model has it, unless
+`Tab` chose another) on the left and DELIBERATION (the second chain) on
+the right, and OUTPUT under both (a quarter of the height, 5 rows at
+least): what it says aloud, each utterance under
 the real time of its first piece, speech only. Under 120 columns these
 are views (`Tab`: REASONING, DELIBERATION, OUTPUT, MIND, LOG).
 It shows what the stream is working toward (`objective` lines: the text

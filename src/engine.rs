@@ -364,6 +364,8 @@ const CHAIN_PRIMER: &str = "On reflection,";
 /// reflections a new one must not repeat.
 const CHAIN_TEMP: f32 = 0.8;
 const CHAIN_RECENT: usize = 8;
+/// Word overlap (Jaccard) at which a reflection repeats a recent one.
+const CHAIN_SAME: f64 = 0.5;
 
 struct Check {
     why: Why,
@@ -476,6 +478,9 @@ pub struct Engine {
     think_close: i32,
     eot: i32,
     newline: i32,
+    /// The quote marks that are one token (`"`, ` "`): a choice is read
+    /// after one when the deliberation wants it first.
+    quotes: Vec<i32>,
     log: RotLog,
     /// Each piece of the stream with its microseconds (`chain.log`).
     chain: RotLog,
@@ -520,7 +525,7 @@ pub struct Engine {
     /// The second chain's random state, and its last reflections (their
     /// openings, lowercased), which a new one must not repeat.
     chain_rng: u64,
-    recent_reflections: VecDeque<String>,
+    recent_reflections: VecDeque<Vec<String>>,
     read_failures_quiet: u32,
     mind: Option<Mind>,
     /// The readout's time per token, milliseconds, averaged.
@@ -725,6 +730,13 @@ impl Engine {
             .reflect
             .as_ref()
             .map(|_| RotLog::open(cfg.workspace.join("reflect.log")));
+        let quotes: Vec<i32> = ["\"", " \""]
+            .iter()
+            .filter_map(|q| match llm.tokenize(q, false).ok()?.as_slice() {
+                [t] => Some(*t),
+                _ => None,
+            })
+            .collect();
         let chain_on = cfg.second_chain && !cfg.task;
         Ok(Self {
             llm,
@@ -764,6 +776,7 @@ impl Engine {
             think_close,
             eot,
             newline,
+            quotes,
             log,
             chain,
             last_outside_mono: clock::mono_us(),
@@ -1256,7 +1269,26 @@ impl Engine {
                 Frame::Journal => format!("\n« [{at}] [beside the journal: {text}]\n"),
                 Frame::Chat => format!("\n[at {at}, beside your thoughts: {text}]\n"),
             };
-            self.put(line)?;
+            // Its weight on the main chain: the next-token distribution with
+            // it, against a copy's without it (`weigh`).
+            let without = self.logits_without()?;
+            let tokens = self.tok(&line, false)?;
+            let with = self.direct_logits(&tokens)?;
+            self.say(line, Kind::Given);
+            if let Some(without) = without {
+                let (kl, a, b) = weigh(&with, &without);
+                let (a, b) = (self.llm.text(&[a as i32]), self.llm.text(&[b as i32]));
+                let said = format!(
+                    "weight on the journal: {kl:.3} nats; its likeliest next token {a:?}, without the reflection {b:?}"
+                );
+                self.note(format!("a reflection joined the journal: {said}"));
+                let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                    kind: crate::client::DelibKind::End,
+                    t_us: clock::now_us(),
+                    pos: self.history.len() as i32,
+                    text: said,
+                }));
+            }
         }
         let mono = clock::mono_us();
         let words = std::mem::take(&mut self.line_words);
@@ -1365,8 +1397,11 @@ impl Engine {
         let echo = said.is_empty()
             || said.contains("beside the journal")
             || said.contains("on its mind in the line");
-        let opening: String = said.to_lowercase().chars().take(60).collect();
-        let repeat = self.recent_reflections.iter().any(|r| *r == opening);
+        let opening = word_set(&said);
+        let repeat = self
+            .recent_reflections
+            .iter()
+            .any(|r| jaccard(r, &opening) >= CHAIN_SAME);
         let outcome = if keep && !echo && repeat {
             "dropped: it repeats a recent reflection"
         } else if keep && !echo {
@@ -1656,6 +1691,57 @@ impl Engine {
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         self.next = self.llm.sample(row);
         Ok(())
+    }
+
+    /// The live sequence's next-token logits if nothing were put in now: a
+    /// copy decodes the pending token alone (`weigh`); none when no
+    /// sequence is free.
+    fn logits_without(&mut self) -> Result<Option<Vec<f32>>> {
+        let Some(w) = self.free_seqs.pop() else {
+            return Ok(None);
+        };
+        self.llm.seq_rm(w, -1, -1);
+        self.llm.seq_cp(self.live, w, -1, -1);
+        let rows = self.llm.decode(&[Lane {
+            seq: w,
+            tokens: &[self.next],
+            pos0: self.pos(),
+            logits: true,
+        }])?;
+        // Not the live row: nobody reads the capture.
+        if let Some(cap) = self.llm.capture() {
+            cap.take();
+        }
+        let out = self.llm.logits(rows[0])?.to_vec();
+        self.llm.seq_rm(w, -1, -1);
+        self.free_seqs.push(w);
+        Ok(Some(out))
+    }
+
+    /// `direct`, and the live sequence's next-token logits after it.
+    fn direct_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>> {
+        let mut all = vec![self.next];
+        all.extend_from_slice(tokens);
+        let pos0 = self.pos();
+        let mut row = 0;
+        let cap = self.llm.batch_cap();
+        for (i, c) in all.chunks(cap).enumerate() {
+            let last = (i + 1) * cap >= all.len();
+            let rows = self.llm.decode(&[Lane {
+                seq: self.live,
+                tokens: c,
+                pos0: pos0 + (i * cap) as i32,
+                logits: last,
+            }])?;
+            if let Some(&r) = rows.first() {
+                row = r;
+            }
+        }
+        self.history.extend_from_slice(&all);
+        self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
+        let out = self.llm.logits(row)?.to_vec();
+        self.next = self.llm.sample(row);
+        Ok(out)
     }
 
     /// Something from outside, framed, decoded straight in.
@@ -2203,6 +2289,7 @@ impl Engine {
         // token (greedy, outside the live sampler's history).
         let mut choice = None;
         let mut defer = false;
+        let mut defer_tok = self.newline;
         let mut d_tok = None;
         if ask {
             let row = *rows.last().unwrap();
@@ -2232,8 +2319,25 @@ impl Engine {
                     .into_iter()
                     .map(|(t, x)| (t, ((x as f64 - m).exp() / z) as f32))
                     .collect::<Vec<_>>();
-                if pn > pk + pw && !newline_fed {
+                // A quote before the word (it answers `"keep"`): on the live
+                // service at 200K the likeliest token at `Decision:` was a
+                // quote, 37 to 56 percent, and keep and write together under
+                // a fifth: 30 percent of the checks went unread. The format
+                // token it wants (a newline or a quote) is fed once, and the
+                // choice read after it.
+                let pq = mass(&self.quotes);
+                let quote = self
+                    .quotes
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| l[*a as usize].total_cmp(&l[*b as usize]));
+                let (pf, ft) = match quote {
+                    Some(q) if pq > pn => (pq, q),
+                    _ => (pn, self.newline),
+                };
+                if pf > pk + pw && !newline_fed {
                     defer = true;
+                    defer_tok = ft;
                 } else {
                     choice = Some(((pk / (pk + pw).max(1e-30)) as f32, (pk + pw) as f32, top));
                 }
@@ -2269,10 +2373,11 @@ impl Engine {
         c.d_len += lane.len();
         let mut ended = false;
         if defer {
-            // The newline it wanted, then the choice on the next line.
+            // The format token it wanted (a newline or a quote), then the
+            // choice after it.
             c.newline_fed = true;
             c.choosing = true;
-            c.lane_next = vec![self.newline];
+            c.lane_next = vec![defer_tok];
         }
         if let Some((keep, fmt, top)) = choice {
             c.choosing = false;
@@ -2992,6 +3097,57 @@ impl Engine {
     }
 }
 
+/// A text's words, lowercased, sorted, once each.
+fn word_set(s: &str) -> Vec<String> {
+    let mut w: Vec<String> = s
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    w.sort();
+    w.dedup();
+    w
+}
+
+/// The overlap of two word sets: shared over all.
+fn jaccard(a: &[String], b: &[String]) -> f64 {
+    let shared = a.iter().filter(|w| b.binary_search(w).is_ok()).count();
+    let all = a.len() + b.len() - shared;
+    if all == 0 {
+        1.0
+    } else {
+        shared as f64 / all as f64
+    }
+}
+
+/// What something put into the live chain weighs on it: the divergence
+/// (nats) of its next-token distribution with it (`with`) from the one
+/// without it (`without`), and the likeliest token of each.
+pub fn weigh(with: &[f32], without: &[f32]) -> (f64, usize, usize) {
+    let norm = |l: &[f32]| {
+        let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let z = l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>().ln() + m;
+        z
+    };
+    let (zp, zq) = (norm(with), norm(without));
+    let mut kl = 0.0;
+    for (&a, &b) in with.iter().zip(without) {
+        let lp = a as f64 - zp;
+        let lq = b as f64 - zq;
+        let p = lp.exp();
+        if p > 0.0 {
+            kl += p * (lp - lq);
+        }
+    }
+    let arg = |l: &[f32]| {
+        l.iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map_or(0, |e| e.0)
+    };
+    (kl.max(0.0), arg(with), arg(without))
+}
+
 /// The commits since the program last ran here (`last_run` in the
 /// workspace) as a line from the system, and the commit it runs now kept
 /// for the next start. Empty on a first start, when nothing changed, or
@@ -3274,6 +3430,26 @@ mod tests {
             vec!["first".to_string(), "second".to_string()]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn weights_and_overlaps() {
+        // The same distribution weighs nothing; a moved one weighs more.
+        let a = [0.0f32, 1.0, 2.0, 3.0];
+        let (kl, x, y) = weigh(&a, &a);
+        assert!(kl.abs() < 1e-12 && x == 3 && y == 3);
+        let b = [3.0f32, 2.0, 1.0, 0.0];
+        let (kl, x, y) = weigh(&a, &b);
+        assert!(kl > 1.0 && x == 3 && y == 0, "{kl}");
+        // Two rewordings of one reflection overlap past the bar; two
+        // different ones do not.
+        let r1 = word_set(
+            "the architecture document explicitly says the insertion point is check_cycle",
+        );
+        let r2 = word_set("the architecture says the insertion point is check_cycle");
+        let r3 = word_set("repeating myself comes from having no new input");
+        assert!(jaccard(&r1, &r2) >= CHAIN_SAME);
+        assert!(jaccard(&r1, &r3) < CHAIN_SAME);
     }
 
     #[test]
