@@ -8,13 +8,19 @@ tool calls, as its chat template (read from the GGUF's
   `# Tools`, the functions in a `<tools>` block, one JSON object each in the
   form the template's `tojson` gives (keys in order, `", "` and `": "`
   between them), then the template's own instructions for the call format.
-  Six functions: `run` (a command in the sandboxed terminal, `term.md`; it
+  Seven functions: `run` (a command in the sandboxed terminal, `term.md`; it
   starts in the repository, so no cd, and `/tmp` is kept between commands),
   `read` (a file whole or by lines, or a directory), `edit` (one exact
   replacement, `old` occurring once; for every change to an existing file:
   without it, it rewrote a whole file for each fix), `write` (a new file, or
-  one replaced entirely), `note` (its own memory, kept once), `tell_claude`
-  (a message to Claude, `re` naming the message of Claude's it answers).
+  one replaced entirely), `note` (its own memory, kept once), `wait` (rest
+  until something new comes: a message from Claude, a new commit, a new
+  objective, a quit, or the minutes it gave; nothing is decoded meanwhile
+  and its next turn opens with the rested turn's results and what woke it;
+  without it a finished objective was answered every turn with "go on, act
+  with a tool", and its thinking went round saying "Done", 70 percent of
+  its 8-grams repeated), `tell_claude` (a message to Claude, `re` naming
+  the message of Claude's it answers).
   In development the persona's text names these tools
   (`engine::agent_persona`), not the chat frame's bracketed lines
   (`[read: PATH]`, `[prefer: ...]`), which it still taught beside them. The persona follows,

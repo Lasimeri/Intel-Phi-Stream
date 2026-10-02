@@ -904,6 +904,7 @@ fn status_text(st: &engine::Status) -> String {
         Mode::CatchingUp { done, total } => format!("catching up {done}/{total}"),
         Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
         Mode::Paused => "paused".to_string(),
+        Mode::Resting => "resting".to_string(),
     };
     let checks = if st.checks > 0 || st.checking {
         format!(

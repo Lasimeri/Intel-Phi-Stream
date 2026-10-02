@@ -540,3 +540,18 @@ tokens a report (a note, and a line in DELIBERATION).
   mind's blocks: the share they hold in common, block by block
   (`experts_shared`), in `guide.log` and the report. Every expert of every
   thinking token, reasoned against the reflection's.
+
+## Rest (`wait`, 2026-10-02)
+
+A finished objective had no end in the agent frame: each turn without a
+call was answered "go on, act with a tool", the circling nudge said "move
+on", and the stream went round saying "Done" (its thinking's 8-grams
+repeated at 70 percent over five minutes). Its `wait` tool rests it
+(`Rest`): the turn's results are held, nothing is decoded, and the run
+loop looks every 200 ms (`rest_look`) for what wakes it: something waiting
+for it (a message, a line from the system, an objective), a new commit in
+the repository (`repo_head`, read from `.git` every 2 s), a quit (straight
+to the summary), or the minutes it gave (15 by default, 60 at most). Its
+next turn opens with the rested turn's results and what woke it. The
+status says `resting`. The continue line and the circling nudge name
+`wait` as the way to stop when the objective is met.

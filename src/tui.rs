@@ -559,6 +559,9 @@ fn mode_line(s: &Status, tick: u64) -> (String, String) {
         ),
         Mode::Summarizing { tokens } => format!("{pulse} gathering its thoughts ({tokens} tokens)"),
         Mode::Paused => "paused".to_string(),
+        Mode::Resting => {
+            "resting until something new comes (a message, a commit, an objective)".to_string()
+        }
     };
     let fill = bar(s.pos as usize, s.n_ctx as usize, 10);
     let rates = format!(

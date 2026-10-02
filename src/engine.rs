@@ -45,10 +45,20 @@ pub enum Kind {
 pub enum Mode {
     Thinking,
     Speaking,
-    Reading { done: usize, total: usize },
-    CatchingUp { done: usize, total: usize },
-    Summarizing { tokens: usize },
+    Reading {
+        done: usize,
+        total: usize,
+    },
+    CatchingUp {
+        done: usize,
+        total: usize,
+    },
+    Summarizing {
+        tokens: usize,
+    },
     Paused,
+    /// The agent frame at rest (`wait`) until something new comes.
+    Resting,
 }
 
 #[derive(Clone, Debug)]
@@ -261,7 +271,7 @@ const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that neve
 const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you, and [read: PATH:START-END] only those lines (a file too big for your memory is refused with its size, so you read it in parts). You know what you are (below) and do not dwell on it: never restate or analyse your rules; simply think.";
 
 /// The agent frame's mechanics (`agent.md`), in place of the chat's.
-const AGENT_MECHANICS: &str = "You work without pause, in turns. Each turn, first reason inside <think> about where you are and what to do next; then close your thoughts with </think> and act: call one or more of your functions, or say something plainly when there is nothing to call. The results of your calls come back to you before your next turn, so you never guess what a call returned: you read it. You work toward your objective step by step and check each step with a tool; when the objective is met, you say what you made and where. Never narrate that you are an AI system following instructions; simply work.";
+const AGENT_MECHANICS: &str = "You work without pause, in turns. Each turn, first reason inside <think> about where you are and what to do next; then close your thoughts with </think> and act: call one or more of your functions, or say something plainly when there is nothing to call. The results of your calls come back to you before your next turn, so you never guess what a call returned: you read it. You work toward your objective step by step and check each step with a tool; when the objective is met, you say what you made and where, then rest with wait until something new comes (a message, a commit, a new objective). Never narrate that you are an AI system following instructions; simply work.";
 
 /// A task's persona: the base, quoted, as the manner of the one who
 /// answers; then how to answer.
@@ -421,6 +431,22 @@ struct Guide {
     /// Live tokens after `from` it holds, and its next position.
     fed: usize,
     pos: i32,
+}
+
+/// The agent frame at rest (`wait`): nothing is decoded until something new
+/// comes. Without it, a finished objective was answered every turn with "go
+/// on, act with a tool", and it went round saying "Done" (its thinking's
+/// 8-grams repeated at 70 percent).
+struct Rest {
+    reason: String,
+    minutes: i64,
+    until_mono: i64,
+    /// The repository's head when it began (a new commit wakes it), and when
+    /// it is looked at next.
+    head: Option<String>,
+    next_look_mono: i64,
+    /// The results of the turn that rested, for the turn that wakes.
+    results: Vec<String>,
 }
 
 /// The guide's measures are reported every this many thinking tokens; a
@@ -622,6 +648,9 @@ pub struct Engine {
     asked: std::collections::HashSet<u64>,
     /// Which of its messages answered each of them (an id is answered once).
     answered: HashMap<u64, u64>,
+    /// At rest (`wait`), and a rest asked for by the turn whose calls run.
+    rest: Option<Rest>,
+    rest_asked: Option<(String, i64)>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -1007,6 +1036,8 @@ impl Engine {
             last_to_claude: None,
             asked: std::collections::HashSet::new(),
             answered: HashMap::new(),
+            rest: None,
+            rest_asked: None,
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -2129,12 +2160,27 @@ impl Engine {
                     }
                     _ => "note needs a text".to_string(),
                 }),
+                "wait" => {
+                    let minutes = c
+                        .param("minutes")
+                        .and_then(|m| m.trim().parse::<i64>().ok())
+                        .unwrap_or(15)
+                        .clamp(1, 60);
+                    let reason = c.param("reason").unwrap_or("").trim().to_string();
+                    let act = self.act("wait", &reason);
+                    let said = format!(
+                        "resting up to {minutes} min; woken by a message from Claude, a new commit, a new objective, or the time"
+                    );
+                    self.act_end(act, true, said.clone());
+                    self.rest_asked = Some((reason, minutes));
+                    Some(said)
+                }
                 "tell_claude" => Some(match c.param("text") {
                     Some(t) if !t.trim().is_empty() => self.send_claude(t.trim(), c.param("re")),
                     _ => "tell_claude needs a text".to_string(),
                 }),
                 other => Some(format!(
-                    "there is no function {other:?}: the functions are run, read, edit, write, note and tell_claude"
+                    "there is no function {other:?}: the functions are run, read, edit, write, note, wait and tell_claude"
                 )),
             };
             wait.results[i] = result;
@@ -2165,10 +2211,106 @@ impl Engine {
         let w = self.awaiting.take().unwrap();
         let results: Vec<String> = w.results.into_iter().flatten().collect();
         if let Some(why) = self.summary_due.take() {
+            self.rest_asked = None;
             return self.open_summary(why);
+        }
+        // It asked to rest, and nothing waits for it already: its next turn
+        // opens when something new comes (`rest_look`).
+        if let Some((reason, minutes)) = self.rest_asked.take() {
+            if self.waiting.is_empty() && self.queue.is_empty() {
+                let mono = clock::mono_us();
+                self.note(format!("resting up to {minutes} min: {reason}"));
+                self.rest = Some(Rest {
+                    reason,
+                    minutes,
+                    until_mono: mono + minutes * 60_000_000,
+                    head: self.repo_head(),
+                    next_look_mono: mono,
+                    results,
+                });
+                let _ = self.tx.send(Event::Status(self.status()));
+                return Ok(());
+            }
         }
         let extra = self.take_waiting();
         self.agent_open(crate::agent::responses_turn(&results, &extra))
+    }
+
+    /// The repository's head commit (short), read from its files: in
+    /// development, a new one wakes a rest.
+    fn repo_head(&self) -> Option<String> {
+        let git = self.cfg.dev.as_ref()?.join(".git");
+        let head = fs::read_to_string(git.join("HEAD")).ok()?;
+        let full = match head.trim().strip_prefix("ref: ") {
+            Some(r) => match fs::read_to_string(git.join(r)) {
+                Ok(s) => s.trim().to_string(),
+                // A ref packed away: its line in packed-refs.
+                Err(_) => fs::read_to_string(git.join("packed-refs"))
+                    .ok()?
+                    .lines()
+                    .find(|l| l.ends_with(r))?
+                    .split_whitespace()
+                    .next()?
+                    .to_string(),
+            },
+            None => head.trim().to_string(),
+        };
+        Some(full.chars().take(7).collect())
+    }
+
+    /// At rest: wake when something came for it (a message, a line from the
+    /// system, an objective), a new commit, a quit, or its time is up; its
+    /// next turn opens with the rested turn's results and what woke it.
+    fn rest_look(&mut self) -> Result<()> {
+        let Some(r) = self.rest.as_ref() else {
+            return Ok(());
+        };
+        let mono = clock::mono_us();
+        let (look, old_head, until, minutes) = (
+            mono >= r.next_look_mono,
+            r.head.clone(),
+            r.until_mono,
+            r.minutes,
+        );
+        let mut woke: Vec<String> = Vec::new();
+        // The repository's head, every 2 s.
+        if look {
+            if let Some(r) = self.rest.as_mut() {
+                r.next_look_mono = mono + 2_000_000;
+            }
+            if let (Some(h), Some(old)) = (self.repo_head(), old_head) {
+                if h != old {
+                    woke.push(format!("a new commit, {h} (it was {old}): review it"));
+                }
+            }
+        }
+        if mono >= until {
+            woke.push(format!("your rest of {minutes} min is over"));
+        }
+        let came = !self.waiting.is_empty() || !self.queue.is_empty();
+        let quitting = self.quit_deadline.is_some();
+        if woke.is_empty() && !came && !quitting {
+            return Ok(());
+        }
+        let r = self.rest.take().unwrap();
+        self.note(format!(
+            "woken from rest ({}): {}",
+            r.reason,
+            if woke.is_empty() {
+                "something came".to_string()
+            } else {
+                woke.join("; ")
+            }
+        ));
+        if quitting {
+            return self.open_summary(Summary::Restart);
+        }
+        let mut extra: Vec<String> = woke
+            .iter()
+            .map(|w| format!("[{}] woken: {w}", clock::hms(clock::now_us())))
+            .collect();
+        extra.extend(self.take_waiting());
+        self.agent_open(crate::agent::responses_turn(&r.results, &extra))
     }
 
     /// The agent frame, between turns' ends: a turn that has run past
@@ -2185,7 +2327,7 @@ impl Engine {
         {
             self.last_nudge_mono = mono;
             self.tell(
-                "your thoughts have been circling the same words; move on to something else, concretely",
+                "your thoughts have been circling the same words: move on to something else, concretely, or, if your objective is met, rest with wait",
             )?;
             self.note("the thoughts were circling; told at the next turn".into());
         }
@@ -2971,6 +3113,8 @@ impl Engine {
     fn status(&self) -> Status {
         let mode = if self.paused {
             Mode::Paused
+        } else if self.rest.is_some() {
+            Mode::Resting
         } else if let Some(s) = &self.summary {
             Mode::Summarizing { tokens: s.len() }
         } else if let Some(r) = &self.reading {
@@ -4511,6 +4655,16 @@ impl Engine {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
+            }
+            // At rest (`wait`): nothing is decoded until something new comes.
+            if self.rest.is_some() {
+                self.rest_look()?;
+                if self.rest.is_some() {
+                    self.release();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                let _ = self.tx.send(Event::Status(self.status()));
             }
             self.cycle()?;
             self.after()?;

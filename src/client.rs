@@ -181,6 +181,7 @@ pub fn parse(line: &str) -> Msg {
                 match mode {
                     "speaking" => Mode::Speaking,
                     "paused" => Mode::Paused,
+                    "resting" => Mode::Resting,
                     _ => Mode::Thinking,
                 }
             };
@@ -418,6 +419,7 @@ pub fn status_line(s: &Status) -> String {
         Mode::CatchingUp { done, total } => format!("catching:{done}/{total}"),
         Mode::Summarizing { tokens } => format!("summarizing:{tokens}"),
         Mode::Paused => "paused".to_string(),
+        Mode::Resting => "resting".to_string(),
     };
     format!(
         "status mode={mode} stream={:.2} beside={:.2} cycle={:.1} pos={} ctx={} queued={} chunk={} rollovers={} notes={} frame={} leaks={} mind_ms={:.2} t={} reads_quiet={} checks={} changes={} unparsed={} checking={}",

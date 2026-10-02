@@ -94,6 +94,15 @@ fn tools() -> Vec<String> {
             &["text"],
         ),
         tool(
+            "wait",
+            "Rest until something new comes: a message from Claude, a new commit in the repository, a new objective, or the time you give. Call it when your objective is met, or when you wait on Claude, rather than going on for its own sake: nothing is asked of you while you rest, and your next turn opens with what came.",
+            &[
+                ("reason", "string", "Why you rest: what is done, or what you wait for."),
+                ("minutes", "integer", "The longest rest, in minutes (default 15, at most 60)."),
+            ],
+            &["reason"],
+        ),
+        tool(
             "tell_claude",
             "Send a message to Claude, who develops this program with you and reads every message at once: a proposal (the file, the function, the change and why, and what you checked), a finding, a question, or your answer to a message of Claude's. Claude answers in a later turn.",
             &[
@@ -201,7 +210,7 @@ pub fn continue_turn(time: &str, objective: Option<&str>, extra: &[String]) -> S
         format!("{}\n", extra.join("\n"))
     };
     format!(
-        "<|im_end|>\n<|im_start|>user\n{waited}[{time}] {goal} Go on: reason, then act with a tool; what you have not checked with a tool, you do not know.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        "<|im_end|>\n<|im_start|>user\n{waited}[{time}] {goal} Go on: reason, then act with a tool (what you have not checked with a tool, you do not know); if your objective is met or you wait on Claude, rest with wait.<|im_end|>\n<|im_start|>assistant\n<think>\n"
     )
 }
 
