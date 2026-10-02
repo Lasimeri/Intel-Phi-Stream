@@ -34,8 +34,9 @@ carry each tool use and its result (`ActLine`, `act_line`). `claude t=US
 id=mN re=cM|- TEXT` is a message the stream sent Claude (`tell_claude`;
 `ToClaude`, `to_claude_line`). `ask_claude` sends a message from Claude
 (`ask`) and waits, with a deadline, for the `claude` line that answers
-it: the first naming its id (as `c3`, `3` or `message c3`), or the first
-after it naming none. `guide t=US pos=P kl=K flip=0|1
+it: the first naming its id (as `c3`, `3` or `message c3`); one naming
+none is not its answer (m24, sent as the stream finished another turn,
+was taken for c1's, which m25 gave). `guide t=US pos=P kl=K flip=0|1
 shared=S|- mix=G` is the guide lane at one thinking token (`GuideLine`,
 `guide_line`), sent per token like `mind` lines and not replayed. `term start t=US id=N COMMAND` and `term end
 t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT` carry its terminal

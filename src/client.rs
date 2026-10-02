@@ -597,11 +597,13 @@ pub fn ask_claude(
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok((id, None)),
             Err(_) => bail!("the service closed the connection"),
         };
-        // Its id as it wrote it: c3, 3, message c3.
+        // Its id as it wrote it: c3, 3, message c3; only a message naming
+        // it (one with no re, sent as it finished another turn, was taken
+        // for the answer: m24 for c1, which m25 answered).
         let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>();
         match parse(&line) {
             Msg::ToClaude(m)
-                if m.t_us >= t0 && m.re.as_deref().is_none_or(|r| digits(r) == digits(&id)) =>
+                if m.t_us >= t0 && m.re.as_deref().is_some_and(|r| digits(r) == digits(&id)) =>
             {
                 return Ok((id, Some(m)));
             }
