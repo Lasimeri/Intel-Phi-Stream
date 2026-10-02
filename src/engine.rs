@@ -654,6 +654,9 @@ pub struct Engine {
     /// At rest (`wait`), and a rest asked for by the turn whose calls run.
     rest: Option<Rest>,
     rest_asked: Option<(String, i64)>,
+    /// A long decode straight into the live sequence (`feed_live`): the
+    /// tokens done and all of them, for the status.
+    prefill: Option<(usize, usize)>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -748,6 +751,12 @@ const TOOL_IDLE_US: i64 = 90_000_000;
 const LINE_REPEATS: u32 = 3;
 const HOLD_BACK_US: i64 = 30_000_000;
 const MAX_TERM_SECS: u64 = 60;
+/// The most tokens one `read` of the agent frame gives: its leading lines,
+/// and where the file goes on. A tool response goes in as one prefill at
+/// about 220 tokens a second with the engine waiting on it (a whole
+/// `reflect.rs`, 9311 tokens, took 42 s, with the status still saying
+/// speaking); 4096 is about 19 s.
+const READ_MAX_TOKENS: usize = 4096;
 
 /// A summary's end mark counts only after this many tokens, and the ask
 /// ends with these first words in its own voice.
@@ -1042,6 +1051,7 @@ impl Engine {
             answered: HashMap::new(),
             rest: None,
             rest_asked: None,
+            prefill: None,
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -2524,17 +2534,34 @@ impl Engine {
                 .map(|t| t.len())
                 .unwrap_or(0);
             let room = self.read_room();
-            if tokens > room {
-                let fit = (room.min(2048) * (b + 1 - a) / tokens.max(1)).max(1);
-                return Err(format!(
-                    "{} lines {a} to {b} are {tokens} tokens, more than the {room} there is room for: read them in parts, start {a}, end {}",
-                    p.display(),
-                    a + fit - 1
+            let budget = room.min(READ_MAX_TOKENS);
+            if tokens <= budget {
+                return Ok(format!(
+                    "{} (lines {a} to {b} of {n}):\n{body}",
+                    p.display()
                 ));
             }
+            // More than one read gives: the leading lines that fit, and
+            // where the rest begins.
+            let counts: Vec<usize> = lines[a - 1..b]
+                .iter()
+                .map(|l| self.llm.tokenize(l, false).map_or(0, |t| t.len()) + 1)
+                .collect();
+            let k = lines_within(&counts, budget);
+            if k == 0 {
+                return Err(format!(
+                    "{} line {a} alone is {} tokens, more than the {budget} a read gives (room {room})",
+                    p.display(),
+                    counts[0]
+                ));
+            }
+            let e = a + k - 1;
             Ok(format!(
-                "{} (lines {a} to {b} of {n}):\n{body}",
-                p.display()
+                "{} (lines {a} to {e} of {n}; you asked to {b}, {tokens} tokens, more than the {budget} a read gives: lines {} to {b} are not shown, read them with start {}):\n{}",
+                p.display(),
+                e + 1,
+                e + 1,
+                lines[a - 1..e].join("\n")
             ))
         })();
         let (ok, text) = match r {
@@ -3006,14 +3033,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Decode `tokens` into the live sequence after the pending token,
-    /// logits of the last, and sample the next.
-    fn direct(&mut self, tokens: &[i32]) -> Result<()> {
-        let mut all = vec![self.next];
-        all.extend_from_slice(tokens);
-        let pos0 = self.pos();
+    /// `all` into the live sequence from `pos0`, a batch at a time, logits
+    /// of the last only: its row. Past one batch the status says how far it
+    /// is after each (`prefill`): a tool response of 9311 tokens took 42 s,
+    /// and the terminal said speaking all that time.
+    fn feed_live(&mut self, all: &[i32], pos0: i32) -> Result<i32> {
         let mut row = 0;
         let cap = self.llm.batch_cap();
+        let long = all.len() > cap;
         for (i, c) in all.chunks(cap).enumerate() {
             let last = (i + 1) * cap >= all.len();
             let rows = self.llm.decode(&[Lane {
@@ -3021,11 +3048,37 @@ impl Engine {
                 tokens: c,
                 pos0: pos0 + (i * cap) as i32,
                 logits: last,
-            }])?;
+            }]);
+            let rows = match rows {
+                Ok(r) => r,
+                Err(e) => {
+                    self.prefill = None;
+                    return Err(e);
+                }
+            };
             if let Some(&r) = rows.first() {
                 row = r;
             }
+            if long && !last {
+                self.prefill = Some(((i * cap + c.len()), all.len()));
+                let _ = self.tx.send(Event::Status(self.status()));
+            }
         }
+        // Done: the status says so now, not at the next one (it held
+        // "reading 148/148" until then).
+        if self.prefill.take().is_some() {
+            let _ = self.tx.send(Event::Status(self.status()));
+        }
+        Ok(row)
+    }
+
+    /// Decode `tokens` into the live sequence after the pending token,
+    /// logits of the last, and sample the next.
+    fn direct(&mut self, tokens: &[i32]) -> Result<()> {
+        let mut all = vec![self.next];
+        all.extend_from_slice(tokens);
+        let pos0 = self.pos();
+        let row = self.feed_live(&all, pos0)?;
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         self.next = self.llm.sample(row);
@@ -3064,20 +3117,7 @@ impl Engine {
         let mut all = vec![self.next];
         all.extend_from_slice(tokens);
         let pos0 = self.pos();
-        let mut row = 0;
-        let cap = self.llm.batch_cap();
-        for (i, c) in all.chunks(cap).enumerate() {
-            let last = (i + 1) * cap >= all.len();
-            let rows = self.llm.decode(&[Lane {
-                seq: self.live,
-                tokens: c,
-                pos0: pos0 + (i * cap) as i32,
-                logits: last,
-            }])?;
-            if let Some(&r) = rows.first() {
-                row = r;
-            }
-        }
+        let row = self.feed_live(&all, pos0)?;
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         let out = self.llm.logits(row)?.to_vec();
@@ -3148,6 +3188,8 @@ impl Engine {
     fn status(&self) -> Status {
         let mode = if self.paused {
             Mode::Paused
+        } else if let Some((done, total)) = self.prefill {
+            Mode::Reading { done, total }
         } else if self.rest.is_some() {
             Mode::Resting
         } else if let Some(s) = &self.summary {
@@ -4842,6 +4884,18 @@ fn contained(a: &[String], b: &[String]) -> f64 {
     a.iter().filter(|w| b.binary_search(w).is_ok()).count() as f64 / a.len() as f64
 }
 
+/// How many leading lines, of these token counts, fit in `budget` tokens.
+fn lines_within(counts: &[usize], budget: usize) -> usize {
+    let mut sum = 0;
+    counts
+        .iter()
+        .take_while(|&&c| {
+            sum += c;
+            sum <= budget
+        })
+        .count()
+}
+
 /// The overlap of two word sets: shared over all.
 fn jaccard(a: &[String], b: &[String]) -> f64 {
     let shared = a.iter().filter(|w| b.binary_search(w).is_ok()).count();
@@ -5140,6 +5194,15 @@ mod tests {
         let new = word_set("The summary turn drops the calls of the turn it closes: engine.rs agent_stalled, line 2101.");
         assert!(contained(&again, &first) >= TO_CLAUDE_SAME);
         assert!(contained(&new, &first) < TO_CLAUDE_SAME);
+    }
+
+    #[test]
+    fn a_read_gives_the_leading_lines_that_fit() {
+        assert_eq!(lines_within(&[10, 10, 10], 30), 3);
+        assert_eq!(lines_within(&[10, 10, 10], 29), 2);
+        assert_eq!(lines_within(&[10, 10, 10], 10), 1);
+        assert_eq!(lines_within(&[40, 1], 30), 0);
+        assert_eq!(lines_within(&[], 30), 0);
     }
 
     #[test]

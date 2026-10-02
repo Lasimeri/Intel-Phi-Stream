@@ -14,7 +14,9 @@ tool calls, as its chat template (read from the GGUF's
   unknown, and the description says a Rust build does not fit there: three
   cargo checks stopped at the limit had become "compilation passes" in a
   review),
-  `read` (a file whole or by lines, or a directory), `edit` (one exact
+  `read` (a file whole or by lines, or a directory; at most about 4096
+  tokens a read: past that, the leading lines and where the rest begins,
+  `engine.rs` `READ_MAX_TOKENS`), `edit` (one exact
   replacement, `old` occurring once; for every change to an existing file:
   without it, it rewrote a whole file for each fix), `write` (a new file, or
   one replaced entirely), `note` (its own memory, kept once), `wait` (rest

@@ -60,7 +60,7 @@ fn tools() -> Vec<String> {
         ),
         tool(
             "read",
-            "Read a file of the repository (your working copy) or your workspace, whole or by lines, or a directory's listing.",
+            "Read a file of the repository (your working copy) or your workspace, whole or by lines, or a directory's listing. One read gives at most about 4096 tokens (about 400 lines of this code): past that it gives the leading lines and says where the rest begins, so read the function you need with start and end (find it with run: grep -n).",
             &[
                 ("path", "string", "A path relative to the repository, or absolute."),
                 ("start", "integer", "The first line, from 1."),

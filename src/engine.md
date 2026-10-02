@@ -558,3 +558,26 @@ two): they ride with the next turn but neither stop a rest nor wake one (at
 first each turn left one waiting, and every rest was refused); a rest
 refused because something came says so. The continue line and the circling nudge name
 `wait` as the way to stop when the objective is met.
+
+## Reads of the agent frame, and a long prefill (2026-10-02)
+
+A tool response goes into the live sequence as one prefill, a batch at a
+time (`feed_live`), at about 220 tokens a second on the live service
+(`mind.log`: every jump of 2000 tokens or more ran at 218 to 229 tokens a
+second), with the run loop waiting on it. The stream read the whole of
+`reflect.rs` (9311 tokens, 42 s) and a grep of 9732 tokens (45 s), and the
+context went from 30k to 40k cells in one turn. Now:
+- one `read` gives at most `READ_MAX_TOKENS` (4096, about 19 s): past that,
+  the leading lines that fit (`lines_within`, counted line by line) and a
+  header saying which lines are not shown and the `start` that reads them;
+  a single line past it is refused with its size. The room check
+  (`read_room`) stays the outer bound;
+- past one batch, the status says reading, how many of how many tokens,
+  after each batch (`prefill`): it said speaking for those 42 s, on the
+  terminal and the MCP screen.
+
+What it is not: the doubt checks. The stream proposed turning them off
+(m21: 95 percent kept, about 0.55 s each). They run beside the live token
+in the same decode: the live rate in a check's window was 14.7 tokens a
+second against 16.4 outside it (499 checks, 53k tokens, `reflect.log`
+windows against `mind.log`), under 1 percent of the throughput; they stay.
