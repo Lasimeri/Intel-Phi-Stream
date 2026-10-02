@@ -28,7 +28,10 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
   never enter its context;
 - no network (`--unshare-all`: only `lo` exists), `/tmp` its workspace's
   `tmp/` (kept between commands: fresh in each, a program it built in one
-  command was gone in the next), its own
+  command was gone in the next), the repository's `.git` read-only over its
+  working copy (a git command had written the index into the copy's layer,
+  where it stood in for the repository's and showed every later commit of
+  Claude's as its own change), its own
   process tree, a cleared environment (`PATH=/usr/bin`, `HOME` the
   workspace);
 - Python masked (each interpreter's file bound over by `/dev/null`): the

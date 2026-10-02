@@ -112,8 +112,8 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
         let p = p.display().to_string();
         a.extend(["--ro-bind".into(), "/dev/null".into(), p]);
     }
-    if let Some(r) = &cfg.repo {
-        let r = r.display().to_string();
+    if let Some(root) = &cfg.repo {
+        let r = root.display().to_string();
         match &cfg.overlay {
             Some(o) => a.extend([
                 "--overlay-src".into(),
@@ -124,6 +124,15 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
                 r,
             ]),
             None => a.extend(["--ro-bind".into(), r.clone(), r]),
+        }
+        // Its git sees the repository's own history and index, read-only: a
+        // git command wrote the index into the working copy's layer, where
+        // it stood in for the repository's from then on, every later commit
+        // of Claude's showing as its own change.
+        let git = root.join(".git");
+        if git.is_dir() {
+            let g = git.display().to_string();
+            a.extend(["--ro-bind".into(), g.clone(), g]);
         }
     }
     // Commands start in the repository when there is one (its paths are
@@ -384,6 +393,21 @@ mod tests {
         // A later command sees it still.
         let r = run(&c, 2, "cat made-by-the-stream.txt");
         assert_eq!(r.out, "edit\n", "{r:?}");
+        // /tmp is kept between commands (its workspace's tmp/).
+        run(&c, 3, "echo kept > /tmp/kept.txt");
+        let r = run(&c, 4, "cat /tmp/kept.txt");
+        assert_eq!(r.out, "kept\n", "{r:?}");
+        assert!(ws.join("tmp/kept.txt").is_file());
+        // Its git reads the repository's index and writes none of its own.
+        if Path::new(repo).join(".git").is_dir() {
+            let r = run(
+                &c,
+                5,
+                "git status --short > /dev/null 2>&1; git log -1 --format=%h",
+            );
+            assert_eq!(r.code, Some(0), "{r:?}");
+            assert!(!copy.join("upper/.git/index").exists());
+        }
         let _ = std::fs::remove_dir_all(&ws);
         let _ = std::fs::remove_dir_all(&copy);
     }
