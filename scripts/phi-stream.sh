@@ -187,7 +187,11 @@ case "$sub" in
             if [ -e "$upper/$a" ]; then
                 mkdir -p "$keep/$(dirname "$a")"
                 mv "$upper/$a" "$keep/$a"
-                rmdir -p "$(dirname "$upper/$a")" 2>/dev/null || true
+                # Its directories left empty go too, never the layer itself.
+                d=$(dirname "$upper/$a")
+                while [ "$d" != "$upper" ] && rmdir "$d" 2>/dev/null; do
+                    d=$(dirname "$d")
+                done
                 echo "accepted $a (its copy kept in $keep)"
             else
                 echo "$a: not in the working copy ($upper)" >&2
