@@ -1391,6 +1391,8 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
         };
         v.scroll = 0;
         return;
+    } else if line == "/chain on" || line == "/chain off" {
+        line.trim_start_matches('/').to_string()
     } else if line == "/objective" {
         v.notes.push(match &v.objective {
             Some((_, t)) => {

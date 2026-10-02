@@ -548,6 +548,7 @@ pub fn stream(
             direct_max: 48,
             chunk: 0,
             rollover_at: 10.0,
+            rollover_tokens: None,
             summary_max: 1024,
             sampling: crate::llm::Sampling {
                 temp: 0.0,

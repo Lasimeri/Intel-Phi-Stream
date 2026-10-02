@@ -173,6 +173,10 @@ struct StreamArgs {
     /// Roll the context over past this share of it.
     #[arg(long, default_value_t = 0.6)]
     rollover_at: f32,
+    /// Roll over past this many cells instead of the share (the stream is told
+    /// its memory is nearly full only then).
+    #[arg(long)]
+    rollover_tokens: Option<usize>,
     /// Put the wall clock into the chain after this many seconds with
     /// nothing from outside (0: never).
     #[arg(long, default_value_t = 60.0)]
@@ -634,6 +638,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         direct_max: s.direct_max,
         chunk: s.chunk,
         rollover_at: s.rollover_at,
+        rollover_tokens: s.rollover_tokens,
         summary_max: 1024,
         sampling,
         status_every: 8,

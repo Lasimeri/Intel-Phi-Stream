@@ -40,8 +40,10 @@ While the model is loaded and running, a terminal window on the desktop
 shows it: the diagnostics (the placement, the rates, the context, the
 mind strip, the checks) and the input line (`src/tui.md`).
 - `dev` adds `--terminal` (the stream's sandboxed terminal, `src/term.md`)
-and `--second-chain` (a reflection beside the live token at each line's
-end, `src/engine.md`).
+and `--rollover-tokens 150000` (it is told its memory is nearly full only
+past 150 thousand cells). The second chain is off in `dev` while the
+stream's stability is measured: `/chain on` in the terminal (or `chain on`
+on the socket) turns it on live.
 `stop` waits up to two minutes for the service to write its summary and
 end (`src/engine.md`) before it ends the session.
 

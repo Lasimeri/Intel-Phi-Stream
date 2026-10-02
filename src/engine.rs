@@ -175,6 +175,9 @@ pub struct Config {
     pub chunk: usize,
     /// Roll the context over when the live sequence passes this share.
     pub rollover_at: f32,
+    /// Roll over past this many cells instead (`--rollover-tokens`): the
+    /// stream is told its memory is nearly full only then.
+    pub rollover_tokens: Option<usize>,
     /// Tokens the summary may run to.
     pub summary_max: usize,
     /// The sampler's settings (temperature changed at run time).
@@ -357,6 +360,15 @@ struct Chain {
 /// The longest reflection, and the least time between two.
 const CHAIN_MAX: usize = 64;
 const CHAIN_EVERY_US: i64 = 1_000_000;
+/// Why a summary is asked for: the context nearly full, a restart (quit),
+/// a new persona.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Summary {
+    Full,
+    Restart,
+    Persona,
+}
+
 /// The reflection's first words, in its own voice (as a summary begins
 /// "What I was working on: "): without them the copy went on with the
 /// journal's structure, echoing the marker or a « line, on the live
@@ -1160,13 +1172,24 @@ impl Engine {
         }
     }
 
-    fn summary_ask(&self) -> String {
-        // The ask, then the summary's first words in its own voice: in the
-        // dev session it restated the instruction one word a line and ended
-        // it with --- after 34 tokens, losing its thread at the rollover.
+    fn summary_ask(&self, why: Summary) -> String {
+        // The ask, its real reason (a restart was once announced as "your
+        // memory is nearly full" at 3 thousand of 205), then the summary's
+        // first words in its own voice: in the dev session it restated the
+        // instruction one word a line and ended it with --- after 34 tokens,
+        // losing its thread at the rollover.
+        let reason = match why {
+            Summary::Full => format!(
+                "your memory is nearly full ({} of its {} tokens)",
+                self.history.len(),
+                self.llm.n_ctx()
+            ),
+            Summary::Restart => "the program you run in restarts now (an update or a change), and you resume after it".to_string(),
+            Summary::Persona => "your persona changes now, and you resume under the new one".to_string(),
+        };
         format!(
             "{}{}",
-            self.framed_system("your memory is nearly full. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---"),
+            self.framed_system(&format!("{reason}. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---")),
             SUMMARY_START
         )
     }
@@ -3023,7 +3046,10 @@ impl Engine {
 
         // Rollover: past the share, or a new persona waiting, with nothing
         // in flight: ask for the summary.
-        let limit = (self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize;
+        let limit = self
+            .cfg
+            .rollover_tokens
+            .unwrap_or((self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize);
         // A quit asks for the summary too: the restart resumes from it.
         let quitting = self.quit_deadline.is_some() && !self.cfg.task;
         if idle && (self.history.len() >= limit || self.reseat || quitting) {
@@ -3036,7 +3062,14 @@ impl Engine {
             if dropped > 0 {
                 self.note(format!("{dropped} pending reads dropped at the rollover"));
             }
-            let ask = self.summary_ask();
+            let why = if quitting {
+                Summary::Restart
+            } else if self.reseat {
+                Summary::Persona
+            } else {
+                Summary::Full
+            };
+            let ask = self.summary_ask(why);
             self.put(ask)?;
             self.summary = Some(Vec::new());
             return Ok(());

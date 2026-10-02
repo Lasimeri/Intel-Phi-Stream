@@ -439,3 +439,9 @@ down. Now DRY breaks only at a colon, a quote and an asterisk, and a line
 written 3 times running has its first token held back 30 s (added to the
 banned tokens, then released), the fence state is forgotten when that
 line is a fence, and the stream is told.
+
+A summary is asked for with its real reason: the context nearly full
+(with how many of its cells are used), a restart (`quit`), or a new
+persona. Every quit had asked "your memory is nearly full" at a few
+thousand of 205 thousand cells. `--rollover-tokens` sets the rollover
+point in cells instead of a share (`dev`: 150000).
