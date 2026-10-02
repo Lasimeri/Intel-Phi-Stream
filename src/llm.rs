@@ -303,6 +303,12 @@ impl Llm {
         self.batch_cap
     }
 
+    /// Sequences the context holds apart (`--n-seq`).
+    pub fn n_seq(&self) -> u32 {
+        // SAFETY: a plain query of the context.
+        unsafe { sys::llama_n_seq_max(self.ctx.as_ptr()) }
+    }
+
     /// The vocabulary's tokens whose text holds `needle` (a scan of every
     /// token's piece, as for the dashes).
     pub fn tokens_containing(&self, needle: &str) -> Vec<i32> {

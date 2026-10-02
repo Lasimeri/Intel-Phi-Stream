@@ -580,6 +580,7 @@ pub fn stream(
             summary_on_quit: false,
             second_chain: false,
             agent: false,
+            guide: false,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

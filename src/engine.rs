@@ -236,6 +236,10 @@ pub struct Config {
     /// The agent frame (`agent.md`): the chat template with the model's own
     /// tool calls, results returned before its next turn.
     pub agent: bool,
+    /// The guide lane (`Guide`): the live sequence with the last reflection
+    /// in it, read beside every thinking token (shadow: measured, not used).
+    /// Needs a fifth sequence (`--n-seq 5`).
+    pub guide: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -380,6 +384,32 @@ struct Chain {
     /// The next position in its sequence.
     pos: i32,
 }
+
+/// The guide lane (`--guide`, `engine.md`): a copy of the live sequence
+/// with the second chain's last reflection placed in it as an aside in its
+/// own voice, fed every live token after it, so that at each thinking
+/// token the next-token distribution with the reflection in mind is read
+/// beside the live one: how far the reflection would move each token (KL)
+/// and how often it would change the likeliest one. The live text never
+/// holds the aside (nothing is put inside a turn). Shadow: measured, not
+/// yet used to choose.
+struct Guide {
+    /// The history index it forked at (its position for history index `i`
+    /// at or after `from` is `i` plus the aside's length).
+    from: usize,
+    /// The aside's tokens still to feed (its first went alone: the copy
+    /// shares the live recurrent state until it writes its own).
+    pending: Vec<i32>,
+    /// Live tokens after `from` it holds, and its next position.
+    fed: usize,
+    pos: i32,
+}
+
+/// The guide's measures are reported every this many thinking tokens; a
+/// guide that has run this many live tokens past its fork is dropped (its
+/// cells are its own).
+const GUIDE_REPORT: u32 = 128;
+const GUIDE_MAX: usize = 4096;
 
 /// The longest reflection, and the least time between two.
 const CHAIN_MAX: usize = 64;
@@ -585,6 +615,17 @@ pub struct Engine {
     /// the live token just placed ended a line, a reflection waiting for the
     /// journal.
     chain_on: bool,
+    /// The guide lane: on, its reserved sequence, the lane, the reflection
+    /// it takes next, its measures since the last report (thinking tokens,
+    /// KL summed, likeliest token changed) and its log (`guide.log`).
+    guide_on: bool,
+    guide_seq: Option<i32>,
+    guide: Option<Guide>,
+    guide_next: Option<String>,
+    guide_n: u32,
+    guide_kl: f64,
+    guide_flips: u32,
+    guide_log: RotLog,
     reflecting: Option<Chain>,
     line_words: HashMap<String, f32>,
     chain_fork_mono: i64,
@@ -823,6 +864,7 @@ impl Engine {
         };
         let log = RotLog::open(cfg.workspace.join("stream.log"));
         let chain = RotLog::open(cfg.workspace.join("chain.log"));
+        let guide_log = RotLog::open(cfg.workspace.join("guide.log"));
         let tx = Playout::start(cfg.horizon_us, tx);
         let reflector = cfg.reflect.clone().map(Reflector::new);
         let choice = match &cfg.reflect {
@@ -859,6 +901,9 @@ impl Engine {
             })
             .collect();
         let chain_on = cfg.second_chain && !cfg.task;
+        // The guide lane takes the last sequence; the others stay free.
+        let guide_seq =
+            (cfg.guide && !cfg.task && llm.n_seq() >= 5).then(|| llm.n_seq() as i32 - 1);
         Ok(Self {
             llm,
             cfg,
@@ -933,6 +978,14 @@ impl Engine {
             stop_now: false,
             changed_since,
             chain_on,
+            guide_on: guide_seq.is_some(),
+            guide_seq,
+            guide: None,
+            guide_next: None,
+            guide_n: 0,
+            guide_kl: 0.0,
+            guide_flips: 0,
+            guide_log,
             reflecting: None,
             line_words: HashMap::new(),
             chain_fork_mono: i64::MIN / 2,
@@ -1664,6 +1717,9 @@ impl Engine {
             while self.recent_reflections.len() > CHAIN_RECENT {
                 self.recent_reflections.pop_front();
             }
+            if self.guide_on {
+                self.guide_next = Some(text.clone());
+            }
             self.reflection = Some(text);
             "into the journal at its next line's end"
         } else if keep {
@@ -1677,6 +1733,133 @@ impl Engine {
             pos: c.pos,
             text: outcome.to_string(),
         }));
+    }
+
+    /// The guide lane given up: its sequence emptied (the live one was
+    /// replaced or cut under it, or it ran its length).
+    fn drop_guide(&mut self) {
+        if let (Some(_), Some(s)) = (self.guide.take(), self.guide_seq) {
+            self.llm.seq_rm(s, -1, -1);
+        }
+    }
+
+    /// The guide lane's part of this cycle's batch, at most `room` tokens:
+    /// the aside's rest, the live tokens it has not had, and the live
+    /// pending token, whose row then reads beside the live one (`true`). A
+    /// new reflection forks it again from the live sequence first, its
+    /// aside's first token decoded alone, inside its thinking only.
+    fn guide_take(&mut self, room: usize) -> Result<Option<(Vec<i32>, i32, bool)>> {
+        let Some(gs) = self.guide_seq.filter(|_| self.guide_on) else {
+            return Ok(None);
+        };
+        if !self.speaking && !self.in_code {
+            if let Some(text) = self.guide_next.take() {
+                let aside = self.tok(&format!("\n({text})\n"), false)?;
+                if aside.len() >= 2 {
+                    self.drop_guide();
+                    self.llm.seq_rm(gs, -1, -1);
+                    self.llm.seq_cp(self.live, gs, -1, -1);
+                    let from = self.history.len();
+                    self.llm.decode(&[Lane {
+                        seq: gs,
+                        tokens: &aside[..1],
+                        pos0: from as i32,
+                        logits: false,
+                    }])?;
+                    if let Some(cap) = self.llm.capture() {
+                        cap.take();
+                    }
+                    self.guide = Some(Guide {
+                        from,
+                        pending: aside[1..].to_vec(),
+                        fed: 0,
+                        pos: from as i32 + 1,
+                    });
+                }
+            }
+        }
+        let Some((from, fed, pos, mut lane)) = self
+            .guide
+            .as_ref()
+            .map(|g| (g.from, g.fed, g.pos, g.pending.clone()))
+        else {
+            return Ok(None);
+        };
+        if from + fed > self.history.len() || fed > GUIDE_MAX {
+            self.drop_guide();
+            return Ok(None);
+        }
+        if room == 0 {
+            return Ok(None);
+        }
+        lane.extend_from_slice(&self.history[from + fed..]);
+        lane.push(self.next);
+        if lane.len() > room {
+            // Catching up: no row this cycle.
+            lane.truncate(room.min(lane.len() - 1));
+            return Ok(Some((lane, pos, false)));
+        }
+        Ok(Some((lane, pos, true)))
+    }
+
+    /// The guide lane fed `n` tokens; when they ended on the live pending
+    /// token, its row against the live one's (`guide_measure`).
+    fn guide_fed(&mut self, n: usize, aligned: bool, rows: Option<(i32, i32)>) -> Result<()> {
+        let Some(g) = self.guide.as_mut() else {
+            return Ok(());
+        };
+        let from_aside = n.min(g.pending.len());
+        g.pending.drain(..from_aside);
+        // The live pending token counts as fed: `advance` puts it in the
+        // history next.
+        g.fed += n - from_aside;
+        g.pos += n as i32;
+        if let (true, Some((live, guide))) = (aligned, rows) {
+            if !self.speaking && !self.in_code {
+                self.guide_measure(live, guide)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// At a thinking token: how far the reflection in the guide moves the
+    /// next-token distribution (KL of the guide's from the live one's, in
+    /// nats) and whether it changes the likeliest token; a line in
+    /// `guide.log`, and every `GUIDE_REPORT` tokens a report.
+    fn guide_measure(&mut self, live: i32, guide: i32) -> Result<()> {
+        let lg = self.llm.logits(guide)?.to_vec();
+        let ll = self.llm.logits(live)?;
+        let (kl, ag, al) = kl_and_tops(&lg, ll);
+        let flip = ag != al;
+        self.guide_n += 1;
+        self.guide_kl += kl;
+        self.guide_flips += flip as u32;
+        let (tl, tg) = (self.llm.text(&[al as i32]), self.llm.text(&[ag as i32]));
+        self.guide_log.line(&format!(
+            "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}",
+            clock::now_us(),
+            self.history.len(),
+            flip as u8
+        ));
+        if self.guide_n >= GUIDE_REPORT {
+            let said = format!(
+                "guide (shadow), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%",
+                self.guide_n,
+                self.guide_kl / self.guide_n as f64,
+                100.0 * self.guide_flips as f64 / self.guide_n as f64
+            );
+            self.note(said.clone());
+            let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                kind: crate::client::DelibKind::End,
+                t_us: clock::now_us(),
+                pos: self.history.len() as i32,
+                text: said,
+            }));
+            self.guide_n = 0;
+            self.guide_kl = 0.0;
+            self.guide_flips = 0;
+        }
+        Ok(())
     }
 
     /// What it works toward, set (or cleared, empty): kept in
@@ -2670,6 +2853,8 @@ impl Engine {
         let mut history = c.head;
         history.extend_from_slice(&self.history[c.from..]);
         history.push(self.next);
+        // The guide held the old live sequence's tokens.
+        self.drop_guide();
         self.history = history;
         self.live = c.seq;
         self.llm.seq_rm(old, -1, -1);
@@ -2817,10 +3002,15 @@ impl Engine {
             } else {
                 vec![*c.out.last().unwrap()]
             };
-            let rows = self.llm.decode(&[
+            // The guide lane in the same batch, in the room left.
+            let room = self.llm.batch_cap().saturating_sub(1 + lane.len());
+            let g = self.guide_take(room)?;
+            let gs = self.guide_seq.unwrap_or(-1);
+            let pending = [self.next];
+            let mut lanes = vec![
                 Lane {
                     seq: self.live,
-                    tokens: &[self.next],
+                    tokens: &pending,
                     pos0: self.pos(),
                     logits: true,
                 },
@@ -2830,7 +3020,20 @@ impl Engine {
                     pos0: c.pos,
                     logits: true,
                 },
-            ])?;
+            ];
+            if let Some((gl, gpos, aligned)) = &g {
+                lanes.push(Lane {
+                    seq: gs,
+                    tokens: gl,
+                    pos0: *gpos,
+                    logits: *aligned,
+                });
+            }
+            let rows = self.llm.decode(&lanes)?;
+            drop(lanes);
+            if let Some((gl, _, aligned)) = &g {
+                self.guide_fed(gl.len(), *aligned, aligned.then(|| (rows[0], rows[2])))?;
+            }
             c.pos += lane.len() as i32;
             c.fed = c.prompt.len();
             let t = self.chain_token(rows[1])?;
@@ -2856,15 +3059,34 @@ impl Engine {
             return Ok(());
         }
 
-        // Nothing beside: the live token alone.
-        let rows = self.llm.decode(&[Lane {
+        // Nothing beside: the live token alone, and the guide lane when it
+        // runs (`Guide`).
+        let room = self.llm.batch_cap().saturating_sub(1);
+        let g = self.guide_take(room)?;
+        let gs = self.guide_seq.unwrap_or(-1);
+        let pending = [self.next];
+        let mut lanes = vec![Lane {
             seq: self.live,
-            tokens: &[self.next],
+            tokens: &pending,
             pos0: self.pos(),
             logits: true,
-        }])?;
+        }];
+        if let Some((gl, gpos, aligned)) = &g {
+            lanes.push(Lane {
+                seq: gs,
+                tokens: gl,
+                pos0: *gpos,
+                logits: *aligned,
+            });
+        }
+        let rows = self.llm.decode(&lanes)?;
+        drop(lanes);
+        let side = g.as_ref().map_or(0, |x| x.0.len());
+        if let Some((gl, _, aligned)) = &g {
+            self.guide_fed(gl.len(), *aligned, aligned.then(|| (rows[0], rows[1])))?;
+        }
         self.advance(rows[0])?;
-        self.finish_cycle(t0, 0, true);
+        self.finish_cycle(t0, side, true);
         Ok(())
     }
 
@@ -3273,6 +3495,7 @@ impl Engine {
                 back = Some((c.at as i32, self.history.len() as i32));
                 // The pieces from the token on were never shown: gone.
                 self.held.truncate((c.hold_from - self.released) as usize);
+                self.drop_guide();
                 self.history.truncate(c.at);
                 self.restore(c.saved);
                 // A word written over: a reflection forked before it goes.
@@ -3900,6 +4123,12 @@ impl Engine {
                         }
                     }
                     "nudges" => self.nudges_on = on,
+                    "guide" => {
+                        self.guide_on = on && self.guide_seq.is_some();
+                        if !self.guide_on {
+                            self.drop_guide();
+                        }
+                    }
                     _ => {}
                 }
                 self.note(format!("{which} {}", if on { "on" } else { "off" }));
@@ -4064,6 +4293,29 @@ impl Engine {
             }
         }
     }
+}
+
+/// Two next-token distributions given as logits: KL of the first from the
+/// second (nats), and each one's likeliest token.
+fn kl_and_tops(p: &[f32], q: &[f32]) -> (f64, usize, usize) {
+    let lse = |l: &[f32]| {
+        let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        m + l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>().ln()
+    };
+    let (zp, zq) = (lse(p), lse(q));
+    let mut kl = 0.0;
+    let (mut ap, mut aq) = (0usize, 0usize);
+    for i in 0..p.len().min(q.len()) {
+        let (a, b) = (p[i] as f64 - zp, q[i] as f64 - zq);
+        kl += a.exp() * (a - b);
+        if p[i] > p[ap] {
+            ap = i;
+        }
+        if q[i] > q[aq] {
+            aq = i;
+        }
+    }
+    (kl.max(0.0), ap, aq)
 }
 
 /// A note without the mark of a check (` [unverified: ...]`, at its end).
@@ -4371,6 +4623,43 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_guide_measures_kl_and_the_likeliest_tokens() {
+        let same = [1.0f32, 2.0, 3.0];
+        let (kl, a, b) = kl_and_tops(&same, &same);
+        assert!(kl.abs() < 1e-12);
+        assert_eq!((a, b), (2, 2));
+        // Shifted logits are the same distribution.
+        let shifted = [11.0f32, 12.0, 13.0];
+        assert!(kl_and_tops(&same, &shifted).0 < 1e-9);
+        // Two tokens: p = (0.5, 0.5) against q = (0.9, 0.1).
+        let p = [0.0f32, 0.0];
+        let q = [(0.9f32).ln(), (0.1f32).ln()];
+        let (kl, a, b) = kl_and_tops(&p, &q);
+        let want = 0.5 * (0.5f64 / 0.9).ln() + 0.5 * (0.5f64 / 0.1).ln();
+        assert!((kl - want).abs() < 1e-6, "{kl} vs {want}");
+        assert_eq!((a, b), (0, 0));
+        let (_, a, b) = kl_and_tops(&[0.0, 1.0], &[1.0, 0.0]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_note_is_unmarked_only_at_its_end() {
+        assert_eq!(unmarked("x [unverified: a; b]"), "x");
+        assert_eq!(unmarked("x"), "x");
+        assert_eq!(
+            unmarked("x [unverified: a] and more"),
+            "x [unverified: a] and more"
+        );
+    }
+
+    #[test]
+    fn a_summary_with_the_templates_marks_is_refused() {
+        assert!(degenerate("<|im_start|>user\nhi").is_some());
+        assert!(degenerate("a summary\n<tool_call>").is_some());
+        assert!(degenerate("What I was working on: the guide lane, measured.").is_none());
+    }
 
     #[test]
     fn a_wrong_path_names_what_is_there() {

@@ -495,3 +495,31 @@ and two tool calls. Now:
 - `tell_claude` (`send_claude`) writes `to-claude.md` and sends a `claude`
   line; `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
   message from Claude with an id, which it answers with `re`.
+
+## The guide lane (`--guide`, shadow, 2026-10-02)
+
+Every thinking token reasoned against: a lane that holds the live
+sequence with the second chain's last reflection placed in it as an aside
+in its own voice (`\n(On reflection, ...)\n`), fed every live token after
+it in the live token's batch (`Guide`, `guide_take`, `guide_fed`). At each
+thinking token its row and the live row are read side by side
+(`guide_measure`, `kl_and_tops`): the KL of the guided next-token
+distribution from the live one, in nats, and whether the likeliest token
+differs. One line each in `guide.log` in the workspace; every 128 thinking
+tokens a report (a note, and a line in DELIBERATION).
+
+- Shadow: nothing is chosen from it yet, and the live text never holds
+  the aside (nothing is put inside a turn). Mixing the two rows into the
+  choice is the next step, behind its own knob, once the measures show the
+  reflection moves something.
+- Its own sequence, the last of five (`--guide` implies `--n-seq 5`; 62.8
+  MiB of recurrent state), so checks, the chain and readings keep theirs.
+- A new reflection forks it again from the live sequence (a hybrid
+  sequence cannot be cut in part), the aside's first token decoded alone
+  (the copy shares the live recurrent state until it writes its own). It
+  is dropped when the live sequence is replaced (a reading's swap, a
+  rollover) or cut (a check's write), and after 4096 live tokens.
+- Paused while a check, reading or chase has the cycle; it catches up in
+  the room a batch leaves, with no row until it holds the pending token.
+- Inside thinking only: not in a tool call, not in code.
+- `guide on|off` turns it live (when started with `--guide`).

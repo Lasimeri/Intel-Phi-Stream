@@ -59,7 +59,7 @@ struct Cli {
     cmd: Cmd,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct ModelArgs {
     /// The model file (gguf).
     #[arg(
@@ -220,6 +220,11 @@ struct StreamArgs {
     /// the reflection joins the journal at a later line.
     #[arg(long)]
     second_chain: bool,
+    /// The guide lane (src/engine.md): beside every thinking token, the
+    /// distribution with the last reflection in mind, measured against the
+    /// live one (shadow; takes a fifth sequence, --n-seq 5 is implied).
+    #[arg(long)]
+    guide: bool,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -354,6 +359,31 @@ enum Cmd {
     /// Tokens read beside the live token each cycle (0 adapts).
     Chunk {
         n: usize,
+    },
+    /// The second chain, live (src/engine.md).
+    Chain {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// The guide lane, live (started with --guide; src/engine.md).
+    Guide {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// The line-loop breaker, live.
+    Breaker {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// The harness's nudges (circling, tool reminders), live.
+    Nudges {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// A sampling setting, live: temp, top-k, top-p, min-p, dry or repeat-penalty.
+    Set {
+        key: String,
+        value: f32,
     },
     /// The temperature.
     Temp {
@@ -677,6 +707,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         gate_output: !s.no_objective_gate,
         summary_on_quit: false,
         second_chain: s.second_chain,
+        guide: s.guide,
         agent,
     })
 }
@@ -734,7 +765,12 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     let mut cfg = config(s, sampling(m))?;
     // A restart of the service resumes from the summary its quit writes.
     cfg.summary_on_quit = true;
-    let llm = load_mind(m, &s.mind)?;
+    // The guide lane takes a fifth sequence.
+    let mut m = m.clone();
+    if s.guide {
+        m.n_seq = m.n_seq.max(5);
+    }
+    let llm = load_mind(&m, &s.mind)?;
     let info = info_line(&llm, &cfg);
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
@@ -1119,6 +1155,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Chunk { n } => ask(&socket, &format!("chunk {n}")),
+        Cmd::Chain { state } => ask(&socket, &format!("chain {state}")),
+        Cmd::Guide { state } => ask(&socket, &format!("guide {state}")),
+        Cmd::Breaker { state } => ask(&socket, &format!("breaker {state}")),
+        Cmd::Nudges { state } => ask(&socket, &format!("nudges {state}")),
+        Cmd::Set { key, value } => ask(&socket, &format!("set {key} {value}")),
         Cmd::Temp { t } => ask(&socket, &format!("temp {t}")),
         Cmd::Persona { path } => ask(&socket, &format!("persona {}", expand_home(&path))),
         Cmd::Pause => ask(&socket, "pause"),
