@@ -426,3 +426,16 @@ as 7 to 14 nats).
   file says it reads, whether something works it runs, what it has done a
   tool's output shows, and what it has not checked it does not claim.
 - `%XX` in a read's path is decoded (`Intel%20Phi%20Stream`).
+
+## Loops (2026-10-01)
+
+On the live service at 200K, temperature 0.5 and DRY 0.8, the stream fell
+into writing "```" on every line: 40 to 89 percent of its 8-token
+sequences repeated within 150 s windows (`loopiness`, from chain.log).
+Two reasons: DRY took the newline as a sequence breaker (llama.cpp's
+usual set), so a repeated line was never a repeat to it, and each fence
+flipped the code state, inside which the circling nudge and checks stand
+down. Now DRY breaks only at a colon, a quote and an asterisk, and a line
+written 3 times running has its first token held back 30 s (added to the
+banned tokens, then released), the fence state is forgotten when that
+line is a fence, and the stream is told.

@@ -613,9 +613,11 @@ unsafe fn make_sampler(
         );
     }
     // Repeated sequences penalized (llama.cpp's order: after the
-    // penalties, before top-k), with its usual breakers.
+    // penalties, before top-k), with its usual breakers but the newline:
+    // with it, a line written again and again ("```" on every line, on the
+    // live service) was never a repeat to DRY.
     if s.dry_multiplier > 0.0 {
-        let breakers: Vec<std::ffi::CString> = ["\n", ":", "\"", "*"]
+        let breakers: Vec<std::ffi::CString> = [":", "\"", "*"]
             .iter()
             .map(|b| std::ffi::CString::new(*b).unwrap())
             .collect();

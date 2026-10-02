@@ -503,6 +503,11 @@ pub struct Engine {
     term_pending: usize,
     /// Its tool uses: the next id, the `act` id of each terminal command by
     /// the terminal's id, when it last used a tool and was last reminded to.
+    /// The last line it wrote and how many times running since, and the
+    /// tokens held back after a repeated line (token, until when).
+    last_line: String,
+    line_repeats: u32,
+    held_back: Vec<(i32, i64)>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -567,6 +572,10 @@ const QUIT_WAIT_US: i64 = 120_000_000;
 const MAX_TERM_PENDING: usize = 4;
 /// How long without a tool before it is reminded to check something real.
 const TOOL_IDLE_US: i64 = 90_000_000;
+/// A line written this many times running has its first token held back
+/// for this long.
+const LINE_REPEATS: u32 = 3;
+const HOLD_BACK_US: i64 = 30_000_000;
 const MAX_TERM_SECS: u64 = 60;
 
 /// A summary's end mark counts only after this many tokens, and the ask
@@ -802,6 +811,9 @@ impl Engine {
             failed_reads: HashMap::new(),
             term,
             term_pending: 0,
+            last_line: String::new(),
+            line_repeats: 0,
+            held_back: Vec::new(),
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -1278,7 +1290,20 @@ impl Engine {
     /// A line the mind wrote: a note to keep, a file to read.
     fn line_done(&mut self, line: &str) {
         let l = line.trim();
-        // Its tools work with or without an objective (their results are
+        // A line written again and again ("```" on every line, on the live
+        // service, through DRY and the repeat penalty): at `LINE_REPEATS` in
+        // a row its first token is held back for `HOLD_BACK_US`, and it is told.
+        if !l.is_empty() && l == self.last_line {
+            self.line_repeats += 1;
+            if self.line_repeats + 1 >= LINE_REPEATS {
+                self.line_repeats = 0;
+                self.hold_back(l);
+            }
+        } else {
+            self.line_repeats = 0;
+            self.last_line = l.to_string();
+        }
+        // Its tools work with or without an objective) (their results are
         // real: what grounds it); each use goes to the terminals as an
         // `act` line, its result as another (`act_end`).
         let tool = |p: &str| {
@@ -1523,6 +1548,7 @@ impl Engine {
         if self.idle_output() {
             banned.extend(&self.speak_ban);
         }
+        banned.extend(self.held_back.iter().map(|(t, _)| *t));
         let s = self.cfg.sampling.clone();
         self.llm.set_banned(&banned, &s, &self.history);
     }
@@ -1531,6 +1557,40 @@ impl Engine {
     /// objective.
     fn idle_output(&self) -> bool {
         self.cfg.gate_output && self.objective.is_none()
+    }
+
+    /// A line it wrote `LINE_REPEATS` times running: its first token held
+    /// back for `HOLD_BACK_US` (added to the banned tokens, `apply_gate`), a
+    /// fence's state forgotten (a run of "```" lines leaves it meaningless),
+    /// and it is told.
+    fn hold_back(&mut self, line: &str) {
+        let Some(&first) = self
+            .llm
+            .tokenize(line, false)
+            .ok()
+            .and_then(|t| t.first().cloned())
+            .as_ref()
+        else {
+            return;
+        };
+        let until = clock::mono_us() + HOLD_BACK_US;
+        self.held_back.retain(|(t, _)| *t != first);
+        self.held_back.push((first, until));
+        if line.contains("```") {
+            self.in_code = false;
+            self.fence_tail.clear();
+        }
+        self.apply_gate();
+        let piece = self.llm.text(&[first]);
+        self.note(format!(
+            "a line repeated {LINE_REPEATS} times running: {line:?}; {piece:?} held back {} s",
+            HOLD_BACK_US / 1_000_000
+        ));
+        let msg = self.framed_system(&format!(
+            "you wrote the line {line:?} {LINE_REPEATS} times running; it is set aside for {} s: go on with something else, concretely, and check something real with a tool",
+            HOLD_BACK_US / 1_000_000
+        ));
+        self.queue.push_back((msg, "a repeated line".into()));
     }
 
     /// A tool it used: its id, sent to the terminals as an `act` line.
@@ -2879,6 +2939,12 @@ impl Engine {
         }
         // Its terminal: commands that ended come back as documents.
         self.poll_term();
+        // Tokens held back after a repeated line come back when their time is up.
+        let mono_now = clock::mono_us();
+        if self.held_back.iter().any(|(_, u)| *u <= mono_now) {
+            self.held_back.retain(|(_, u)| *u > mono_now);
+            self.apply_gate();
+        }
         // A line ended: the second chain's moment.
         if std::mem::take(&mut self.line_ended) {
             self.on_line_end()?;
