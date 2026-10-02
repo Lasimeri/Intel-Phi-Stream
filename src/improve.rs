@@ -174,6 +174,105 @@ fn changes(cfg: &ImproveConfig, base: &str) -> Result<Vec<Change>, String> {
     Ok(out)
 }
 
+/// The changed lines between two texts, as git counts them (`--numstat`,
+/// added plus removed).
+fn distance(dir: &Path, a: &[u8], b: &[u8]) -> Option<usize> {
+    let (pa, pb) = (dir.join("a"), dir.join("b"));
+    std::fs::write(&pa, a).ok()?;
+    std::fs::write(&pb, b).ok()?;
+    let out = Command::new("git")
+        .args(["diff", "--no-index", "--numstat", "--"])
+        .arg(&pa)
+        .arg(&pb)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut f = s.split_whitespace();
+    let add: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let del: usize = f.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    Some(add + del)
+}
+
+/// A stale copy merged onto the base (`rebase`): the stream's overlay copies a
+/// file up whole from the live tree when it first writes it, so its copy can
+/// be older than `HEAD`, and a diff against `HEAD` then reverts every commit
+/// since (candidate 4 deleted `drop_real_paths`, committed after its copy was
+/// made). For each changed file, the version it was copied from is taken as
+/// the one of the last 30 commits touching it that its copy is nearest to;
+/// when that is not the base's, the stream's own change (that version to its
+/// copy) is merged onto the base's version (`git merge-file`). A clean merge
+/// replaces the copy, and is said; a conflict refuses the candidate.
+fn rebase(cfg: &ImproveConfig, base: &str, ch: &mut Vec<Change>) -> Result<Vec<String>, String> {
+    let tmp = cfg.root.join("rebase");
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    let mut said = Vec::new();
+    for (rel, new) in ch.iter_mut() {
+        let Some(copy) = new.as_ref() else {
+            continue;
+        };
+        let Ok(at_base) = git(&cfg.repo, &["show", &format!("{base}:{rel}")]) else {
+            continue; // a new file: nothing to revert
+        };
+        let log = git(
+            &cfg.repo,
+            &["log", "-n", "30", "--format=%H", base, "--", rel],
+        )?;
+        let commits: Vec<String> = String::from_utf8_lossy(&log)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let mut best: Option<(usize, String, Vec<u8>)> = None;
+        for c in &commits {
+            // The version as of the commit, and as of just before it (a copy
+            // made between two commits matches the earlier one's result).
+            for v in [c.clone(), format!("{c}^")] {
+                let Ok(text) = git(&cfg.repo, &["show", &format!("{v}:{rel}")]) else {
+                    continue;
+                };
+                let Some(d) = distance(&tmp, &text, copy) else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|b| d < b.0) {
+                    best = Some((d, v, text));
+                }
+            }
+        }
+        let Some((_, origin, from)) = best else {
+            continue;
+        };
+        if from == at_base {
+            continue;
+        }
+        let (pc, po, pn) = (tmp.join("current"), tmp.join("origin"), tmp.join("new"));
+        for (p, b) in [(&pc, &at_base), (&po, &from), (&pn, copy)] {
+            std::fs::write(p, b).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        let m = Command::new("git")
+            .args(["merge-file", "-p", "--quiet"])
+            .arg(&pc)
+            .arg(&po)
+            .arg(&pn)
+            .output()
+            .map_err(|e| format!("git merge-file: {e}"))?;
+        let short = origin.get(..10).unwrap_or(&origin).to_string();
+        if m.status.code() != Some(0) {
+            return Err(format!(
+                "your copy of {rel} was made from an older version ({short}) than the repository's head, and your change does not merge onto the head cleanly: read {rel} again and make the change over the new version"
+            ));
+        }
+        said.push(format!(
+            "{rel}: your copy was made from {short}, older than the head; your change was merged onto the head"
+        ));
+        *new = Some(m.stdout);
+    }
+    // A change that merged into nothing (the head already holds it).
+    ch.retain(|(rel, new)| match new {
+        Some(b) => git(&cfg.repo, &["show", &format!("{base}:{rel}")]).map_or(true, |h| &h != b),
+        None => true,
+    });
+    Ok(said)
+}
+
 /// Stage a candidate: the base exported from git (`git archive`) into
 /// `tree/`, made a repository of its own with the base as its one commit,
 /// the changes written over it, and the diff kept as `change.patch` (what
@@ -444,25 +543,28 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
         );
         return done(o, Verdict::Refused, s);
     }
-    // A file the repository changed since the stream was last told of a
-    // commit: its copy was made from an older one, and building it would
-    // revert that commit's work there.
-    if let Some(t) = told.filter(|t| *t != base) {
-        let range = format!("{t}..{base}");
-        let mut args = vec!["log", "--format=%h", range.as_str(), "--"];
-        args.extend(o.files.iter().map(|f| f.as_str()));
-        match git(&cfg.repo, &args) {
-            Ok(out) if !out.is_empty() => {
-                let s = format!(
-                    "these files changed in the repository since your copy was made (commits {}): read them again and make the change over the new version",
-                    String::from_utf8_lossy(&out).split_whitespace().collect::<Vec<_>>().join(", ")
-                );
-                return done(o, Verdict::Refused, s);
-            }
-            Ok(_) => {}
-            Err(e) => return done(o, Verdict::Refused, e),
-        }
+    // A copy older than the head is merged onto it, not built as a revert
+    // (`rebase`; the commits the stream was told of did not say when its
+    // copy was made: candidate 4 was told of eb3c4e1 and still reverted it).
+    let _ = told;
+    let mut ch = ch;
+    let rebased = match rebase(cfg, &base, &mut ch) {
+        Ok(r) => r,
+        Err(e) => return done(o, Verdict::Refused, e),
+    };
+    o.files = ch.iter().map(|c| c.0.clone()).collect();
+    if ch.is_empty() {
+        return done(
+            o,
+            Verdict::Refused,
+            "merged onto the head, your change is already there: nothing to propose".into(),
+        );
     }
+    let pre = if rebased.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", rebased.join("; "))
+    };
     let _ = std::fs::remove_dir_all(&o.dir);
     for d in [
         o.dir.clone(),
@@ -506,7 +608,7 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
                 );
             }
             let s = format!(
-                "make check passed in its sandbox ({}); {}",
+                "{pre}make check passed in its sandbox ({}); {}",
                 tests.last().copied().unwrap_or("no test summary"),
                 if id == 0 {
                     "a trial: nothing is sent; propose it when it is ready"
@@ -522,7 +624,7 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
             } else {
                 String::new()
             };
-            let s = format!("make check failed:\n{why}{}", summarize(&log));
+            let s = format!("{pre}make check failed:\n{why}{}", summarize(&log));
             done(o, Verdict::Failed, s)
         }
         Err(e) => done(o, Verdict::Refused, format!("the build did not start: {e}")),
@@ -727,6 +829,55 @@ impl Improver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy made before a commit is merged onto the head, not built as a
+    /// revert of that commit (candidate 4).
+    #[test]
+    fn a_stale_copy_is_merged_onto_the_head() {
+        let root = std::env::temp_dir().join(format!("improve-rebase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (repo, upper) = (root.join("repo"), root.join("upper"));
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(upper.join("src")).unwrap();
+        let id = ["-c", "user.name=t", "-c", "user.email=t@localhost"];
+        let commit = |m: &str| {
+            git(&repo, &["add", "-A"]).unwrap();
+            let mut c: Vec<&str> = id.to_vec();
+            c.extend(["commit", "-qm", m]);
+            git(&repo, &c).unwrap();
+        };
+        git(&repo, &["init", "-q"]).unwrap();
+        let v1 = "fn a() {}\n\nfn b() {}\n\nfn c() {}\n";
+        std::fs::write(repo.join("src/e.rs"), v1).unwrap();
+        commit("one");
+        // The stream's copy, made from v1, changes c.
+        std::fs::write(
+            upper.join("src/e.rs"),
+            "fn a() {}\n\nfn b() {}\n\nfn c() { 1 }\n",
+        )
+        .unwrap();
+        // Claude's commit after the copy was made changes a.
+        std::fs::write(
+            repo.join("src/e.rs"),
+            "fn a() { 0 }\n\nfn b() {}\n\nfn c() {}\n",
+        )
+        .unwrap();
+        commit("two");
+        let cfg = ImproveConfig {
+            repo: repo.clone(),
+            upper: upper.clone(),
+            root: root.join("improve"),
+            mirror: root.join("mirror"),
+        };
+        let base = head(&repo).unwrap();
+        let mut ch = changes(&cfg, &base).unwrap();
+        let said = rebase(&cfg, &base, &mut ch).unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let merged = String::from_utf8(ch[0].1.clone().unwrap()).unwrap();
+        assert!(merged.contains("fn a() { 0 }"), "the commit kept: {merged}");
+        assert!(merged.contains("fn c() { 1 }"), "the change kept: {merged}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_loop_and_the_build_are_denied() {

@@ -126,6 +126,18 @@ are committed (the file changed after `head_told`), but the rule for
 Claude is plain: commit before the stream edits, or work in another
 worktree while the loop runs.
 
+Since candidate 4 the loop merges instead of refusing (`rebase`): the
+version a changed file was copied from is taken as the one, among the last
+30 commits touching it (each commit and its parent), that the copy is
+nearest to by changed lines; when that is older than the base, the
+stream's change (that version to its copy) is merged onto the base's
+version with `git merge-file`, the stream is told so, and a conflict
+refuses the candidate with the file to redo. Candidate 4 was told of
+eb3c4e1 and still deleted its `drop_real_paths`: the commits it was told of
+never said when its copy was made, so that check is gone. Tested on a real
+repository: a copy made before a commit keeps both the commit and the
+change.
+
 A format failure is told with its fix (rustfmt is in its terminal).
 
 ## What it reads
