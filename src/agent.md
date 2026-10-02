@@ -28,7 +28,11 @@ tool calls, as its chat template (read from the GGUF's
   without it a finished objective was answered every turn with "go on, act
   with a tool", and its thinking went round saying "Done", 70 percent of
   its 8-grams repeated), `tell_claude` (a message to Claude, `re` naming
-  the message of Claude's it answers).
+  the message of Claude's it answers). With `--improve`, `propose` too (a title
+  and a why): its working copy's change built and tested in a sandbox,
+  the outcome at a later turn and in `improve.log` (`improve.md`).
+  The persona then gains a paragraph naming the loop and its log
+  (`IMPROVE_AGENT`).
   In development the persona's text names these tools
   (`engine::agent_persona`), not the chat frame's bracketed lines
   (`[read: PATH]`, `[prefer: ...]`), which it still taught beside them. The persona follows,

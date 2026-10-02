@@ -34,7 +34,9 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
   Claude's as its own change), its own
   process tree, a cleared environment (`PATH=/usr/bin`, `HOME` the
   workspace);
-- Python masked (each interpreter's file bound over by `/dev/null`): the
+- Python masked (each interpreter's file bound over by `/dev/null`; the
+  list, `masked`, is the improvement loop's build sandbox's too,
+  `improve.md`): the
   person's standing instructions forbid it, and they are its manner too;
 - at the lowest priority (`nice -n 19`) on the last CPU (`taskset`): the
   stream's own threads start from the first, and a second process on

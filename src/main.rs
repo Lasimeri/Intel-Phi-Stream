@@ -14,6 +14,7 @@ mod engine;
 mod eval;
 mod format;
 mod gate;
+mod improve;
 mod lens;
 mod llm;
 mod mcp;
@@ -234,6 +235,12 @@ struct StreamArgs {
     /// live one (shadow; takes a fifth sequence, --n-seq 5 is implied).
     #[arg(long)]
     guide: bool,
+    /// The self-improvement loop (src/improve.md): with --dev and --frame
+    /// agent, the propose tool; a change from its working copy is built and
+    /// tested in a sandbox (make check), the outcome told to it and kept in
+    /// improve.log; one that passes goes to Claude for review.
+    #[arg(long)]
+    improve: bool,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -470,6 +477,21 @@ enum Cmd {
     Code {
         #[command(subcommand)]
         cmd: CodeCmd,
+    },
+    /// A candidate built by hand, as the propose tool builds one (improve.md;
+    /// no service): the files of UPPER over the repository's HEAD, refused
+    /// on a denied path, else staged and run through make check in the
+    /// sandbox; the outcome printed, the candidate under ~/.cache/phi-stream/improve.
+    Improve {
+        /// A layer of changed files, laid out as the repository.
+        #[arg(long)]
+        upper: PathBuf,
+        /// One line: what the change does.
+        #[arg(long)]
+        title: String,
+        /// The repository (default: the current directory).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
     },
     /// The lens: its checks and readouts (no service).
     Lens {
@@ -737,6 +759,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         chain_against: s.chain_against,
         goal_probe: s.goal_probe,
         guide: s.guide,
+        improve: s.improve,
         agent,
     })
 }
@@ -1362,6 +1385,35 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Cmd::Improve { upper, title, repo } => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let mut imp = improve::Improver::new(improve::ImproveConfig {
+                repo: repo.canonicalize()?,
+                upper: upper.canonicalize()?,
+                root: PathBuf::from(home).join(".cache/phi-stream/improve"),
+            });
+            let id = imp
+                .propose(&title, None)
+                .map_err(|b| anyhow::anyhow!("candidate {b} is building"))?;
+            eprintln!("candidate {id}: staging and building (make check in the sandbox)");
+            loop {
+                if let Some(o) = imp.poll() {
+                    println!(
+                        "candidate {} {} in {:.0} s: {}\nfiles: {}\nbase {}\ndir {}\n{}",
+                        o.id,
+                        o.verdict.word(),
+                        o.secs,
+                        o.title,
+                        o.files.join(", "),
+                        o.base,
+                        o.dir.display(),
+                        o.summary
+                    );
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
         Cmd::Lens { cmd } => match cmd {
             LensCmd::Convert { src, out } => {
                 let h = lens::convert(&expand_home(&src), &expand_home(&out))?;

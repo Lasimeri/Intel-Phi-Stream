@@ -47,7 +47,7 @@ pub struct Ran {
 
 /// The programs a command may not run: the person's standing instructions
 /// forbid Python, so the interpreters are masked inside the sandbox.
-fn masked() -> Vec<PathBuf> {
+pub(crate) fn masked() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir("/usr/bin") {
         for e in rd.flatten() {

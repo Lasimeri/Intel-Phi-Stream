@@ -583,6 +583,7 @@ pub fn stream(
             goal_probe: false,
             agent: false,
             guide: false,
+            improve: false,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

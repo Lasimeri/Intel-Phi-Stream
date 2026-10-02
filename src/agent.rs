@@ -49,9 +49,9 @@ fn tool(name: &str, desc: &str, props: &[(&str, &str, &str)], required: &[&str])
     )
 }
 
-/// The tools.
-fn tools() -> Vec<String> {
-    vec![
+/// The tools; `propose` only with the self-improvement loop (`improve.md`).
+fn tools(improve: bool) -> Vec<String> {
+    let mut list = vec![
         tool(
             "run",
             "Run a shell command in your sandbox and get its exit code and output (at most about 4096 tokens: past that its leading lines and how much was cut, so narrow a big output with head, tail or grep). It already starts in the repository, so paths are relative to it and no cd is needed; what it writes there lands in your working copy (the repository itself never changes). /tmp is kept between commands. No network, 60 s at most: a command stopped at the limit has no result. A Rust build (cargo) does not fit in that time here; Claude builds and tests the Rust code. Use it to build C with tcc, test, search (grep -n) and list; to read a file use read, to change one use edit.",
@@ -111,13 +111,25 @@ fn tools() -> Vec<String> {
             ],
             &["text"],
         ),
-    ]
+    ];
+    if improve {
+        list.push(tool(
+            "propose",
+            "Put the change in your working copy forward as one improvement to yourself (this program, the one you run in). It is staged as a diff against the repository's current commit and refused if it touches the build, the scripts or this loop with its evaluators, or if a file it changes was changed in the repository after your copy was made; then it is built and tested in a sandbox (make check: format, clippy, release build, tests; it takes minutes). The outcome comes at a later turn and is kept in improve.log in your workspace with every earlier one: read it to choose what to try next, and fix a failed build from its errors. A change that passes goes to Claude for review, then is measured on the running model before it is kept. One candidate at a time; make one change, small and whole, per proposal.",
+            &[
+                ("title", "string", "One line: what the change does."),
+                ("why", "string", "What it should improve in you, and how that would show (a measure, a behaviour, a test)."),
+            ],
+            &["title", "why"],
+        ));
+    }
+    list
 }
 
 /// The system turn's tools section, exactly as the model's chat template
 /// writes it for these tools (its text up to the system content).
-pub fn tools_section() -> String {
-    let list = tools();
+pub fn tools_section(improve: bool) -> String {
+    let list = tools(improve);
     format!(
         "# Tools\n\nYou have access to the following functions:\n\n<tools>\n{}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>",
         list.join("\n")
@@ -250,7 +262,7 @@ mod tests {
 
     #[test]
     fn the_tools_section_is_the_templates() {
-        let s = tools_section();
+        let s = tools_section(false);
         assert!(
             s.starts_with("# Tools\n\nYou have access to the following functions:\n\n<tools>\n{")
         );

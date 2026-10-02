@@ -273,6 +273,10 @@ pub struct Config {
     /// in it, read beside every thinking token (shadow: measured, not used).
     /// Needs a fifth sequence (`--n-seq 5`).
     pub guide: bool,
+    /// The self-improvement loop (`improve.md`): the `propose` tool, its
+    /// changes built and tested in a sandbox, `improve.log`. Needs `dev`
+    /// and the agent frame.
+    pub improve: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -313,6 +317,9 @@ const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI
 /// The development text in the agent frame: the tools in place of the
 /// chat frame's bracketed lines (`[read: PATH]`, `[prefer: ...]`), which its
 /// persona still taught beside the tools on the live service.
+/// In the self-improvement loop (`improve.md`), after the persona.
+const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program in your working copy, then put the change forward with propose. It is built and tested in a sandbox, and Claude reviews what passes before it is measured on the running model and kept. Your workspace holds improve.log, every change you proposed, why, and its outcome: read it before you choose the next change, learn from what failed, and make one small, whole change at a time.";
+
 const DEV_AGENT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Your memory holds about {ctx} thousand tokens, so read code a function at a time (read, with start and end), search with run (grep -n), and change files with edit. Claude's messages reach you in user turns, marked Claude; those that wait for an answer carry an id (c3): answer them with tell_claude and re. Send Claude your findings and proposals with tell_claude, concretely (the file, the function, the change and why, and what you checked with a tool), each once; Claude reads every one and answers. Your notes (note) are your own memory, shown to you at every refresh. Your workspace holds your own records: reflect.log (the checks of your words), notes.md, chain.log (your own tokens), guide.log (your guide lane) and to-claude.md (your messages). Where anything here conflicts with the person's standing instructions above, those instructions win.";
 
 /// The persona with its memory's size in it (`{ctx}`: the context's
@@ -689,6 +696,10 @@ pub struct Engine {
     failed_reads: HashMap<String, i64>,
     /// Its terminal (`--terminal`), and whether a command is running.
     term: Option<crate::term::Term>,
+    /// The self-improvement loop (`--improve`): its builder, and the log
+    /// of every proposal and outcome, which the stream reads.
+    improver: Option<crate::improve::Improver>,
+    improve_log: RotLog,
     term_pending: usize,
     /// Its tool uses: the next id, the `act` id of each terminal command by
     /// the terminal's id, when it last used a tool and was last reminded to.
@@ -884,9 +895,12 @@ impl Engine {
         if cfg.agent {
             cfg.system = format!(
                 "{}\n\n{}",
-                crate::agent::tools_section(),
+                crate::agent::tools_section(cfg.improve && cfg.dev.is_some()),
                 agent_persona(&cfg.system, cfg.dev.as_deref(), llm.n_ctx())
             );
+            if cfg.improve && cfg.dev.is_some() {
+                cfg.system.push_str(IMPROVE_AGENT);
+            }
         }
         let think_open = llm.special("<think>").unwrap_or(-1);
         let think_close = llm.special("</think>").unwrap_or(-1);
@@ -988,6 +1002,22 @@ impl Engine {
                 .with_file_name(format!("{name}-copy"))
                 .join("upper")
         });
+        // The self-improvement loop: its candidates staged and built under the
+        // cache (on disk), its log in the workspace (`improve.md`).
+        let improver = match (&cfg.dev, &copy_upper) {
+            (Some(repo), Some(upper)) if cfg.improve && cfg.agent => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                Some(crate::improve::Improver::new(
+                    crate::improve::ImproveConfig {
+                        repo: repo.clone(),
+                        upper: upper.clone(),
+                        root: PathBuf::from(home).join(".cache/phi-stream/improve"),
+                    },
+                ))
+            }
+            _ => None,
+        };
+        let improve_log = RotLog::open(cfg.workspace.join("improve.log"));
         let term = cfg.terminal.then(|| {
             crate::term::Term::start(crate::term::TermConfig {
                 repo: cfg.dev.clone(),
@@ -1167,6 +1197,8 @@ impl Engine {
             last_read_failure_mono: i64::MIN / 2,
             failed_reads: HashMap::new(),
             term,
+            improver,
+            improve_log,
             term_pending: 0,
             // Off by default: its holding back cascaded on the live service
             // (`breaker on` turns it on, measured).
@@ -1871,7 +1903,11 @@ impl Engine {
         }
         if let Some(text) = self.reflection.take() {
             let at = clock::hms(clock::now_us());
-            let side = if self.reflection_against { "against" } else { "beside" };
+            let side = if self.reflection_against {
+                "against"
+            } else {
+                "beside"
+            };
             let line = match self.cfg.frame {
                 Frame::Journal => format!("\n« [{at}] [{side} the journal: {text}]\n"),
                 Frame::Chat => format!("\n[at {at}, {side} your thoughts: {text}]\n"),
@@ -2017,7 +2053,12 @@ impl Engine {
         };
         let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
         let z = l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>();
-        let mass = |ts: &[i32]| ts.iter().map(|&t| (l[t as usize] as f64 - m).exp()).sum::<f64>() / z;
+        let mass = |ts: &[i32]| {
+            ts.iter()
+                .map(|&t| (l[t as usize] as f64 - m).exp())
+                .sum::<f64>()
+                / z
+        };
         let (py, pn) = (mass(y), mass(n));
         let kind = match (self.chain_on, self.chain_against) {
             (false, _) => "off",
@@ -2109,7 +2150,11 @@ impl Engine {
         self.llm.seq_rm(c.seq, -1, -1);
         self.free_seqs.push(c.seq);
         let said = self.llm.text(&c.out).trim().to_string();
-        let primer = if c.against { AGAINST_PRIMER } else { CHAIN_PRIMER };
+        let primer = if c.against {
+            AGAINST_PRIMER
+        } else {
+            CHAIN_PRIMER
+        };
         let text = format!("{primer} {said}");
         // What only repeats the journal's frame is no reflection.
         let echo = said.is_empty()
@@ -2524,8 +2569,10 @@ impl Engine {
                     Some(t) if !t.trim().is_empty() => self.send_claude(t.trim(), c.param("re")),
                     _ => "tell_claude needs a text".to_string(),
                 }),
+                "propose" => Some(self.agent_propose(c)),
                 other => Some(format!(
-                    "there is no function {other:?}: the functions are run, read, edit, write, note, wait and tell_claude"
+                    "there is no function {other:?}: the functions are run, read, edit, write, note, wait{} and tell_claude",
+                    if self.improver.is_some() { ", propose" } else { "" }
                 )),
             };
             wait.results[i] = result;
@@ -3072,6 +3119,88 @@ impl Engine {
 
     /// Commands that ended: each as a document handed back to it, and to
     /// the terminals.
+    /// `propose` (`improve.md`): its working copy's change put forward as
+    /// one candidate, built on the improver's thread; the outcome comes at
+    /// a later turn (`poll_improve`).
+    fn agent_propose(&mut self, c: &crate::agent::Call) -> String {
+        let title = c.param("title").unwrap_or("").trim().to_string();
+        let why = c.param("why").unwrap_or("").trim().to_string();
+        if title.is_empty() || why.is_empty() {
+            return "propose needs a title and a why".to_string();
+        }
+        let told = self.head_told.clone();
+        if self.improver.is_none() {
+            return "there is no improvement loop in this run (--improve)".to_string();
+        }
+        let act = self.act("propose", &title);
+        match self.improver.as_mut().unwrap().propose(&title, told) {
+            Ok(id) => {
+                self.improve_log.line(&format!(
+                    "{}\tcandidate {id}\tproposed\t{title}\twhy: {why}",
+                    clock::hms(clock::now_us())
+                ));
+                let said = format!(
+                    "candidate {id}: staged and building in its sandbox (make check: format, clippy, build, tests; minutes); the outcome comes at a later turn and goes into improve.log"
+                );
+                self.act_end(act, true, said.clone());
+                said
+            }
+            Err(busy) => {
+                let said = format!(
+                    "candidate {busy} is still building: one at a time; its outcome comes first"
+                );
+                self.act_end(act, false, said.clone());
+                said
+            }
+        }
+    }
+
+    /// A candidate's outcome: into `improve.log`, told to the stream at its
+    /// next turn (and it wakes a rest: its outcome is something to act on),
+    /// and one that passed is sent to Claude for review.
+    fn poll_improve(&mut self) {
+        let Some(o) = self.improver.as_mut().and_then(|i| i.poll()) else {
+            return;
+        };
+        let at = clock::hms(clock::now_us());
+        let files = o.files.join(", ");
+        self.improve_log.line(&format!(
+            "{at}\tcandidate {}\t{}\t{}\tfiles: {files}\tbase {}\t{:.0} s\t{}",
+            o.id,
+            o.verdict.word(),
+            o.title,
+            o.base.get(..12).unwrap_or(&o.base),
+            o.secs,
+            o.summary.replace('\n', " | ")
+        ));
+        self.note(format!(
+            "candidate {} {}: {} ({:.0} s)",
+            o.id,
+            o.verdict.word(),
+            o.title,
+            o.secs
+        ));
+        self.waiting.push(format!(
+            "[{at}] your candidate {} ({}) {}: {}",
+            o.id,
+            o.title,
+            o.verdict.word(),
+            o.summary
+        ));
+        if o.verdict == crate::improve::Verdict::Passed {
+            let _ = self.send_claude(
+                &format!(
+                    "[improve] candidate {} passed make check in its sandbox: {} (files: {files}; base {}). The change: {}",
+                    o.id,
+                    o.title,
+                    o.base.get(..12).unwrap_or(&o.base),
+                    o.dir.join("change.patch").display()
+                ),
+                None,
+            );
+        }
+    }
+
     fn poll_term(&mut self) {
         while let Some(ran) = self.term.as_ref().and_then(|t| t.poll()) {
             self.term_pending = self.term_pending.saturating_sub(1);
@@ -4599,6 +4728,7 @@ impl Engine {
         }
         // Its terminal: commands that ended come back as documents.
         self.poll_term();
+        self.poll_improve();
         // Tokens held back after a repeated line come back when their time is up.
         let mono_now = clock::mono_us();
         if self.held_back.iter().any(|(_, u)| *u <= mono_now) {
@@ -5140,6 +5270,7 @@ impl Engine {
             // turn: commands still come in, nothing is decoded meanwhile.
             if self.awaiting.is_some() {
                 self.poll_term();
+                self.poll_improve();
                 self.finish_agent_wait()?;
                 if self.awaiting.is_some() {
                     self.release();

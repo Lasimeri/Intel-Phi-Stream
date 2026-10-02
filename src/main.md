@@ -27,7 +27,11 @@ write working code: MultiPL-E's HumanEval in Rust, compiled and tested
 in a sandbox, `src/code.md`; `scripts/fetch-code-eval.sh` fetches the
 tasks),
 `run` (the stream on stdout, stdin lines said to it, `/feed FILE`,
-`/chunk N`, `/quit`; `--max-tokens` to stop; for scripted tests). The
+`/chunk N`, `/quit`; `--max-tokens` to stop; for scripted tests).
+`improve --upper DIR --title TEXT` needs no model: a candidate built by
+hand as the `propose` tool builds one (`src/improve.md`). `serve` takes
+`--improve` (the self-improvement loop: the `propose` tool, with `--dev`
+and the agent frame). The
 clients take `--socket PATH` (or `PHI_STREAM_SOCKET`; `src/client.md`).
 
 Model options, before the subcommand: `-m` (or `PHI_STREAM_MODEL`,

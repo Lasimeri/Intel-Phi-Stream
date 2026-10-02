@@ -679,3 +679,15 @@ other pieces carry none). Its reading (`Event::Mind`) has the same
 position and comes first: the token is read when it is decoded, a cycle
 after it is placed, and the hold releases it later. The terminal joins
 the two by it to weave the J-lens into the reasoning (`tui.md`).
+
+## The self-improvement loop (`--improve`)
+
+With `--dev` and the agent frame, the tools gain `propose` and the persona
+a paragraph naming the loop and its log (`IMPROVE_AGENT`). `propose`
+hands the working copy's change to the improver (`improve.md`), which
+stages, builds and tests it on a thread of its own while the stream goes
+on; `poll_improve` (beside `poll_term`, every cycle) takes its outcome:
+a line of `improve.log` in the workspace, a waiting line for the stream's
+next user turn (which wakes a rest: an outcome is something to act on),
+a note, and for a candidate that passed, a message to Claude
+(`to-claude.md`, `[improve]`, with the path of its `change.patch`).

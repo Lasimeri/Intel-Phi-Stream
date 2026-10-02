@@ -1631,7 +1631,10 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
             None => "the lens under the reasoning: off (/lens turns it on)".to_string(),
         });
         return;
-    } else if matches!(line, "/chain on" | "/chain off" | "/chain against" | "/goal on" | "/goal off") {
+    } else if matches!(
+        line,
+        "/chain on" | "/chain off" | "/chain against" | "/goal on" | "/goal off"
+    ) {
         line.trim_start_matches('/').to_string()
     } else if line == "/objective" {
         v.notes.push(match &v.objective {

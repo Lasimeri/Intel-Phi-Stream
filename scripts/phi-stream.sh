@@ -119,7 +119,7 @@ case "$sub" in
             fi
             args+=("$a")
         done
-        if tmux has-session -t "$session" 2>/dev/null; then
+        if tmux has-session -t "=$session" 2>/dev/null; then
             echo "$0: the service is already running in tmux session $session (attach, or stop)" >&2
             exit 1
         fi
@@ -161,7 +161,7 @@ case "$sub" in
         fi
         alive "$keeppid" && exit 0
         echo $$ > "$keeppid"
-        while tmux has-session -t "$session" 2> /dev/null; do
+        while tmux has-session -t "=$session" 2> /dev/null; do
             if ! alive "$winpid" && running; then
                 open_window || true
             fi
@@ -220,10 +220,10 @@ case "$sub" in
         rm -f "$keeppid"
         "$bin" quit 2>/dev/null || true
         for _ in $(seq 1 120); do
-            tmux has-session -t "$session" 2>/dev/null || break
+            tmux has-session -t "=$session" 2>/dev/null || break
             sleep 1
         done
-        tmux kill-session -t "$session" 2>/dev/null || true
+        tmux kill-session -t "=$session" 2>/dev/null || true
         echo "stopped; starting again, the window kept"
         exec "$0" "${rest[@]}"
         ;;
@@ -239,10 +239,10 @@ case "$sub" in
         # to two minutes, then the session ends anyway.
         "$bin" quit 2>/dev/null || true
         for _ in $(seq 1 120); do
-            tmux has-session -t "$session" 2>/dev/null || break
+            tmux has-session -t "=$session" 2>/dev/null || break
             sleep 1
         done
-        tmux kill-session -t "$session" 2>/dev/null || true
+        tmux kill-session -t "=$session" 2>/dev/null || true
         if alive "$winpid"; then
             kill "$(cat "$winpid")" 2> /dev/null || true
         fi
