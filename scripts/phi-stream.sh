@@ -205,7 +205,7 @@ case "$sub" in
             fi
             rest+=("$a")
         done
-        exec "$0" start --dev "$root" --mind --reflect --terminal --rollover-tokens 150000 \
+        exec "$0" start --dev "$root" --mind --reflect --terminal --rollover-tokens 150000 --second-chain \
             --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev$suffix}" "${rest[@]}"
         ;;
     attach)

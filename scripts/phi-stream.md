@@ -41,9 +41,10 @@ shows it: the diagnostics (the placement, the rates, the context, the
 mind strip, the checks) and the input line (`src/tui.md`).
 - `dev` adds `--terminal` (the stream's sandboxed terminal, `src/term.md`)
 and `--rollover-tokens 150000` (it is told its memory is nearly full only
-past 150 thousand cells). The second chain is off in `dev` while the
-stream's stability is measured: `/chain on` in the terminal (or `chain on`
-on the socket) turns it on live.
+past 150 thousand cells) and `--second-chain`: measured in the agent frame
+(2026-10-02, two interleaved pairs of 5 minutes) it cut the repeated
+8-grams from 19.8 to 11.3 percent for 13 percent of the stream's rate.
+`phi-stream chain off` (or `/chain off` in the terminal) turns it off live.
 `stop` waits up to two minutes for the service to write its summary and
 end (`src/engine.md`) before it ends the session.
 
