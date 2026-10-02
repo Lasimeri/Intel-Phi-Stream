@@ -82,3 +82,9 @@ Tests:
 - a true note passes and a false one is caught, its `file:line` quoted;
 - a line past a file's end and a missing file are reported;
 - whole words only.
+- **Real files are not findings** (`drop_real_paths`): the repository holds
+  only its own files, so a workspace file (`lessons.md`), an absolute path,
+  or a repository path written with its absolute prefix (cut at the space in
+  "Intel Phi Stream") was told as "does not exist", and the stream rightly
+  called that ground truth false. A path that exists on disk, in the
+  workspace, or as a tail the repository holds is dropped from the findings.

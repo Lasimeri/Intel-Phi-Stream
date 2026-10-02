@@ -3695,6 +3695,10 @@ impl Engine {
         let checked = if self.cfg.dev.is_some() {
             self.ground_repo()
                 .map(|r| r.check(text))
+                .map(|mut f| {
+                    self.drop_real_paths(&mut f);
+                    f
+                })
                 .filter(|f| !f.clean())
                 .map(|f| Self::ground_words(&f).join("; "))
         } else {
@@ -3759,6 +3763,40 @@ impl Engine {
         self.ground_repo.as_ref().map(|(_, r)| r)
     }
 
+    /// A file reference that is real after all: the repository holds only
+    /// its own files, so a path in the workspace (`lessons.md`), an absolute
+    /// path, or a path of the repository written with its absolute prefix
+    /// (cut at the space in "Intel Phi Stream") was told as "does not exist",
+    /// and the stream rightly called the ground truth false.
+    fn drop_real_paths(&self, f: &mut verify::Findings) {
+        let ws = self.cfg.workspace.clone();
+        let root = self.cfg.dev.clone();
+        f.bad_refs.retain(|b| {
+            let Some(p) = b.strip_suffix(" does not exist") else {
+                return true;
+            };
+            let p = p.trim();
+            let real = |q: &str| {
+                !q.is_empty()
+                    && (Path::new(q).is_file()
+                        || ws.join(q).is_file()
+                        || root.as_ref().is_some_and(|r| r.join(q).is_file()))
+            };
+            if real(p) {
+                return false;
+            }
+            // A tail of it that the repository holds (`.../src/engine.rs`).
+            let mut tail = p;
+            while let Some(i) = tail.find('/') {
+                tail = &tail[i + 1..];
+                if root.as_ref().is_some_and(|r| r.join(tail).is_file()) {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
     /// A thinking line checked against the code (development, agent frame;
     /// `verify.md`): a code name no file holds, a file that does not exist,
     /// a line past a file's end, each told to it once in `GROUND_AGAIN_US`
@@ -3774,9 +3812,10 @@ impl Engine {
         if verify::code_names(line).is_empty() && verify::file_refs(line).is_empty() {
             return;
         }
-        let Some(f) = self.ground_repo().map(|r| r.check(line)) else {
+        let Some(mut f) = self.ground_repo().map(|r| r.check(line)) else {
             return;
         };
+        self.drop_real_paths(&mut f);
         if f.clean() {
             return;
         }
