@@ -779,6 +779,7 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
     }
     let llm = load_mind(&m, &s.mind)?;
     let info = info_line(&llm, &cfg);
+    serve::asks_from(cfg.workspace.join("asks"));
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
     if let Some(f) = &s.feed {

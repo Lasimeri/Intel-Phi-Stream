@@ -23,8 +23,22 @@ use crate::client::{escape, kind_name, status_line};
 use crate::engine::{Command, Event, Kind};
 
 /// The id of the next message from Claude that waits for an answer
-/// (`ask`: c1, c2, ...).
+/// (`ask`: c1, c2, ...), and the file it is kept in (`asks_from`).
 static ASKS: AtomicU64 = AtomicU64::new(1);
+static ASKS_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Ids of asks go on from the last service's (kept in `path`): begun at c1
+/// at each restart, a new c1 met the old c1 in the stream's summary, and it
+/// answered the new one with a review the old one had asked for.
+pub fn asks_from(path: PathBuf) {
+    let next = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .max(1);
+    ASKS.store(next, Ordering::SeqCst);
+    let _ = ASKS_FILE.set(path);
+}
 
 const KEEP_CHARS: usize = 400_000;
 /// What a new `tail` is shown first.
@@ -290,6 +304,9 @@ fn connection(
                     Err("ask what?".to_string())
                 } else {
                     let id = ASKS.fetch_add(1, Ordering::SeqCst);
+                    if let Some(p) = ASKS_FILE.get() {
+                        let _ = fs::write(p, format!("{}\n", id + 1));
+                    }
                     let t = crate::clock::now_us();
                     ctx.send(Command::Ask(id, crate::client::unescape(arg), t))
                         .map(|_| format!("asked c{id} t={t}"))

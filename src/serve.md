@@ -14,7 +14,9 @@ running mind and the 40-second load happens once.
   `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
 - `ask TEXT` queues a message from Claude that waits for an answer: its
-  id (`c1`, `c2`, ... for the life of the service) and time come back as
+  id (`c1`, `c2`, ..., going on across restarts from the workspace's `asks`
+  file, `asks_from`: begun at c1 at each restart, a new c1 met the old one
+  in its summary and was answered with the old one's review) and time come back as
   `ok asked c3 t=US`, and the stream answers with `tell_claude` naming
   it; `claude` lines (its messages to Claude) are kept with the terminal's
   lines for a new `tail`. `guide` lines (the guide lane at each thinking token) are
