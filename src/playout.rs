@@ -196,7 +196,7 @@ mod tests {
     use crate::engine::Kind;
 
     fn text(i: usize) -> Event {
-        Event::Text(format!("{i}"), Kind::Think, 0)
+        Event::Text(format!("{i}"), Kind::Think, 0, None)
     }
 
     /// Arrivals at the given times; the pacer driven every millisecond up to
@@ -302,7 +302,7 @@ mod tests {
         let got: Vec<String> = rx
             .try_iter()
             .map(|e| match e {
-                Event::Text(t, _, _) => t,
+                Event::Text(t, _, _, _) => t,
                 Event::Stopped => "stopped".into(),
                 _ => "other".into(),
             })

@@ -858,7 +858,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
     let mut live = 0usize;
     loop {
         match erx.recv() {
-            Ok(Event::Text(t, kind, _)) => {
+            Ok(Event::Text(t, kind, _, _)) => {
                 match kind {
                     Kind::Given => write!(out, "\x1b[33m{t}\x1b[0m")?,
                     Kind::Speak => write!(out, "\x1b[1m{t}\x1b[0m")?,
@@ -939,9 +939,9 @@ fn tail(socket: &Path, with_status: bool, with_mind: bool) -> Result<()> {
     let mut out = std::io::stdout();
     while let Some(line) = c.line()? {
         match parse(&line) {
-            Msg::Text(t, Kind::Given, _) => write!(out, "\x1b[33m{t}\x1b[0m")?,
-            Msg::Text(t, Kind::Speak, _) => write!(out, "\x1b[1m{t}\x1b[0m")?,
-            Msg::Text(t, Kind::Think, _) => write!(out, "{t}")?,
+            Msg::Text(t, Kind::Given, _, _) => write!(out, "\x1b[33m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Speak, _, _) => write!(out, "\x1b[1m{t}\x1b[0m")?,
+            Msg::Text(t, Kind::Think, _, _) => write!(out, "{t}")?,
             Msg::Status(st) => {
                 if with_status {
                     eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st));
@@ -1036,7 +1036,7 @@ fn converse(
             }
         };
         match parse(&line) {
-            Msg::Text(t, Kind::Speak, at) if at >= t0 => {
+            Msg::Text(t, Kind::Speak, at, _) if at >= t0 => {
                 speech.push_str(&t);
                 if let Some(i) = speech.find('\n') {
                     let said = speech[..i].trim().trim_start_matches('»').trim();
@@ -1047,7 +1047,7 @@ fn converse(
                     speech = speech[i + 1..].to_string();
                 }
             }
-            Msg::Text(t, Kind::Think, at) if at >= t0 && thoughts => eprint!("{t}"),
+            Msg::Text(t, Kind::Think, at, _) if at >= t0 && thoughts => eprint!("{t}"),
             Msg::Bye => anyhow::bail!("the service stopped"),
             _ => {}
         }
@@ -1066,7 +1066,7 @@ fn listen(socket: &Path) -> Result<()> {
     let (mut heard, mut heard_t) = (String::new(), 0i64);
     while let Some(line) = c.line()? {
         match parse(&line) {
-            Msg::Text(t, Kind::Speak, at) if at >= t0 => {
+            Msg::Text(t, Kind::Speak, at, _) if at >= t0 => {
                 if speech.is_empty() {
                     speech_t = at;
                 }
@@ -1084,7 +1084,7 @@ fn listen(socket: &Path) -> Result<()> {
                     speech_t = at;
                 }
             }
-            Msg::Text(t, Kind::Given, at) if at >= t0 => {
+            Msg::Text(t, Kind::Given, at, _) if at >= t0 => {
                 // What it heard or was handed: its first line.
                 if heard.is_empty() {
                     heard_t = at;

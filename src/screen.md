@@ -7,7 +7,8 @@ emits only the cells that changed).
 
 A `Screen` is a grid of cells, each one character with a style:
 - `fg` and `bg` colours;
-- a weight (plain, bold, italic).
+- a weight (plain, bold, italic, struck: crossed out, for a word a check
+  wrote over).
 
 The terminal (`tui.md`) draws every frame into a fresh screen:
 - `put` writes text at a position, clipped at the right edge, with

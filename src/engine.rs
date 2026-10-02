@@ -96,8 +96,9 @@ pub struct Status {
 
 pub enum Event {
     /// A piece of the stream, the real time it exists at (microseconds
-    /// since the epoch, `clock.rs`).
-    Text(String, Kind, i64),
+    /// since the epoch, `clock.rs`), and for a placed token its position in
+    /// the live sequence (its `Event::Mind` reading has the same `pos`).
+    Text(String, Kind, i64, Option<i32>),
     Status(Status),
     Note(String),
     /// What was on its mind at a token it placed (`mind.rs`).
@@ -345,10 +346,12 @@ struct Held {
 
 enum Piece {
     Text(String, Kind),
-    /// A placed token; in the chat frame whether it was placed while speaking.
+    /// A placed token; in the chat frame whether it was placed while
+    /// speaking; the position it is decoded at.
     Token {
         t: i32,
         chat_speaking: bool,
+        pos: i32,
     },
 }
 
@@ -1129,6 +1132,11 @@ impl Engine {
     /// Out with a piece: `stream.log` (the text), `chain.log` (each piece
     /// with the microsecond it came to exist) and the clients.
     fn out(&mut self, text: String, kind: Kind, t: i64) {
+        self.out_at(text, kind, t, None)
+    }
+
+    /// `out`, for a placed token at `pos`.
+    fn out_at(&mut self, text: String, kind: Kind, t: i64, pos: Option<i32>) {
         self.log.write(text.as_bytes());
         {
             let f = &mut self.chain;
@@ -1139,7 +1147,7 @@ impl Engine {
             };
             f.line(&format!("{t}\t{k}\t{}", crate::client::escape(&text)));
         }
-        let _ = self.tx.send(Event::Text(text, kind, t));
+        let _ = self.tx.send(Event::Text(text, kind, t, pos));
     }
 
     /// Out with every held piece a check does not hold: a check in flight
@@ -1171,13 +1179,17 @@ impl Engine {
                     }
                     self.out(text, kind, h.t_us);
                 }
-                Piece::Token { t, chat_speaking } => self.release_token(t, chat_speaking, h.t_us),
+                Piece::Token {
+                    t,
+                    chat_speaking,
+                    pos,
+                } => self.release_token(t, chat_speaking, h.t_us, pos),
             }
         }
     }
 
     /// A placed token going out: its text, its kind, its lines.
-    fn release_token(&mut self, t: i32, chat_speaking: bool, t_us: i64) {
+    fn release_token(&mut self, t: i32, chat_speaking: bool, t_us: i64, pos: i32) {
         let mut bytes = Vec::new();
         self.llm.piece(t, false, &mut bytes);
         if bytes.is_empty() {
@@ -1202,7 +1214,7 @@ impl Engine {
         } else {
             Kind::Think
         };
-        self.out(text.clone(), kind, t_us);
+        self.out_at(text.clone(), kind, t_us, Some(pos));
         // Lines: complete ones are looked at for [note: ...] and [read: ...].
         let mut rest = text.as_str();
         while let Some(i) = rest.find('\n') {
@@ -1574,6 +1586,9 @@ impl Engine {
             piece: Piece::Token {
                 t,
                 chat_speaking: self.speaking,
+                // Where it will be decoded: the next position (its reading
+                // comes when it is, a cycle later, before it is released).
+                pos: self.pos(),
             },
             t_us: clock::now_us(),
         });

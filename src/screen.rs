@@ -16,6 +16,8 @@ pub enum Weight {
     Plain,
     Bold,
     Italic,
+    /// Crossed out: a word a check wrote over (`tui.rs`).
+    Struck,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,6 +371,7 @@ fn set_style(out: &mut impl Write, s: Style) -> io::Result<()> {
         Weight::Plain => {}
         Weight::Bold => queue!(out, SetAttribute(Attribute::Bold))?,
         Weight::Italic => queue!(out, SetAttribute(Attribute::Italic))?,
+        Weight::Struck => queue!(out, SetAttribute(Attribute::CrossedOut))?,
     }
     queue!(out, SetBackgroundColor(s.bg), SetForegroundColor(s.fg))
 }

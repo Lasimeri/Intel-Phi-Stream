@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-use crate::client::{escape, kind_name, status_line};
+use crate::client::{escape, status_line};
 use crate::engine::{Command, Event, Kind};
 
 /// The id of the next message from Claude that waits for an answer
@@ -51,7 +51,7 @@ const KEEP_TERM: usize = 64;
 const KEEP_DELIB: usize = 400;
 
 struct Hub {
-    recent: VecDeque<(String, Kind, i64)>,
+    recent: VecDeque<(String, Kind, i64, Option<i32>)>,
     chars: usize,
     last_status: Option<String>,
     subs: Vec<Sender<String>>,
@@ -80,11 +80,11 @@ impl Hub {
         }
     }
 
-    fn push_text(&mut self, text: &str, kind: Kind, t_us: i64) {
+    fn push_text(&mut self, text: &str, kind: Kind, t_us: i64, pos: Option<i32>) {
         self.chars += text.chars().count();
-        self.recent.push_back((text.to_string(), kind, t_us));
+        self.recent.push_back((text.to_string(), kind, t_us, pos));
         while self.chars > KEEP_CHARS && self.recent.len() > 1 {
-            let (t, _, _) = self.recent.pop_front().unwrap();
+            let (t, _, _, _) = self.recent.pop_front().unwrap();
             self.chars -= t.chars().count();
         }
     }
@@ -105,7 +105,7 @@ impl Hub {
             .recent
             .iter()
             .skip(start)
-            .map(|(t, k, at)| format!("text {} t={at} {}", kind_name(*k), escape(t)))
+            .map(|(t, k, at, p)| crate::client::text_line(t, *k, *at, *p))
             .collect();
         out.extend(self.minds.iter().cloned());
         out.extend(self.objective.iter().cloned());
@@ -162,9 +162,9 @@ pub fn serve(
             while let Ok(ev) = erx.recv() {
                 let mut h = hub.lock().unwrap();
                 match ev {
-                    Event::Text(t, k, at) => {
-                        h.push_text(&t, k, at);
-                        let line = format!("text {} t={at} {}", kind_name(k), escape(&t));
+                    Event::Text(t, k, at, p) => {
+                        h.push_text(&t, k, at, p);
+                        let line = crate::client::text_line(&t, k, at, p);
                         h.broadcast(&line);
                     }
                     Event::Status(s) => {

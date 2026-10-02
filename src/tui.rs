@@ -167,6 +167,94 @@ struct View {
     objective: Option<(i64, String)>,
     /// Kinds of line this terminal does not show, each noted once.
     unknown: std::collections::HashSet<String>,
+    /// The lens under the reasoning (`/lens`): a row under a line of its
+    /// thinking when the strongest word on its mind that the line does not
+    /// hold weighs at least this much; none: not shown.
+    lens: Option<f32>,
+    /// The thinking line being written: its tokens' positions, its text.
+    line_pos: Vec<i32>,
+    line_text: String,
+    /// Checks whose written-over word is shown already (their times).
+    struck: VecDeque<i64>,
+}
+
+/// The lens under a line by default: 0.10 put a row under 22.7 percent of
+/// its thinking lines (4784 lines of mind.log, 2026-10-02; 0.15: 9.2).
+const LENS_MIN: f32 = 0.10;
+/// Rows are kept from this weight up, so `/lens` can lower the bar later.
+const LENS_FLOOR: f32 = 0.05;
+
+/// A lens row's strongest weight: its first word's percentage.
+fn lens_weight(row: &[(char, Kind)]) -> f32 {
+    let s: String = row.iter().map(|c| c.0).collect();
+    s.split_once('%')
+        .and_then(|(a, _)| a.rsplit(' ').next()?.parse::<f32>().ok())
+        .map_or(0.0, |p| p / 100.0)
+}
+
+/// What the J-lens read on its mind over a line it wrote: for each of its
+/// tokens (`pos`, the newest reading at each), each block's words summed as
+/// probability, over tokens times blocks; words of fewer than three letters,
+/// words the line holds (`said`) and forms of them left out. A row when the
+/// strongest weighs `min` or more: it and the others of at least half its
+/// weight, four at most, each with its weight.
+fn lens_row(minds: &VecDeque<Reading>, pos: &[i32], said: &str, min: f32) -> Option<String> {
+    let said = said.to_lowercase();
+    let said_words: Vec<Vec<char>> = said
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 4)
+        .map(|w| w.chars().collect())
+        .collect();
+    // A form of a word the line holds is not unsaid (under "Rebuild and
+    // test" the lens's strongest were testing, tests and rebuilt): a common
+    // start of four letters or more, three quarters of the shorter word.
+    let a_form_of_said = |w: &str| {
+        let w: Vec<char> = w.chars().collect();
+        said_words.iter().any(|s| {
+            let common = w.iter().zip(s).take_while(|(a, b)| a == b).count();
+            common >= 4 && common * 4 >= w.len().min(s.len()) * 3
+        })
+    };
+    let mut weights: Vec<(String, f32)> = Vec::new();
+    let mut blocks = 0usize;
+    for p in pos {
+        let Some(r) = minds.iter().rev().find(|r| r.pos == *p) else {
+            continue;
+        };
+        for (_, ws) in &r.layers {
+            blocks += 1;
+            for (w, lp) in ws {
+                let w = w.trim().to_lowercase();
+                if w.chars().count() < 3 || said.contains(&w) || a_form_of_said(&w) {
+                    continue;
+                }
+                match weights.iter_mut().find(|(x, _)| *x == w) {
+                    Some(e) => e.1 += lp.exp(),
+                    None => weights.push((w, lp.exp())),
+                }
+            }
+        }
+    }
+    if blocks == 0 {
+        return None;
+    }
+    for e in &mut weights {
+        e.1 /= blocks as f32;
+    }
+    weights.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let top = match weights.first() {
+        Some(w) if w.1 >= min => w.1,
+        _ => return None,
+    };
+    // Only the strong: a tail of 3 percent words (seen at a 5 percent bar)
+    // says nothing to a person.
+    let shown: Vec<String> = weights
+        .iter()
+        .take(4)
+        .filter(|w| w.1 >= top / 2.0)
+        .map(|(w, x)| format!("{w} {:.0}%", x * 100.0))
+        .collect();
+    Some(format!("on its mind: {}", shown.join(" · ")))
 }
 
 /// The service as this terminal sees it.
@@ -445,7 +533,7 @@ impl View {
     /// the line being typed, last and escaped, so it may hold anything.
     fn state(&self) -> String {
         format!(
-            "mind={} scroll={} heard={} up={} reloads={} input={}",
+            "mind={} scroll={} heard={} up={} reloads={} lens={} input={}",
             match self.view {
                 Pane::Feed => 0,
                 Pane::Mind => 1,
@@ -458,6 +546,8 @@ impl View {
             self.heard,
             self.started.elapsed().as_secs(),
             self.follow.unwrap_or(0),
+            // In percent; 0: off.
+            self.lens.map_or(0, |m| (m * 100.0).round() as u64),
             escape(&self.input)
         )
     }
@@ -490,6 +580,7 @@ impl View {
                         .unwrap_or(self.started)
                 }
                 "reloads" => self.follow = self.follow.map(|_| n as u32 + 1),
+                "lens" => self.lens = (n > 0).then_some(n as f32 / 100.0),
                 _ => {}
             }
         }
@@ -504,12 +595,106 @@ impl View {
         }
     }
 
+    /// A piece of the stream as it comes, a placed token with its position:
+    /// a word a check wrote over goes in before the one that replaced it
+    /// (its episode came first, the check holds the text until it ends);
+    /// a thinking line, when it ends, gets the lens's row under it
+    /// (`lens_row`, from the readings of its tokens; `rows` leaves out the
+    /// rows inside a code block).
+    fn push_stream(&mut self, text: String, kind: Kind, pos: Option<i32>) {
+        if let Some(p) = pos {
+            let over = self.episodes.iter().rev().find(|e| {
+                e.pos == p && e.outcome == Outcome::Changed && !self.struck.contains(&e.t_us)
+            });
+            if let Some(e) = over {
+                let (t, word) = (e.t_us, e.chosen.trim().to_string());
+                self.struck.push_back(t);
+                while self.struck.len() > KEEP_EPISODES {
+                    self.struck.pop_front();
+                }
+                let lead = if text.starts_with(' ') { " " } else { "" };
+                self.push(
+                    format!("{lead}{}{word}{}", format::STRUCK, format::STRUCK),
+                    kind,
+                );
+            }
+            if kind == Kind::Think {
+                self.line_pos.push(p);
+            }
+        }
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find('\n') {
+            self.line_text.push_str(&rest[..i]);
+            let line = std::mem::take(&mut self.line_text);
+            let pos = std::mem::take(&mut self.line_pos);
+            let fence = format::is_fence(&line);
+            // Inside a code block or not is the view's to say (`rows`): the
+            // results it collapses hold fences too, and counted here they
+            // left every later line inside one.
+            let row = if kind == Kind::Think && !fence && pos.len() >= 3 {
+                lens_row(&self.minds, &pos, &line, LENS_FLOOR)
+            } else {
+                None
+            };
+            // The newline first, then the row on a line of its own.
+            let (head, tail) = rest.split_at(i + 1);
+            if let Some(r) = row {
+                self.push(head.to_string(), kind);
+                self.push(format!("{}{r}\n", format::LENS_MARK), kind);
+                rest = tail;
+                if rest.is_empty() {
+                    return;
+                }
+                continue;
+            }
+            self.push(head.to_string(), kind);
+            rest = tail;
+        }
+        self.line_text.push_str(rest);
+        if !rest.is_empty() {
+            self.push(rest.to_string(), kind);
+        }
+    }
+
     /// The stream as rows of styled runs for `width` columns, set by
-    /// `format.rs`: code blocks kept as written and highlighted, prose
-    /// wrapped by words under its own indentation, Markdown marks shown as
-    /// styles (a word may span pieces, since a token can end inside one).
+    /// `format.rs`: as a person reads it (`format::readable`: no template
+    /// marks, one line per tool call and result), the lens's rows when on
+    /// and strong enough, code blocks kept as written and highlighted,
+    /// prose wrapped by words under its own indentation, Markdown marks
+    /// shown as styles (a word may span pieces, since a token can end
+    /// inside one).
     fn rows(&self, width: usize) -> Vec<Vec<(String, Kind, Class)>> {
-        piece_rows(&self.pieces, width)
+        let mut lines: Vec<Vec<(char, Kind)>> = vec![Vec::new()];
+        for p in &self.pieces {
+            for ch in p.text.chars() {
+                if ch == '\n' {
+                    lines.push(Vec::new());
+                } else {
+                    lines.last_mut().unwrap().push((ch, p.kind));
+                }
+            }
+        }
+        // Inside a code block as shown (after `readable`), no lens row.
+        let mut code = false;
+        let lines: Vec<Vec<(char, Kind)>> = format::readable(&lines)
+            .into_iter()
+            .filter(|l| match l.first() {
+                Some((c, _)) if *c == format::LENS_MARK => {
+                    !code && self.lens.is_some_and(|min| lens_weight(l) >= min)
+                }
+                _ => {
+                    let t: String = l.iter().map(|c| c.0).collect();
+                    if format::is_fence(&t) {
+                        code = !code;
+                    }
+                    true
+                }
+            })
+            .collect();
+        format::rows(&lines, width)
+            .iter()
+            .map(|r| runs(r))
+            .collect()
     }
 }
 
@@ -968,6 +1153,19 @@ fn style_of(kind: Kind, class: Class) -> Style {
             bg: theme::CODE_BG,
             weight: Weight::Italic,
         },
+        // What the lens read under a line: the cool colour of what comes
+        // from outside the text, italic, on the plain background.
+        Class::Lens => Style {
+            fg: theme::GIVEN,
+            bg: theme::BG,
+            weight: Weight::Italic,
+        },
+        // A word written over: crossed out, the cool colour.
+        Class::Struck => Style {
+            fg: theme::GIVEN,
+            bg: theme::BG,
+            weight: Weight::Struck,
+        },
     }
 }
 
@@ -1392,7 +1590,7 @@ fn draw(
         None => String::new(),
     };
     let hints = format!(
-        "{follows} Enter speaks · Tab views · /objective TEXT · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        "{follows} Enter speaks · Tab views · /objective TEXT · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /lens [on|off|P%] · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
     s.line(lay.hints, &hints, plain(theme::ACCENT_DIM, theme::BG));
@@ -1438,6 +1636,30 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
             _ => Pane::Feed,
         };
         v.scroll = 0;
+        return;
+    } else if line == "/lens" || line.starts_with("/lens ") {
+        // The lens's rows under the reasoning: on and off, or the weight a
+        // row needs, in percent (rows are kept from `LENS_FLOOR` up).
+        let arg = line.trim_start_matches("/lens").trim();
+        v.lens = match (arg, v.lens) {
+            ("", Some(_)) | ("off", _) => None,
+            ("", None) | ("on", _) => Some(LENS_MIN),
+            (p, _) => match p.trim_end_matches('%').parse::<f32>() {
+                Ok(x) if x > 0.0 => Some((x / 100.0).max(LENS_FLOOR)),
+                _ => {
+                    v.notes
+                        .push(format!("/lens takes on, off or a percent, not {p:?}"));
+                    return;
+                }
+            },
+        };
+        v.notes.push(match v.lens {
+            Some(m) => format!(
+                "the lens under the reasoning: a row when the strongest word on its mind that the line does not hold weighs {:.0}% or more",
+                m * 100.0
+            ),
+            None => "the lens under the reasoning: off (/lens turns it on)".to_string(),
+        });
         return;
     } else if line == "/chain on" || line == "/chain off" {
         line.trim_start_matches('/').to_string()
@@ -1542,6 +1764,10 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             term_chars: 0,
             objective: None,
             unknown: Default::default(),
+            lens: Some(LENS_MIN),
+            line_pos: Vec::new(),
+            line_text: String::new(),
+            struck: VecDeque::new(),
         };
         if let Some(s) = &handed {
             v.restore(s);
@@ -1608,14 +1834,14 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         };
                         dirty = true;
                     }
-                    Ok(Msg::Text(t, k, at)) => {
+                    Ok(Msg::Text(t, k, at, pos)) => {
                         // Speech is the output too; anything else ends an utterance.
                         if k == Kind::Speak {
                             v.output_push(&t, at);
                         } else {
                             v.speaking = false;
                         }
-                        v.push(t, k);
+                        v.push_stream(t, k, pos);
                         v.last_t_us = at;
                         dirty = true;
                     }
@@ -1806,6 +2032,10 @@ mod tests {
             term_chars: 0,
             objective: None,
             unknown: Default::default(),
+            lens: Some(LENS_MIN),
+            line_pos: Vec::new(),
+            line_text: String::new(),
+            struck: VecDeque::new(),
         }
     }
 
@@ -1892,6 +2122,148 @@ mod tests {
         let mut c = view();
         c.restore("mind=1 scroll=0 heard=0 up=5 reloads=0 input=");
         assert_eq!(c.view, Pane::Mind);
+        // The lens's setting goes over too; off is 0.
+        a.lens = None;
+        let mut d = view();
+        d.restore(&a.state());
+        assert_eq!(d.lens, None);
+        a.lens = Some(0.15);
+        d.restore(&a.state());
+        assert_eq!(d.lens, Some(0.15));
+    }
+
+    /// A reading at `pos` whose three blocks each have these words (each
+    /// at this probability).
+    fn reading(pos: i32, token: &str, words: &[(&str, f32)]) -> Reading {
+        let ws: Vec<(String, f32)> = words.iter().map(|(w, p)| (w.to_string(), p.ln())).collect();
+        Reading {
+            pos,
+            token: token.into(),
+            layers: vec![(27, ws.clone()), (29, ws.clone()), (31, ws)],
+            model_top: Vec::new(),
+            ms: 1.0,
+            t_us: 0,
+        }
+    }
+
+    #[test]
+    fn the_lens_row_weighs_what_the_line_does_not_say() {
+        let mut minds = VecDeque::new();
+        minds.push_back(reading(
+            10,
+            " idle",
+            &[("again", 0.3), ("idle", 0.5), ("to", 0.9)],
+        ));
+        minds.push_back(reading(11, ".", &[("again", 0.1), ("waiting", 0.06)]));
+        // A reading of position 10 taken back and read again: the newest counts.
+        minds.push_front(reading(10, " busy", &[("never", 0.9)]));
+        let row = lens_row(&minds, &[10, 11], "Idle.", 0.10).unwrap();
+        // again: (0.3 + 0.1) * 3 blocks / 6 = 0.20; waiting 0.03; idle is said,
+        // to is too short.
+        assert_eq!(row, "on its mind: again 20%");
+        assert_eq!(lens_row(&minds, &[10, 11], "Idle.", 0.25), None);
+        assert_eq!(lens_row(&minds, &[99], "x", 0.0), None);
+        // Forms of the line's words are not unsaid, and the weak tail goes
+        // (the live service, under "3. Rebuild and test": testing 16%,
+        // tests 7%, using 3%, rebuilt 3%).
+        let mut m = VecDeque::new();
+        m.push_back(reading(
+            1,
+            " Rebuild",
+            &[
+                ("testing", 0.5),
+                ("tests", 0.2),
+                ("rebuilt", 0.3),
+                ("verify", 0.3),
+                ("using", 0.05),
+            ],
+        ));
+        m.push_back(reading(2, " and", &[]));
+        m.push_back(reading(3, " test", &[]));
+        assert_eq!(
+            lens_row(&m, &[1, 2, 3], "3. Rebuild and test", 0.05),
+            Some("on its mind: verify 10%".to_string())
+        );
+    }
+
+    #[test]
+    fn a_thinking_line_gets_its_row_and_a_written_word_shows_struck() {
+        let mut v = view();
+        for (p, t) in [(20, " resting"), (21, " for"), (22, " now")] {
+            v.minds.push_back(reading(p, t, &[("again", 0.4)]));
+        }
+        v.episodes.push_back(Episode {
+            t_us: 5,
+            pos: 22,
+            why: crate::reflect::Why::Doubt,
+            chosen: " later".into(),
+            p_chosen: 0.1,
+            flag: 0.0,
+            words: Vec::new(),
+            keep: 0.3,
+            fmt: 0.5,
+            rule: String::new(),
+            top: Vec::new(),
+            answer: String::new(),
+            outcome: Outcome::Changed,
+            to: " now".into(),
+            ms: 500.0,
+            placed: 3,
+            back: Some((22, 25)),
+        });
+        v.push_stream(" resting".into(), Kind::Think, Some(20));
+        v.push_stream(" for".into(), Kind::Think, Some(21));
+        v.push_stream(" now".into(), Kind::Think, Some(22));
+        v.push_stream(".\n".into(), Kind::Think, Some(23));
+        let text: Vec<String> = v
+            .rows(80)
+            .iter()
+            .map(|r| r.iter().map(|(s, _, _)| s.as_str()).collect())
+            .collect();
+        assert_eq!(text[0].trim(), "resting for ~later~ now.");
+        assert_eq!(text[1], "on its mind: again 40%");
+        // Off: no row; inside a code block: made, and the view leaves it out.
+        v.lens = None;
+        assert_eq!(v.rows(80).len(), 2);
+        v.lens = Some(LENS_MIN);
+        v.push_stream("```\n".into(), Kind::Think, Some(24));
+        for p in 25..29 {
+            v.minds.push_back(reading(p, " x", &[("again", 0.9)]));
+            v.push_stream(" x".into(), Kind::Think, Some(p));
+        }
+        v.push_stream("\n".into(), Kind::Think, Some(29));
+        let shown = |v: &View| -> Vec<String> {
+            v.rows(80)
+                .iter()
+                .map(|r| r.iter().map(|(s, _, _)| s.as_str()).collect())
+                .collect()
+        };
+        assert_eq!(
+            shown(&v)
+                .iter()
+                .filter(|r| r.starts_with("on its mind"))
+                .count(),
+            1
+        );
+        // A fence inside a tool's result, which the view collapses, does
+        // not leave later lines inside a block (on the live service no row
+        // ever showed so).
+        let mut w = view();
+        w.push_stream(
+            "<tool_response>\n```\n</tool_response>\n".into(),
+            Kind::Given,
+            None,
+        );
+        for (p, t) in [(40, " a"), (41, " b"), (42, " c")] {
+            w.minds.push_back(reading(p, t, &[("again", 0.4)]));
+            w.push_stream(t.into(), Kind::Think, Some(p));
+        }
+        w.push_stream("\n".into(), Kind::Think, Some(43));
+        assert!(
+            shown(&w).iter().any(|r| r.starts_with("on its mind")),
+            "{:?}",
+            shown(&w)
+        );
     }
 }
 

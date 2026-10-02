@@ -592,8 +592,8 @@ pub fn stream(
         let mut episodes: Vec<crate::reflect::Episode> = Vec::new();
         for ev in erx.try_iter() {
             match ev {
-                Event::Text(s, Kind::Speak, _) => answer.push_str(&s),
-                Event::Text(s, Kind::Think, _) => thoughts.push_str(&s),
+                Event::Text(s, Kind::Speak, _, _) => answer.push_str(&s),
+                Event::Text(s, Kind::Think, _, _) => thoughts.push_str(&s),
                 Event::Done {
                     think_tokens: n,
                     capped: c,

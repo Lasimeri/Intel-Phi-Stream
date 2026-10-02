@@ -43,3 +43,35 @@ plain); C comments span lines and strings hold escapes; Rust lifetimes
 are not strings; long code lines are cut under their indent; prose wraps
 with its hanging indent; Markdown marks become styles only when closed;
 an open block stays code; CJK counts two columns.
+
+## As a person reads it (2026-10-02)
+
+The agent frame's stream holds the chat template's marks and its tool
+calls as the template writes them, and the terminal showed them as they
+were (`<|im_end|>`, `<|im_start|>assistant`, `<tool_call>` and a line per
+parameter). `readable` sets the lines for a person first:
+- the marks (`<|im_start|>` with its role, `<|im_end|>`, `<think>`,
+  `</think>`) are taken out; a line they alone made goes, and blank lines
+  run to one;
+- a tool call, `<tool_call>` to `</tool_call>`, is one line: `▸ NAME: `
+  and the first line of its first parameter (` …` when there is more);
+  one still being written shows what it has so far;
+- a tool's result, `<tool_response>` to `</tool_response>`, is one line
+  (`result_line`): a command's as how it ended and its output's first line
+  (`◂ exit 0, 26 ms: M src/a.rs (1 more line)`; the call's line above names
+  the command, which the first form repeated), anything else as `◂ ` and
+  its first line, with the count of the rest.
+
+Two marks of the terminal's own, private-use characters the model's text
+does not hold:
+- `LENS_MARK` begins a lens row (`tui.md`: what the J-lens read on its
+  mind under a line): class `Lens`, wrapped by words, never code, and it
+  does not open or close a block;
+- a word between two `STRUCK` marks is one a check wrote over: class
+  `Struck`, shown between tildes (crossed out where the terminal can,
+  `screen.md`), so a plain capture still reads `~may~ likely`.
+
+`is_fence` says whether a line opens or closes a block, for the terminal's
+own count. Tests: no template marks and one line per tool (an agent turn
+as the live service writes it); a call still being written; lens rows and
+struck words have their classes.

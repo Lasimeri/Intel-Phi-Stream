@@ -10,7 +10,7 @@ running mind and the 40-second load happens once.
   connection on a thread of its own: the `info` line first, then a reply
   (`ok` or `err`) to each command line.
 - `tail` subscribes the connection: it gets the last 12k characters of
-  text as `text` lines and the last status, then every `text`, `status`,
+  text as `text` lines (with the positions they had) and the last status, then every `text`, `status`,
   `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
 - `ask TEXT` queues a message from Claude that waits for an answer: its

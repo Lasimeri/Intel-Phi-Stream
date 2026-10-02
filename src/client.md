@@ -16,8 +16,10 @@ hears `NAME: TEXT`, `docs/dev.md`), `feed PATH`, `persona PATH`, `chunk N`,
 From the service: `info model=... gpu_blocks=N n_blocks=N gpu_gib=X
 host_gib=X n_ctx=N frame=journal|chat|agent workspace=PATH started=US` once on connect;
 `ok MESSAGE` or `err MESSAGE` for each command; to a subscriber `text
-think|speak|given t=MICROSECONDS TEXT` (the real time the piece exists
-at, `clock.md`), `status mode=... stream=... beside=... cycle=...
+think|speak|given t=MICROSECONDS pos=P|- TEXT` (the real time the piece exists
+at, `clock.md`; for a placed token its position in the live sequence,
+which its `mind` line has too, else `-`; `text_line` writes it, and a line
+without `pos=` still reads), `status mode=... stream=... beside=... cycle=...
 pos=... ctx=... queued=... chunk=... rollovers=... notes=... frame=... leaks=... mind_ms=... t=MICROSECONDS reads_quiet=N checks=N changes=N unparsed=N checking=0|1`
 (mode is `thinking`, `speaking`, `reading:DONE/TOTAL`,
 `catching:DONE/TOTAL`, `summarizing:N` or `paused`), `note TEXT`, and

@@ -105,6 +105,36 @@ label in its top edge (the management plan's layout, 2.6):
 - **FEED** is set by `format.md`: code blocks kept as written and
   highlighted by language (TypeScript among them), prose wrapped by words
   under its own indentation, headings, bold and inline code as styles.
+- **REASONING, for a person, with the J-lens woven in** (2026-10-02, the
+  person: "I need this model human usable"):
+  - read as a person reads it (`format::readable`): no chat-template
+    marks, a tool call as one line (`▸ run: git status --short`), its
+    result as one (`◂ the command ... ended (exit 0, 26 ms); its output:
+    (2 more lines)`);
+  - under a line of its thinking, a row of what the J-lens read on its
+    mind over that line and the line does not say (`lens_row`, italic, the
+    cool colour): `on its mind: again 13% · timestamp 8%`. Each token's
+    text comes with its position (`text ... pos=P`, `client.md`), and the
+    newest reading at that position is its own (a word taken back and
+    written again was read again there; positions start over at a
+    rollover, and the newest is still the one). Per word, its probability
+    under the lens summed over the line's tokens and the blocks read
+    (27, 29, 31), over tokens times blocks; forms of the line's own words
+    are not unsaid (a common start of four letters, three quarters of the
+    shorter word: under "Rebuild and test" the strongest were testing,
+    tests and rebuilt). A row when the strongest such word weighs 10
+    percent or more (`LENS_MIN`: a row under 22.7 percent
+    of 4784 lines of its thinking; 15 percent: 9.2), with the others of at
+    least half its weight, four at most (a tail of 3 percent words said
+    nothing). None inside a code block, nor for
+    speech or what was given. `/lens` turns them off and on, `/lens 15`
+    sets the bar in percent (rows are kept from 5 percent up,
+    `LENS_FLOOR`, so a lower bar shows the earlier ones too); a reload
+    keeps the setting;
+  - a word a check wrote over stands before the one that replaced it,
+    crossed out between tildes (`resting for ~later~ now`): the check's
+    `reflect` line names its position, and it arrives before the text
+    (the check holds the text until it ends).
 - **The view** is one of FEED (the stream), MIND (the readings token by
   token) and LOG; `Tab` cycles them, `/feed`, `/mind`, `/log` name one
   (`/feed FILE` still hands a file over; `/mind` again goes back to the

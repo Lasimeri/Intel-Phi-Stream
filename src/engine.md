@@ -591,3 +591,13 @@ What it is not: the doubt checks. The stream proposed turning them off
 in the same decode: the live rate in a check's window was 14.7 tokens a
 second against 16.4 outside it (499 checks, 53k tokens, `reflect.log`
 windows against `mind.log`), under 1 percent of the throughput; they stay.
+
+## A token's text carries its position (2026-10-02)
+
+A placed token is held with the position it is decoded at (`Piece::Token`
+`pos`: `pos()` when it is placed, a check's replacement at the checked
+position) and goes out with it (`out_at`, `Event::Text`'s fourth field;
+other pieces carry none). Its reading (`Event::Mind`) has the same
+position and comes first: the token is read when it is decoded, a cycle
+after it is placed, and the hold releases it later. The terminal joins
+the two by it to weave the J-lens into the reasoning (`tui.md`).

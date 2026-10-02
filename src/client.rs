@@ -83,8 +83,9 @@ pub struct Info {
 #[derive(Debug)]
 pub enum Msg {
     Info(Info),
-    /// A piece of the stream, its kind and the real time it exists at (us).
-    Text(String, Kind, i64),
+    /// A piece of the stream, its kind, the real time it exists at (us),
+    /// and a placed token's position (its `Mind` reading's `pos`).
+    Text(String, Kind, i64, Option<i32>),
     Status(Status),
     Note(String),
     /// What was on its mind at one token (`mind.rs`).
@@ -146,18 +147,22 @@ pub fn parse(line: &str) -> Msg {
             })
         }
         "text" => {
-            // text KIND t=MICROSECONDS TEXT
+            // text KIND t=MICROSECONDS [pos=P|-] TEXT (`text_line`)
             let (kind, rest) = rest.split_once(' ').unwrap_or((rest, ""));
             let (t, text) = match rest.strip_prefix("t=").and_then(|r| r.split_once(' ')) {
                 Some((t, text)) => (t.parse().unwrap_or(0), text),
                 None => (0, rest),
+            };
+            let (pos, text) = match text.strip_prefix("pos=").and_then(|r| r.split_once(' ')) {
+                Some((p, text)) => (p.parse().ok(), text),
+                None => (None, text),
             };
             let kind = match kind {
                 "speak" => Kind::Speak,
                 "given" => Kind::Given,
                 _ => Kind::Think,
             };
-            Msg::Text(unescape(text), kind, t)
+            Msg::Text(unescape(text), kind, t, pos)
         }
         "status" => {
             let f = fields(rest);
@@ -549,6 +554,17 @@ pub struct ToClaude {
     pub text: String,
 }
 
+/// A `text` line as the service sends it: a placed token with its
+/// position, anything else with `pos=-`.
+pub fn text_line(text: &str, kind: Kind, t_us: i64, pos: Option<i32>) -> String {
+    let pos = pos.map_or("-".to_string(), |p| p.to_string());
+    format!(
+        "text {} t={t_us} pos={pos} {}",
+        kind_name(kind),
+        escape(text)
+    )
+}
+
 /// A `claude` line as the service sends it.
 pub fn to_claude_line(m: &ToClaude) -> String {
     format!(
@@ -708,7 +724,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match parse("text speak t=1790000000000001 hello\\nthere") {
-            Msg::Text(t, Kind::Speak, at) => {
+            Msg::Text(t, Kind::Speak, at, _) => {
                 assert_eq!(t, "hello\nthere");
                 assert_eq!(at, 1_790_000_000_000_001);
             }
