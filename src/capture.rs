@@ -27,6 +27,10 @@ pub struct CaptureConfig {
     pub keep_logits: bool,
 }
 
+/// The experts a row was routed to at each captured block (the block, the
+/// experts).
+pub type BlockExperts = Vec<(i32, Vec<i32>)>;
+
 /// One output row of a micro-batch: the residual at each captured block,
 /// in `CaptureConfig::layers` order.
 #[derive(Clone, Debug)]
@@ -95,6 +99,15 @@ pub struct Capture {
     /// diagnosis: the last micro-batch's copies.
     pub extra_names: Vec<String>,
     pub extra: Vec<(String, Vec<i64>, Vec<f32>)>,
+    /// The experts each output row was routed to at the captured blocks
+    /// (`ffn_moe_topk-L`, live: `experts_on`): asked only when on (each asked
+    /// node is one more synchronization of the scheduler).
+    pub experts_on: bool,
+    pending_topk: Vec<(i32, usize, Vec<i32>)>,
+    selected_topk: Vec<BlockExperts>,
+    /// Since the last `take`: per output row, its micro-batch, its batch
+    /// row, and the experts at each captured block.
+    pub row_experts: Vec<(usize, i32, BlockExperts)>,
 }
 
 impl Capture {
@@ -125,6 +138,10 @@ impl Capture {
                 })
                 .unwrap_or_default(),
             extra: Vec::new(),
+            experts_on: false,
+            pending_topk: Vec::new(),
+            selected_topk: Vec::new(),
+            row_experts: Vec::new(),
         }
     }
 
@@ -132,6 +149,7 @@ impl Capture {
     pub fn take(&mut self) -> (Vec<OutputRow>, Vec<BlockRows>) {
         self.micro_batches = 0;
         self.micro_batch = 0;
+        self.row_experts.clear();
         (
             std::mem::take(&mut self.outputs),
             std::mem::take(&mut self.all_rows),
@@ -146,6 +164,14 @@ impl Capture {
 
     fn wanted_layer(&self, name: &str) -> Option<i32> {
         let l: i32 = name.strip_prefix("l_out-")?.parse().ok()?;
+        self.cfg.layers.contains(&l).then_some(l)
+    }
+
+    fn wanted_topk(&self, name: &str) -> Option<i32> {
+        if !self.experts_on {
+            return None;
+        }
+        let l: i32 = name.strip_prefix("ffn_moe_topk-")?.parse().ok()?;
         self.cfg.layers.contains(&l).then_some(l)
     }
 }
@@ -241,6 +267,7 @@ impl Capture {
         unsafe {
             let name = name_of(t);
             self.wanted_layer(&name).is_some()
+                || self.wanted_topk(&name).is_some()
                 || is_output_rows(t)
                 || name == "result_output"
                 || self.extra_names.contains(&name)
@@ -307,6 +334,44 @@ impl Capture {
         }
     }
 
+    /// A block's selected experts (`ffn_moe_topk-L`: i32, the experts used
+    /// by each row): kept until the output rows are known, as a residual is.
+    fn take_topk(&mut self, t: *const sys::ggml_tensor, layer: i32) -> Result<(), String> {
+        // SAFETY: as in `take_layer`.
+        unsafe {
+            if (*t).type_ != sys::ggml_type_GGML_TYPE_I32 {
+                return Err(format!("ffn_moe_topk-{layer} is not i32"));
+            }
+            let k = (*t).ne[0] as usize;
+            let n_rows = (*t).ne[1] as usize;
+            if (*t).nb[1] != k * 4 {
+                return Err(format!("ffn_moe_topk-{layer} is not contiguous"));
+            }
+            let mut data = vec![0i32; k * n_rows];
+            if !data.is_empty() {
+                sys::ggml_backend_tensor_get(
+                    t,
+                    data.as_mut_ptr() as *mut c_void,
+                    0,
+                    data.len() * 4,
+                );
+            }
+            match &self.ids {
+                Some(ids) => {
+                    for (j, &i) in ids.iter().enumerate() {
+                        let i = if n_rows == ids.len() { j } else { i as usize };
+                        if i < n_rows && j < self.selected_topk.len() {
+                            let r = data[i * k..(i + 1) * k].to_vec();
+                            self.selected_topk[j].push((layer, r));
+                        }
+                    }
+                }
+                None => self.pending_topk.push((layer, n_rows, data)),
+            }
+            Ok(())
+        }
+    }
+
     fn take_ids(&mut self, t: *const sys::ggml_tensor) -> Result<(), String> {
         // SAFETY: as in `take_layer`; `src[1]` is the ids input, computed.
         unsafe {
@@ -326,6 +391,17 @@ impl Capture {
                 sys::ggml_backend_tensor_get(ids_t, ids.as_mut_ptr() as *mut c_void, 0, n * 4);
             }
             self.selected = vec![Vec::new(); n];
+            // The experts captured before the selection was known.
+            self.selected_topk = vec![Vec::new(); n];
+            for (layer, n_rows, data) in std::mem::take(&mut self.pending_topk) {
+                let k = data.len().checked_div(n_rows).unwrap_or(0);
+                for (j, &i) in ids.iter().enumerate() {
+                    if i >= 0 && (i as usize) < n_rows && k > 0 {
+                        let r = &data[i as usize * k..(i as usize + 1) * k];
+                        self.selected_topk[j].push((layer, r.to_vec()));
+                    }
+                }
+            }
             // Resolve what was captured before the selection was known.
             for p in std::mem::take(&mut self.pending) {
                 let n_embd = p.data.len().checked_div(p.n_rows).unwrap_or(0);
@@ -417,6 +493,12 @@ impl Capture {
                     }
                 }
             }
+            let topk = std::mem::take(&mut self.selected_topk);
+            for (j, &row) in ids.iter().enumerate() {
+                if let Some(e) = topk.get(j).filter(|e| !e.is_empty()) {
+                    self.row_experts.push((self.micro_batch, row, e.clone()));
+                }
+            }
             for (j, (&row, layers)) in ids.iter().zip(selected).enumerate() {
                 self.outputs.push(OutputRow {
                     micro_batch: self.micro_batch,
@@ -427,6 +509,7 @@ impl Capture {
                 });
             }
             self.pending.clear();
+            self.pending_topk.clear();
             self.micro_batch += 1;
             self.micro_batches += 1;
             Ok(())
@@ -451,6 +534,8 @@ impl Capture {
         }
         let r = if let Some(l) = self.wanted_layer(&name) {
             self.take_layer(t, l)
+        } else if let Some(l) = self.wanted_topk(&name) {
+            self.take_topk(t, l)
         } else if unsafe { is_output_rows(t) } {
             self.take_ids(t)
         } else if name == "result_output" {

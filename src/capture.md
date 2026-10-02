@@ -54,5 +54,16 @@ scheduler asks about (name, op, shape, sources); `PHI_STREAM_CAPTURE_DEBUG=1`
 prints the row bookkeeping; `PHI_STREAM_CAPTURE_EXTRA=a,b` copies the
 named nodes whole (the last micro-batch's, in `extra`).
 
+**Experts** (`experts_on`, live: `phi-stream experts on|off`, off by
+default). With it on, the capture also asks for `ffn_moe_topk-L` at the
+same blocks (llama.cpp names the top-k selection so in `build_moe_ffn`,
+`llama-graph.cpp`): i32, the experts each row was routed to. They are kept
+until the output rows are known, as a residual is, and recorded per output
+row with its batch row (`row_experts`, cleared by `take`). Each asked node
+is one more synchronization of the scheduler, so it costs a little at
+every cycle: measured before it stays on. The guide lane reads them to
+compare the experts the guided and the live token were routed to
+(`engine.md`).
+
 Tests: `cargo test` covers the row selection and the layer names;
 `phi-stream lens check` (`check.md`) is the end-to-end gate.

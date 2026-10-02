@@ -479,7 +479,8 @@ and two tool calls. Now:
   room the context has (`read_room`; one too big is refused with its size);
   the clock and the tool reminder are not put in at all (every user turn
   carries the time and the objective);
-- a turn that runs past `AGENT_TURN_MAX_US` (90 s; 15 s when quitting)
+- a turn that runs past `AGENT_TURN_MAX_US` (180 s, at a line start; 15 s
+  when quitting)
   while something waits for it is closed, its unfinished calls not run
   (`agent_stalled`);
 - a summary is due at the end of the turn it is in (`summary_due`), and
@@ -523,3 +524,8 @@ tokens a report (a note, and a line in DELIBERATION).
   the room a batch leaves, with no row until it holds the pending token.
 - Inside thinking only: not in a tool call, not in code.
 - `guide on|off` turns it live (when started with `--guide`).
+- With `experts on` (`capture.md`), each thinking token also compares
+  the experts the guided token and the live one were routed to at the
+  mind's blocks: the share they hold in common, block by block
+  (`experts_shared`), in `guide.log` and the report. Every expert of every
+  thinking token, reasoned against the reflection's.

@@ -625,6 +625,10 @@ pub struct Engine {
     guide_n: u32,
     guide_kl: f64,
     guide_flips: u32,
+    /// The experts the guided token and the live one share, summed over the
+    /// tokens that had both (`experts on`), and how many had.
+    guide_shared: f64,
+    guide_shared_n: u32,
     guide_log: RotLog,
     reflecting: Option<Chain>,
     line_words: HashMap<String, f32>,
@@ -666,9 +670,10 @@ const MAX_READ_BYTES: u64 = 1 << 20;
 /// The longest a quit waits for its summary (microseconds).
 const QUIT_WAIT_US: i64 = 120_000_000;
 /// The agent frame: how long a turn may run while something waits for
-/// it (its turns took about 14 s on the live service), and while a quit
+/// it (most turns took about 14 s on the live service, a review over 8
+/// minutes; 90 s cut one short), and while a quit
 /// waits for the summary.
-const AGENT_TURN_MAX_US: i64 = 90_000_000;
+const AGENT_TURN_MAX_US: i64 = 180_000_000;
 const AGENT_QUIT_GRACE_US: i64 = 15_000_000;
 /// Commands that may wait for its terminal at once, and its time limit.
 const MAX_TERM_PENDING: usize = 4;
@@ -985,6 +990,8 @@ impl Engine {
             guide_n: 0,
             guide_kl: 0.0,
             guide_flips: 0,
+            guide_shared: 0.0,
+            guide_shared_n: 0,
             guide_log,
             reflecting: None,
             line_words: HashMap::new(),
@@ -1838,20 +1845,46 @@ impl Engine {
         self.guide_n += 1;
         self.guide_kl += kl;
         self.guide_flips += flip as u32;
+        // The experts each was routed to at the captured blocks (`experts
+        // on`): the share they hold in common, block by block.
+        let shared = self.llm.capture().and_then(|c| {
+            let of = |row: i32| {
+                c.row_experts
+                    .iter()
+                    .find(|(mb, r, _)| *mb == 0 && *r == row)
+                    .map(|(_, _, e)| e.clone())
+            };
+            Some(experts_shared(&of(live)?, &of(guide)?))
+        });
+        if let Some(s) = shared {
+            self.guide_shared += s;
+            self.guide_shared_n += 1;
+        }
         let (tl, tg) = (self.llm.text(&[al as i32]), self.llm.text(&[ag as i32]));
         self.guide_log.line(&format!(
-            "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}",
+            "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}{}",
             clock::now_us(),
             self.history.len(),
-            flip as u8
+            flip as u8,
+            shared.map_or(String::new(), |s| format!("\texperts_shared={s:.3}"))
         ));
         if self.guide_n >= GUIDE_REPORT {
+            let experts = if self.guide_shared_n > 0 {
+                format!(
+                    "; at the captured blocks the two share {:.1}% of their experts",
+                    100.0 * self.guide_shared / self.guide_shared_n as f64
+                )
+            } else {
+                String::new()
+            };
             let said = format!(
-                "guide (shadow), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%",
+                "guide (shadow), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%{experts}",
                 self.guide_n,
                 self.guide_kl / self.guide_n as f64,
                 100.0 * self.guide_flips as f64 / self.guide_n as f64
             );
+            self.guide_shared = 0.0;
+            self.guide_shared_n = 0;
             self.note(said.clone());
             let _ = self.tx.send(Event::Delib(crate::client::Delib {
                 kind: crate::client::DelibKind::End,
@@ -2084,7 +2117,10 @@ impl Engine {
         } else {
             AGENT_TURN_MAX_US
         };
-        if !due || mono - self.turn_open_mono < limit {
+        // At a line's start, so a thought is not cut mid-sentence; past twice
+        // the limit, wherever it is (90 s at any token cut a review short).
+        let ran = mono - self.turn_open_mono;
+        if !due || ran < limit || (!self.line_start && ran < 2 * limit) {
             return Ok(());
         }
         self.note(format!(
@@ -4127,6 +4163,11 @@ impl Engine {
                         }
                     }
                     "nudges" => self.nudges_on = on,
+                    "experts" => {
+                        if let Some(c) = self.llm.capture() {
+                            c.experts_on = on;
+                        }
+                    }
                     "guide" => {
                         self.guide_on = on && self.guide_seq.is_some();
                         if !self.guide_on {
@@ -4296,6 +4337,30 @@ impl Engine {
                 return Ok(self.finish());
             }
         }
+    }
+}
+
+/// Two tokens' experts, block by block (the block and the experts it
+/// routed to): the share they hold in common (shared over all, per block,
+/// averaged over the blocks both have).
+fn experts_shared(a: &[(i32, Vec<i32>)], b: &[(i32, Vec<i32>)]) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0;
+    for (layer, ea) in a {
+        let Some((_, eb)) = b.iter().find(|(l, _)| l == layer) else {
+            continue;
+        };
+        let common = ea.iter().filter(|e| eb.contains(e)).count();
+        let all = ea.len() + eb.len() - common;
+        if all > 0 {
+            sum += common as f64 / all as f64;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        sum / n as f64
     }
 }
 
@@ -4646,6 +4711,17 @@ mod tests {
         assert_eq!((a, b), (0, 0));
         let (_, a, b) = kl_and_tops(&[0.0, 1.0], &[1.0, 0.0]);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_experts_shared_are_counted_block_by_block() {
+        let a = vec![(27, vec![1, 2, 3, 4]), (28, vec![5, 6])];
+        assert!((experts_shared(&a, &a) - 1.0).abs() < 1e-12);
+        // Block 27: {1,2,3,4} and {3,4,7,8} share 2 of 6; block 28 the same.
+        let b = vec![(27, vec![3, 4, 7, 8]), (28, vec![5, 6]), (29, vec![9])];
+        let want = (2.0 / 6.0 + 1.0) / 2.0;
+        assert!((experts_shared(&a, &b) - want).abs() < 1e-12);
+        assert_eq!(experts_shared(&a, &[]), 0.0);
     }
 
     #[test]

@@ -320,7 +320,7 @@ fn connection(
                 Some((k, Ok(v))) if ["temp", "top-k", "top-p", "min-p", "dry", "repeat-penalty"].contains(&k) => ctx.send(Command::Set(k.to_string(), v)).map(|_| format!("{k} {v}")).map_err(|_| "the engine is gone".to_string()),
                 _ => Err("set takes temp, top-k, top-p, min-p, dry or repeat-penalty and a number".to_string()),
             },
-            "breaker" | "nudges" | "guide" => match arg.trim() {
+            "breaker" | "nudges" | "guide" | "experts" => match arg.trim() {
                 "on" | "off" => ctx.send(Command::Guard(cmd.to_string(), arg.trim() == "on")).map(|_| format!("{cmd} {}", arg.trim())).map_err(|_| "the engine is gone".to_string()),
                 _ => Err(format!("{cmd} takes on or off")),
             },

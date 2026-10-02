@@ -29,7 +29,8 @@ tool calls, as its chat template (read from the GGUF's
   the tool responses in a user turn of their own (`extra`): put inside
   its thinking, they cut its tool calls in two, and it took to writing
   such lines itself with times it made up (2026-10-02, the live service).
-  A turn that runs past 90 s while something waits for it is closed
+  A turn that runs past 180 s while something waits for it is closed at
+  its next line start (anywhere past 360 s)
   (`engine.rs`, `agent_stalled`).
 - A summary (a rollover, a restart) is asked in a user turn of its own at
   the end of the turn it is in, its answer opened with no thinking and

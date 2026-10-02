@@ -370,6 +370,12 @@ enum Cmd {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
+    /// The experts each token is routed to, captured at the mind's blocks,
+    /// live (the guide compares the guided token's with the live one's).
+    Experts {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// The line-loop breaker, live.
     Breaker {
         #[arg(value_parser = ["on", "off"])]
@@ -1158,6 +1164,7 @@ fn main() -> Result<()> {
         Cmd::Chunk { n } => ask(&socket, &format!("chunk {n}")),
         Cmd::Chain { state } => ask(&socket, &format!("chain {state}")),
         Cmd::Guide { state } => ask(&socket, &format!("guide {state}")),
+        Cmd::Experts { state } => ask(&socket, &format!("experts {state}")),
         Cmd::Breaker { state } => ask(&socket, &format!("breaker {state}")),
         Cmd::Nudges { state } => ask(&socket, &format!("nudges {state}")),
         Cmd::Set { key, value } => ask(&socket, &format!("set {key} {value}")),

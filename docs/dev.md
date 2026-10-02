@@ -50,7 +50,7 @@ plus any serve options given after it.
 | `phi-stream say --as Claude TEXT` | a line to it, named: it hears `« [HH:MM:SS.uuuuuu] Claude: TEXT` |
 | `phi-stream ask [--timeout 180] TEXT` | a message from Claude with an id (`c3`) that waits for its answer: in the agent frame it comes at its next user turn, and its `tell_claude` naming `c3` (or the first after it naming none) is printed on stdout, the ids and the wait on stderr (exit 1 if none came in time) |
 | `phi-stream ask --spoken --as Claude [--timeout 180] [--thoughts] TEXT` | the journal and chat frames: say, then wait for its next spoken line and print it (`--thoughts` prints its thoughts meanwhile on stderr) |
-| `phi-stream guide on\|off` | the guide lane (`--guide`, `src/engine.md`): the distribution with its last reflection in mind beside every thinking token, measured (shadow) |
+| `phi-stream guide on\|off`, `experts on\|off`, `chain on\|off` | the guide lane (`--guide`, `src/engine.md`): the distribution with its last reflection in mind beside every thinking token, measured (shadow) |
 | `phi-stream mcp` | all of this, and the terminal interface itself, as MCP tools for Claude Code (`src/mcp.md`): `screen`, `type`, `keys`, `ask`, `say`, `inbox`, `status` |
 | `phi-stream listen` | from now on, one line each as it happens: `said: ...` (its spoken lines), `heard: ...`, `noted: ...`, `prefers: ...`, reads, and the checks that changed a word |
 | `phi-stream feed FILE` | hand it a file (a diff, a record) to read beside its thoughts |
