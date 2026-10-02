@@ -2728,12 +2728,24 @@ impl Engine {
                 (Some(c), _) => format!("exit {c}"),
                 (None, _) => "it did not run".to_string(),
             };
-            let what = format!(
-                "the command `{}` ended ({how}, {:.0} ms); its output{}",
-                ran.command,
-                ran.ms,
-                if ran.cut { ", cut at 16 KiB," } else { "" }
-            );
+            // A command stopped at the limit has no result, and says so: read
+            // as "ended ... (no output)", three cargo checks stopped at 60 s
+            // became "compilation passes" in its review.
+            let what = if ran.timed_out {
+                format!(
+                    "the command `{}` did NOT finish: it was stopped at the limit of {} s, so its result is unknown (no exit code); what it had written by then{}",
+                    ran.command,
+                    MAX_TERM_SECS,
+                    if ran.cut { ", cut at 16 KiB," } else { "" }
+                )
+            } else {
+                format!(
+                    "the command `{}` ended ({how}, {:.0} ms); its output{}",
+                    ran.command,
+                    ran.ms,
+                    if ran.cut { ", cut at 16 KiB," } else { "" }
+                )
+            };
             let text = if ran.out.trim().is_empty() {
                 "(no output)".to_string()
             } else {
