@@ -6,10 +6,20 @@ and the output comes back into the stream as a document when the command
 ends (`engine.md`). The stream keeps thinking meanwhile: commands run on
 a thread of their own, in order, one at a time (at most 4 waiting).
 
+A command starts in the repository being developed (its paths are what the
+stream reads by), else in its workspace. In development the repository is
+mounted as an overlay: the repository as it is, with the stream's writes
+in an upper layer kept beside the workspace (`dev-copy/upper`, outside
+the sandbox's view), so it can edit, compile and test in place while the
+repository itself never changes; its changes are files in that layer, for
+Claude to review and apply. Measured on the live service: with commands
+starting in the workspace, its `cat src/engine.md` failed (exit 1), and
+`cat src/engine.rs | head` reported exit 0 although `cat` had failed.
+
 The sandbox (bubblewrap), so a wrong or invented command can do little:
 - it sees `/usr` (and the `/bin`, `/lib` links into it), the repository
-  being developed read-only, and its own workspace read-write, where the
-  command starts; nothing else of the home directory, so private files
+  being developed (through its working copy, or read-only), and its own
+  workspace read-write; nothing else of the home directory, so private files
   never enter its context;
 - no network (`--unshare-all`: only `lo` exists), a fresh `/tmp`, its own
   process tree, a cleared environment (`PATH=/usr/bin`, `HOME` the
@@ -27,7 +37,9 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
 (`tui.md`).
 
 Tests, on the real sandbox (skipped where bwrap is missing): the
-repository reads and does not write; the workspace writes and is where a
-command starts; the home directory's private files are not there; Python
+repository reads and does not write (no working copy); the workspace
+writes, and a command starts in the repository; with a working copy, a
+write lands in its upper layer, a later command sees it, and the
+repository has none; the home directory's private files are not there; Python
 does not run; only `lo` exists; the time limit stops a command; the cap
 cuts the output.

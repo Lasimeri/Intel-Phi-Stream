@@ -13,8 +13,14 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct TermConfig {
-    /// Read-only: the repository it develops (or none).
+    /// The repository it develops (or none): where its commands start, read
+    /// only, or through `overlay`.
     pub repo: Option<PathBuf>,
+    /// Its working copy of the repository: a directory holding an overlay's
+    /// `upper` (its writes) and `work`. The repository is seen as it is with
+    /// its writes on top; the repository itself never changes. None: the
+    /// repository read only.
+    pub overlay: Option<PathBuf>,
     /// Read-write: its workspace, where its commands start.
     pub workspace: PathBuf,
     /// The longest a command may run.
@@ -104,14 +110,30 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
     }
     if let Some(r) = &cfg.repo {
         let r = r.display().to_string();
-        a.extend(["--ro-bind".into(), r.clone(), r]);
+        match &cfg.overlay {
+            Some(o) => a.extend([
+                "--overlay-src".into(),
+                r.clone(),
+                "--overlay".into(),
+                o.join("upper").display().to_string(),
+                o.join("work").display().to_string(),
+                r,
+            ]),
+            None => a.extend(["--ro-bind".into(), r.clone(), r]),
+        }
     }
+    // Commands start in the repository when there is one (its paths are
+    // what the stream reads by), else in the workspace.
+    let start = cfg
+        .repo
+        .as_ref()
+        .map_or(ws.clone(), |r| r.display().to_string());
     a.extend([
         "--bind".into(),
         ws.clone(),
         ws.clone(),
         "--chdir".into(),
-        ws.clone(),
+        start,
         "--unshare-all".into(),
         "--die-with-parent".into(),
         "--new-session".into(),
@@ -135,6 +157,10 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
 /// Run one command in the sandbox and wait for it (the terminal's thread).
 pub fn run(cfg: &TermConfig, id: u64, command: &str) -> Ran {
     let t0 = Instant::now();
+    if let Some(o) = &cfg.overlay {
+        let _ = std::fs::create_dir_all(o.join("upper"));
+        let _ = std::fs::create_dir_all(o.join("work"));
+    }
     let a = argv(cfg, command);
     let mut child = match Command::new(&a[0])
         .args(&a[1..])
@@ -276,6 +302,7 @@ mod tests {
     fn cfg(ws: &Path) -> TermConfig {
         TermConfig {
             repo: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+            overlay: None,
             workspace: ws.to_path_buf(),
             timeout: Duration::from_secs(10),
             max_out: 4096,
@@ -306,10 +333,14 @@ mod tests {
         let r = run(&c, 2, &format!("touch '{repo}/x'"));
         assert_ne!(r.code, Some(0), "{r:?}");
         assert!(!Path::new(repo).join("x").exists());
-        // The workspace writes, and the command starts there.
-        let r = run(&c, 3, "echo hi > made.txt && cat made.txt && pwd");
+        // The workspace writes; the command starts in the repository.
+        let r = run(
+            &c,
+            3,
+            &format!("echo hi > '{}/made.txt' && pwd", ws.display()),
+        );
         assert_eq!(r.code, Some(0), "{r:?}");
-        assert!(r.out.contains("hi"));
+        assert_eq!(r.out.trim(), repo, "{r:?}");
         assert_eq!(
             std::fs::read_to_string(ws.join("made.txt")).unwrap(),
             "hi\n"
@@ -325,6 +356,31 @@ mod tests {
         let r = run(&c, 5, "python3 -c 'print(1)'");
         assert_ne!(r.code, Some(0), "{r:?}");
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn the_working_copy_takes_its_writes_and_the_repository_none() {
+        if !available() {
+            eprintln!("bwrap not installed: skipped");
+            return;
+        }
+        let ws = scratch("copy-ws");
+        let copy = scratch("copy");
+        let mut c = cfg(&ws);
+        c.overlay = Some(copy.clone());
+        let repo = env!("CARGO_MANIFEST_DIR");
+        // It reads the repository and writes into it, in its own view.
+        let r = run(&c, 1, "echo edit > made-by-the-stream.txt && cat made-by-the-stream.txt && grep -c -F [package] Cargo.toml");
+        assert_eq!(r.code, Some(0), "{r:?}");
+        assert_eq!(r.out, "edit\n1\n", "{r:?}");
+        // The write is in the working copy, and the repository has none.
+        assert!(copy.join("upper/made-by-the-stream.txt").is_file());
+        assert!(!Path::new(repo).join("made-by-the-stream.txt").exists());
+        // A later command sees it still.
+        let r = run(&c, 2, "cat made-by-the-stream.txt");
+        assert_eq!(r.out, "edit\n", "{r:?}");
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&copy);
     }
 
     #[test]

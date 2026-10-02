@@ -671,6 +671,15 @@ impl Engine {
         let term = cfg.terminal.then(|| {
             crate::term::Term::start(crate::term::TermConfig {
                 repo: cfg.dev.clone(),
+                // Its working copy beside the workspace, outside the sandbox's
+                // view (`term.md`).
+                overlay: cfg.dev.as_ref().map(|_| {
+                    let name = cfg
+                        .workspace
+                        .file_name()
+                        .map_or("ws".into(), |n| n.to_string_lossy().into_owned());
+                    cfg.workspace.with_file_name(format!("{name}-copy"))
+                }),
                 workspace: cfg.workspace.clone(),
                 timeout: std::time::Duration::from_secs(MAX_TERM_SECS),
                 max_out: 16 * 1024,
@@ -1079,7 +1088,7 @@ impl Engine {
             ("you", "your")
         };
         let terminal = if self.term.is_some() {
-            format!("[run: COMMAND] runs a shell command in {its} terminal (the repository read-only, {its} workspace {ws} writable, no network) and hands the output back when it ends, while {it} {} thinking; ", if journal { "goes on" } else { "go on" })
+            format!("[run: COMMAND] runs a shell command in {its} terminal and hands the output back when it ends (it starts in the repository, where what it writes lands in {its} working copy: the repository is seen with {its} changes on top and itself never changes, and Claude reviews the changes; {its} workspace {ws} is writable too; no network), while {it} {} thinking; ", if journal { "goes on" } else { "go on" })
         } else {
             String::new()
         };
