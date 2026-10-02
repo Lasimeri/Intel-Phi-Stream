@@ -134,6 +134,8 @@ struct View {
     last_t_us: i64,
     /// The last readings of its mind, newest last.
     minds: VecDeque<Reading>,
+    /// The guide lane at the last thinking token (`guide` lines).
+    guide: Option<crate::client::GuideLine>,
     /// What the main compartment shows (Tab cycles it).
     view: Pane,
     /// The checks and the engine's notes, oldest first: (real time, text).
@@ -1298,11 +1300,39 @@ fn draw(
         }
     }
 
-    // The mind strip: what was on its mind at the last token it placed.
+    // The mind strip: what was on its mind at the last token it placed,
+    // after the guide lane at that token when it reads one (every thinking
+    // token reasoned against its reflection: how far it moved, whether the
+    // likeliest token changed, the experts the two share).
+    let guide = v
+        .guide
+        .as_ref()
+        .filter(|g| v.minds.back().is_some_and(|r| (r.pos - g.pos).abs() <= 2))
+        .map(|g| {
+            format!(
+                "GUIDE {} kl {:.2}{}{}   ",
+                if g.mix > 0.0 {
+                    format!("mix {}", g.mix)
+                } else {
+                    "shadow".to_string()
+                },
+                g.kl,
+                if g.flip { " top changed" } else { "" },
+                g.shared.map_or(String::new(), |s| format!(
+                    " experts {:.0}% shared",
+                    100.0 * s
+                ))
+            )
+        })
+        .unwrap_or_default();
     match v.minds.back() {
         Some(r) => s.line(
             lay.mind,
-            &format!(" MIND  {}   ({:.1} ms)", mind_row(r).trim_start(), r.ms),
+            &format!(
+                " {guide}MIND  {}   ({:.1} ms)",
+                mind_row(r).trim_start(),
+                r.ms
+            ),
             plain(theme::GIVEN, theme::SURFACE),
         ),
         None => {
@@ -1487,6 +1517,7 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             heard: 0,
             last_t_us: 0,
             minds: VecDeque::new(),
+            guide: None,
             view: Pane::Feed,
             log: VecDeque::new(),
             utf8: screen::utf8_locale(|k| std::env::var(k).ok()),
@@ -1593,6 +1624,10 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         // A note carries no time: the time it arrived.
                         v.log_push(crate::clock::now_us(), n.clone());
                         v.notes.push(n);
+                        dirty = true;
+                    }
+                    Ok(Msg::Guide(g)) => {
+                        v.guide = Some(g);
                         dirty = true;
                     }
                     Ok(Msg::Mind(r)) => {
@@ -1750,6 +1785,7 @@ mod tests {
             heard: 0,
             last_t_us: 0,
             minds: VecDeque::new(),
+            guide: None,
             view: Pane::Feed,
             log: VecDeque::new(),
             utf8: true,

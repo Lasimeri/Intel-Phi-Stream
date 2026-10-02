@@ -189,6 +189,8 @@ pub fn serve(
                         h.push_term(line.clone());
                         h.broadcast(&line);
                     }
+                    // Per token, as `mind` lines are, and not kept.
+                    Event::Guide(g) => h.broadcast(&crate::client::guide_line(&g)),
                     Event::ToClaude(m) => {
                         let line = crate::client::to_claude_line(&m);
                         h.push_term(line.clone());

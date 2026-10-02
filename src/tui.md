@@ -131,6 +131,10 @@ label in its top edge (the management plan's layout, 2.6):
   its time: a check's own time, a note's arrival (notes carry none),
   wrapped to the compartment, the last 500. Its messages to Claude
   (`claude` lines) are there too: `to Claude (m5, answering c3): TEXT`.
+- The MIND strip starts with the guide lane at the same token when the
+  service runs one: `GUIDE shadow kl 0.41 top changed experts 62% shared`
+  (its weight in the choice in place of `shadow` when mixed).
+
 - With nothing yet, a compartment says what it knows: no status yet, no
   check since this terminal connected (with the service's count), no
   reading yet, or that the service does not read its mind (its status

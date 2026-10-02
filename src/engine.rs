@@ -112,6 +112,8 @@ pub enum Event {
     Act(crate::client::ActLine),
     /// A message it sent Claude (`tell_claude`).
     ToClaude(crate::client::ToClaude),
+    /// The guide lane at one thinking token.
+    Guide(crate::client::GuideLine),
     Stopped,
 }
 
@@ -1889,6 +1891,14 @@ impl Engine {
             self.guide_shared += s;
             self.guide_shared_n += 1;
         }
+        let _ = self.tx.send(Event::Guide(crate::client::GuideLine {
+            t_us: clock::now_us(),
+            pos: self.history.len() as i32,
+            kl: kl as f32,
+            flip,
+            shared: shared.map(|s| s as f32),
+            mix: self.guide_mix,
+        }));
         let (tl, tg) = (self.llm.text(&[al as i32]), self.llm.text(&[ag as i32]));
         self.guide_log.line(&format!(
             "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}{}",

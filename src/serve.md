@@ -17,7 +17,8 @@ running mind and the 40-second load happens once.
   id (`c1`, `c2`, ... for the life of the service) and time come back as
   `ok asked c3 t=US`, and the stream answers with `tell_claude` naming
   it; `claude` lines (its messages to Claude) are kept with the terminal's
-  lines for a new `tail`.
+  lines for a new `tail`. `guide` lines (the guide lane at each thinking token) are
+  sent as they come and not kept.
 - `say TEXT`, `say-as NAME TEXT` (the speaker named, `docs/dev.md`) and
   `feed PATH` queue what is said or handed over (the file
   is read here, in the service's own file system); `persona PATH` reads

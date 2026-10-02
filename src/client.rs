@@ -104,6 +104,8 @@ pub enum Msg {
     Act(ActLine),
     /// A message it sent Claude (`tell_claude`).
     ToClaude(ToClaude),
+    /// The guide lane at one thinking token.
+    Guide(GuideLine),
     Ok(String),
     Err(String),
     Bye,
@@ -248,6 +250,11 @@ pub fn parse(line: &str) -> Msg {
         // term start t=US id=N COMMAND, or term end t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT
         "term" => match parse_term(rest) {
             Some(t) => Msg::Term(t),
+            None => Msg::Other(line.to_string()),
+        },
+        // guide t=US pos=P kl=K flip=0|1 shared=S|- mix=G
+        "guide" => match parse_guide(rest) {
+            Some(g) => Msg::Guide(g),
             None => Msg::Other(line.to_string()),
         },
         // claude t=US id=mN re=cM|- TEXT
@@ -490,6 +497,46 @@ impl Client {
     }
 }
 
+/// The guide lane at one thinking token (`engine.md`): how far the
+/// reflection moved its distribution (KL, nats), whether it changed the
+/// likeliest token, the experts the two share (with `experts on`), and the
+/// guide's weight in the choice (0: shadow).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuideLine {
+    pub t_us: i64,
+    pub pos: i32,
+    pub kl: f32,
+    pub flip: bool,
+    pub shared: Option<f32>,
+    pub mix: f32,
+}
+
+/// A `guide` line as the service sends it.
+pub fn guide_line(g: &GuideLine) -> String {
+    format!(
+        "guide t={} pos={} kl={:.4} flip={} shared={} mix={}",
+        g.t_us,
+        g.pos,
+        g.kl,
+        g.flip as u8,
+        g.shared.map_or("-".to_string(), |s| format!("{s:.3}")),
+        g.mix
+    )
+}
+
+fn parse_guide(rest: &str) -> Option<GuideLine> {
+    let f = fields(rest);
+    let get = |k: &str| f.iter().find(|(a, _)| a == k).map(|(_, v)| v.as_str());
+    Some(GuideLine {
+        t_us: get("t")?.parse().ok()?,
+        pos: get("pos")?.parse().ok()?,
+        kl: get("kl")?.parse().ok()?,
+        flip: get("flip")? == "1",
+        shared: get("shared").and_then(|s| s.parse().ok()),
+        mix: get("mix").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+    })
+}
+
 /// A message the stream sent Claude (`tell_claude`): its id (`m3`), when,
 /// the id of Claude's message it answers (`c2`), if any, and its text.
 #[derive(Clone, Debug, PartialEq)]
@@ -576,6 +623,42 @@ fn parse_to_claude(rest: &str) -> Option<ToClaude> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guide_and_claude_lines_round_trip() {
+        let g = GuideLine {
+            t_us: 5,
+            pos: 9,
+            kl: 0.25,
+            flip: true,
+            shared: Some(0.5),
+            mix: 0.5,
+        };
+        match parse(&guide_line(&g)) {
+            Msg::Guide(back) => assert_eq!(back, g),
+            other => panic!("{other:?}"),
+        }
+        let none = GuideLine {
+            shared: None,
+            mix: 0.0,
+            flip: false,
+            ..g
+        };
+        match parse(&guide_line(&none)) {
+            Msg::Guide(back) => assert_eq!(back, none),
+            other => panic!("{other:?}"),
+        }
+        let m = ToClaude {
+            id: 3,
+            t_us: 7,
+            re: Some("c2".into()),
+            text: "two\nlines".into(),
+        };
+        match parse(&to_claude_line(&m)) {
+            Msg::ToClaude(back) => assert_eq!(back, m),
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn escaping_round_trips() {
