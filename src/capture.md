@@ -57,7 +57,9 @@ named nodes whole (the last micro-batch's, in `extra`).
 **Experts** (`experts_on`, live: `phi-stream experts on|off`, off by
 default). With it on, the capture also asks for `ffn_moe_topk-L` at the
 same blocks (llama.cpp names the top-k selection so in `build_moe_ffn`,
-`llama-graph.cpp`): i32, the experts each row was routed to. They are kept
+`llama-graph.cpp`): i32, the experts each row was routed to; the linked llama.cpp builds it as a
+view of an argsort, read row by row at its stride (the live service
+stopped on "not contiguous" before). They are kept
 until the output rows are known, as a residual is, and recorded per output
 row with its batch row (`row_experts`, cleared by `take`). Each asked node
 is one more synchronization of the scheduler, so it costs a little at

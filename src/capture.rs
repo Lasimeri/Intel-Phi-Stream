@@ -347,17 +347,35 @@ impl Capture {
             }
             let k = (*t).ne[0] as usize;
             let n_rows = (*t).ne[1] as usize;
-            if (*t).nb[1] != k * 4 {
-                return Err(format!("ffn_moe_topk-{layer} is not contiguous"));
+            // A view (the top k of an argsort, as the linked llama.cpp builds
+            // it: the live service stopped on "not contiguous") is read row by
+            // row at its own stride; its elements must be adjacent.
+            if (*t).nb[0] != 4 {
+                return Err(format!(
+                    "ffn_moe_topk-{layer}'s elements are {} bytes apart",
+                    (*t).nb[0]
+                ));
             }
+            let stride = (*t).nb[1];
             let mut data = vec![0i32; k * n_rows];
-            if !data.is_empty() {
-                sys::ggml_backend_tensor_get(
-                    t,
-                    data.as_mut_ptr() as *mut c_void,
-                    0,
-                    data.len() * 4,
-                );
+            if stride == k * 4 {
+                if !data.is_empty() {
+                    sys::ggml_backend_tensor_get(
+                        t,
+                        data.as_mut_ptr() as *mut c_void,
+                        0,
+                        data.len() * 4,
+                    );
+                }
+            } else {
+                for r in 0..n_rows {
+                    sys::ggml_backend_tensor_get(
+                        t,
+                        data[r * k..].as_mut_ptr() as *mut c_void,
+                        r * stride,
+                        k * 4,
+                    );
+                }
             }
             match &self.ids {
                 Some(ids) => {
