@@ -181,3 +181,15 @@ build, the scripts and the evaluators and passes the engine. The build's
 summary keeps the errors and their places and drops the progress lines.
 The sandbox itself was run on this repository (its first build caught a
 format error at the base, 8e4773a).
+
+**The working copy kept up to date** (2026-10-02, after c2c4201): a stale
+copy did more than revert in a proposal. Grounding reads the stream's
+layer over the repository, so the head's new code was "nowhere in the
+repository", the stream concluded the ground truth was broken, and went
+round that conclusion for minutes. At every new commit it is told of
+(`head_news`), `refresh_copy` merges each copy in its layer onto the head
+in place (`rebase`), writes the merged file back, takes out copies that are
+then identical to the head, says what it did in the line that tells it of
+the commit, and the grounding re-reads the repository. With the loop on,
+that line no longer says "review it" (each of Claude's commits had pulled
+it off its objective to review), only "read it if it touches your work".

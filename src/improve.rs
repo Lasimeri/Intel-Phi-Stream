@@ -273,6 +273,74 @@ fn rebase(cfg: &ImproveConfig, base: &str, ch: &mut Vec<Change>) -> Result<Vec<S
     Ok(said)
 }
 
+/// The stream's working copy brought up to the head, in place (at each new
+/// commit it is told of): every file of its layer that differs from the
+/// head is merged onto it as a proposal would be (`rebase`) and written
+/// back; a copy the merge makes identical to the head is taken out of the
+/// layer, so the head's file shows through. Its own grounding read the
+/// layer over the repository, so a stale copy made the head's new code
+/// "nowhere in the repository" (2026-10-02, c2c4201). A conflict changes
+/// nothing and is said. Deletions (whiteouts) are left as they are.
+pub fn refresh_copy(cfg: &ImproveConfig) -> Result<Vec<String>, String> {
+    let base = head(&cfg.repo)?;
+    let before = changes(cfg, &base)?;
+    let mut ch: Vec<Change> = before.iter().filter(|c| c.1.is_some()).cloned().collect();
+    let said = rebase(cfg, &base, &mut ch)?;
+    let mut out = said;
+    for (rel, new) in &before {
+        if new.is_none() {
+            continue;
+        }
+        let p = cfg.upper.join(rel);
+        match ch.iter().find(|c| &c.0 == rel) {
+            None => {
+                std::fs::remove_file(&p).map_err(|e| format!("{rel}: {e}"))?;
+                out.push(format!(
+                    "{rel}: now the same as the head, your copy taken out"
+                ));
+            }
+            Some((_, Some(b))) if Some(b) != new.as_ref() => {
+                std::fs::write(&p, b).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            _ => {}
+        }
+    }
+    // Copies identical to the head shadow nothing now, but would at the
+    // next commit to them: taken out too.
+    let mut stack = vec![cfg.upper.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            let Ok(rel) = p
+                .strip_prefix(&cfg.upper)
+                .map(|r| r.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            if meta.is_dir() {
+                if rel != ".git" && rel != "target" {
+                    stack.push(p);
+                }
+            } else if meta.is_file() {
+                let same = git(&cfg.repo, &["show", &format!("{base}:{rel}")])
+                    .ok()
+                    .zip(std::fs::read(&p).ok())
+                    .is_some_and(|(h, c)| h == c);
+                if same && std::fs::remove_file(&p).is_ok() {
+                    out.push(format!("{rel}: the same as the head, your copy taken out"));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Stage a candidate: the base exported from git (`git archive`) into
 /// `tree/`, made a repository of its own with the base as its one commit,
 /// the changes written over it, and the diff kept as `change.patch` (what
@@ -876,6 +944,20 @@ mod tests {
         let merged = String::from_utf8(ch[0].1.clone().unwrap()).unwrap();
         assert!(merged.contains("fn a() { 0 }"), "the commit kept: {merged}");
         assert!(merged.contains("fn c() { 1 }"), "the change kept: {merged}");
+        // The working copy itself brought up to the head, in place.
+        let said = refresh_copy(&cfg).unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        let copy = std::fs::read_to_string(upper.join("src/e.rs")).unwrap();
+        assert!(
+            copy.contains("fn a() { 0 }") && copy.contains("fn c() { 1 }"),
+            "{copy}"
+        );
+        // A copy that only holds what the head has is taken out of the layer.
+        std::fs::write(upper.join("src/f.rs"), "x\n").unwrap();
+        std::fs::write(repo.join("src/f.rs"), "x\n").unwrap();
+        commit("three");
+        refresh_copy(&cfg).unwrap();
+        assert!(!upper.join("src/f.rs").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

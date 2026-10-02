@@ -2876,9 +2876,41 @@ impl Engine {
         match old {
             Some(old) if old != h => {
                 let _ = fs::write(self.cfg.workspace.join("head-told"), &h);
-                Some(format!("a new commit, {h} (it was {old}): review it"))
+                // Its working copy brought up to the new head (`improve.md`): a
+                // copy older than the head made its own grounding call the
+                // head's new code missing, and it argued with that in circles.
+                let refreshed = self.refresh_copy();
+                self.ground_repo = None;
+                Some(if self.improver.is_some() {
+                    format!("a new commit, {h} (it was {old}){refreshed}; read it if it touches your work")
+                } else {
+                    format!("a new commit, {h} (it was {old}){refreshed}: review it")
+                })
             }
             _ => None,
+        }
+    }
+
+    /// Its working copy merged up to the repository's head (`improve::
+    /// refresh_copy`), said in short for the line that tells it of the
+    /// commit; empty when there was nothing to bring up.
+    fn refresh_copy(&mut self) -> String {
+        let Some(cfg) = self.improver.as_ref().map(|i| i.config().clone()) else {
+            return String::new();
+        };
+        match crate::improve::refresh_copy(&cfg) {
+            Ok(said) if said.is_empty() => String::new(),
+            Ok(said) => {
+                self.note(format!(
+                    "working copy brought up to the head: {}",
+                    said.join("; ")
+                ));
+                format!(
+                    "; your working copy was brought up to it ({})",
+                    said.join("; ")
+                )
+            }
+            Err(e) => format!("; your working copy could not be merged up to it: {e}"),
         }
     }
 
