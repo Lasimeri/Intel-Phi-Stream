@@ -569,6 +569,9 @@ tokens a report (a note, and a line in DELIBERATION).
     8-grams pass twice the window before). Otherwise the lens stays in
     the terminal (`tui.md`) and is not mixed. Each arm's rate is recorded:
     a lens arm 10 percent slower than the chain arm counts against it.
+  - Measured 2026-10-02 (`docs/results/2026-10-02-guide-ab.md`): lens
+    0.81 times placebo's mean KL, flips equal (2.6 percent): the rule
+    fails, the lens is not mixed.
 - With `experts on` (`capture.md`), each thinking token also compares
   the experts the guided token and the live one were routed to at the
   mind's blocks: the share they hold in common, block by block
