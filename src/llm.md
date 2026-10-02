@@ -47,3 +47,7 @@ repeated sequences (`dry_multiplier`, 0 off; `dry_base`,
 `dry_allowed_length`, `dry_last_n`; breakers newline, colon, quote,
 asterisk), in llama.cpp's order: penalties, DRY, top-k, top-p, min-p,
 temperature.
+
+`--cpu` loads the model with no GPU (no device listed, no layer
+offloaded, a split of zero blocks): on the host, and on the cards when
+their backend is loaded. A second model then has the GPU to itself.

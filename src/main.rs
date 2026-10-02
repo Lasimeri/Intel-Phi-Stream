@@ -88,6 +88,10 @@ struct ModelArgs {
     /// K and V in 8-bit blocks (half the cells' bytes).
     #[arg(global = true, long)]
     kv_q8: bool,
+    /// No GPU: the model on the host and the cards, leaving the GPU to another
+    /// model (a second instance, src/llm.md).
+    #[arg(global = true, long)]
+    cpu: bool,
     /// Threads for llama.cpp's own CPU work (the cards' backend has its pool).
     #[arg(global = true, short = 't', long, default_value_t = 8)]
     threads: i32,
@@ -578,6 +582,7 @@ fn load_with(m: &ModelArgs, capture: Option<capture::CaptureConfig>, extra: u64)
             Vec::new()
         },
         kv_q8: m.kv_q8,
+        cpu: m.cpu,
         n_seq: m.n_seq,
         kv_unified: !m.kv_split,
         verbose: m.verbose,

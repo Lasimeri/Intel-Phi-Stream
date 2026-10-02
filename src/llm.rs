@@ -37,6 +37,9 @@ pub struct Options {
     pub keep_on_gpu: Vec<usize>,
     /// K and V as 8-bit blocks instead of float16 (half the cells' bytes).
     pub kv_q8: bool,
+    /// No GPU: the model on the host (and the cards, when their backend is
+    /// loaded), so a second model can have the GPU.
+    pub cpu: bool,
     /// Sequences the context can hold apart.
     pub n_seq: u32,
     /// One pool of cells for every sequence (off: a stream per sequence).
@@ -157,12 +160,18 @@ impl Llm {
             sys::ggml_backend_load_all_from_path(dir.as_ptr());
             sys::llama_backend_init();
             let cuda_name = CString::new("CUDA0")?;
-            let cuda = sys::ggml_backend_dev_by_name(cuda_name.as_ptr());
-            if cuda.is_null() {
+            let cuda = if opts.cpu {
+                std::ptr::null_mut()
+            } else {
+                sys::ggml_backend_dev_by_name(cuda_name.as_ptr())
+            };
+            if cuda.is_null() && !opts.cpu {
                 bail!("no CUDA0 device: is {} the CUDA build?", opts.backend_dir);
             }
             let (mut free, mut total) = (0usize, 0usize);
-            sys::ggml_backend_dev_memory(cuda, &mut free, &mut total);
+            if !opts.cpu {
+                sys::ggml_backend_dev_memory(cuda, &mut free, &mut total);
+            }
             let kv_per_token = if opts.kv_q8 {
                 sizes.kv_per_token_f16 * 17 / 32
             } else {
@@ -179,7 +188,9 @@ impl Llm {
                 + sizes.recurrent_per_seq * opts.n_seq as u64
                 + opts.extra_reserve;
             let budget = (free as u64).saturating_sub(reserve);
-            let plan = split::plan(&sizes, budget, opts.gpu_blocks, &opts.keep_on_gpu);
+            // With --cpu no block goes to a GPU (and none is listed below).
+            let want = if opts.cpu { Some(0) } else { opts.gpu_blocks };
+            let plan = split::plan(&sizes, budget, want, &opts.keep_on_gpu);
 
             let mut devices = Box::new([cuda, std::ptr::null_mut()]);
             let pattern = plan.pattern.as_deref().map(CString::new).transpose()?;
@@ -193,14 +204,14 @@ impl Llm {
                     buft: std::ptr::null_mut(),
                 },
             ]);
-            if let Some(p) = &pattern {
+            if let Some(p) = pattern.as_ref().filter(|_| !opts.cpu) {
                 overrides[0].pattern = p.as_ptr();
                 overrides[0].buft = sys::ggml_backend_cpu_buffer_type();
             }
             let mut mp = sys::llama_model_default_params();
             mp.devices = devices.as_mut_ptr();
             mp.tensor_buft_overrides = overrides.as_ptr();
-            mp.n_gpu_layers = 999;
+            mp.n_gpu_layers = if opts.cpu { 0 } else { 999 };
             // No repacking: a repacked weight is never offered to the cards.
             mp.use_extra_bufts = false;
             let m = NonNull::new(sys::llama_model_load_from_file(file.as_ptr(), mp))
