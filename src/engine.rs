@@ -441,9 +441,8 @@ struct Rest {
     reason: String,
     minutes: i64,
     until_mono: i64,
-    /// The repository's head when it began (a new commit wakes it), and when
-    /// it is looked at next.
-    head: Option<String>,
+    /// When the repository's head is looked at next (one other than
+    /// `head_told` wakes it).
     next_look_mono: i64,
     /// The results of the turn that rested, for the turn that wakes.
     results: Vec<String>,
@@ -654,6 +653,10 @@ pub struct Engine {
     /// At rest (`wait`), and a rest asked for by the turn whose calls run.
     rest: Option<Rest>,
     rest_asked: Option<(String, i64)>,
+    /// The repository's head as it was last told it (development; at the
+    /// start, the head then): a newer one is told at its next user turn
+    /// (`take_waiting`) and wakes a rest (`rest_look`).
+    head_told: Option<String>,
     /// A long decode straight into the live sequence (`feed_live`): the
     /// tokens done and all of them, for the status.
     prefill: Option<(usize, usize)>,
@@ -905,6 +908,7 @@ impl Engine {
             fs::read_to_string(cfg.workspace.join("to-claude.md")).map_or(0, |s| {
                 s.lines().filter(|l| l.starts_with("## m")).count() as u64
             }) + 1;
+        let head_told = cfg.dev.as_deref().and_then(head_of);
         let notes = read_notes(&cfg.workspace.join("notes.md"));
         let prefs = read_notes(&cfg.workspace.join("preferences.md"));
         // In development, notes already kept are checked against the code too
@@ -1051,6 +1055,7 @@ impl Engine {
             answered: HashMap::new(),
             rest: None,
             rest_asked: None,
+            head_told,
             prefill: None,
             act_next: 1,
             run_acts: HashMap::new(),
@@ -2247,7 +2252,6 @@ impl Engine {
                     reason,
                     minutes,
                     until_mono: mono + minutes * 60_000_000,
-                    head: self.repo_head(),
                     next_look_mono: mono,
                     results,
                 });
@@ -2268,26 +2272,17 @@ impl Engine {
         self.agent_open(crate::agent::responses_turn(&results, &extra))
     }
 
-    /// The repository's head commit (short), read from its files: in
-    /// development, a new one wakes a rest.
-    fn repo_head(&self) -> Option<String> {
-        let git = self.cfg.dev.as_ref()?.join(".git");
-        let head = fs::read_to_string(git.join("HEAD")).ok()?;
-        let full = match head.trim().strip_prefix("ref: ") {
-            Some(r) => match fs::read_to_string(git.join(r)) {
-                Ok(s) => s.trim().to_string(),
-                // A ref packed away: its line in packed-refs.
-                Err(_) => fs::read_to_string(git.join("packed-refs"))
-                    .ok()?
-                    .lines()
-                    .find(|l| l.ends_with(r))?
-                    .split_whitespace()
-                    .next()?
-                    .to_string(),
-            },
-            None => head.trim().to_string(),
-        };
-        Some(full.chars().take(7).collect())
+    /// A head of the repository other than the one it was last told
+    /// (`head_told`): the line that tells it, and it is told. Its rest's own
+    /// head missed a commit made during a turn after its last `git log`
+    /// (564ad0b, 5 s after): the rest began at the new head and slept.
+    fn head_news(&mut self) -> Option<String> {
+        let h = head_of(self.cfg.dev.as_ref()?)?;
+        let old = self.head_told.replace(h.clone());
+        match old {
+            Some(old) if old != h => Some(format!("a new commit, {h} (it was {old}): review it")),
+            _ => None,
+        }
     }
 
     /// At rest: wake when something came for it (a message, a line from the
@@ -2298,22 +2293,15 @@ impl Engine {
             return Ok(());
         };
         let mono = clock::mono_us();
-        let (look, old_head, until, minutes) = (
-            mono >= r.next_look_mono,
-            r.head.clone(),
-            r.until_mono,
-            r.minutes,
-        );
+        let (look, until, minutes) = (mono >= r.next_look_mono, r.until_mono, r.minutes);
         let mut woke: Vec<String> = Vec::new();
         // The repository's head, every 2 s.
         if look {
             if let Some(r) = self.rest.as_mut() {
                 r.next_look_mono = mono + 2_000_000;
             }
-            if let (Some(h), Some(old)) = (self.repo_head(), old_head) {
-                if h != old {
-                    woke.push(format!("a new commit, {h} (it was {old}): review it"));
-                }
+            if let Some(line) = self.head_news() {
+                woke.push(line);
             }
         }
         if mono >= until {
@@ -3151,6 +3139,9 @@ impl Engine {
     /// its size (its own proposal: a feed past the room filled the context).
     fn take_waiting(&mut self) -> Vec<String> {
         let mut out = std::mem::take(&mut self.waiting);
+        if let Some(line) = self.head_news() {
+            out.insert(0, format!("[{}] {line}", clock::hms(clock::now_us())));
+        }
         out.append(&mut self.asides);
         let mut room = self.read_room();
         while let Some((text, label)) = self.queue.pop_front() {
@@ -4884,6 +4875,27 @@ fn contained(a: &[String], b: &[String]) -> f64 {
     a.iter().filter(|w| b.binary_search(w).is_ok()).count() as f64 / a.len() as f64
 }
 
+/// A repository's head commit (short), read from its files.
+fn head_of(repo: &Path) -> Option<String> {
+    let git = repo.join(".git");
+    let head = fs::read_to_string(git.join("HEAD")).ok()?;
+    let full = match head.trim().strip_prefix("ref: ") {
+        Some(r) => match fs::read_to_string(git.join(r)) {
+            Ok(s) => s.trim().to_string(),
+            // A ref packed away: its line in packed-refs.
+            Err(_) => fs::read_to_string(git.join("packed-refs"))
+                .ok()?
+                .lines()
+                .find(|l| l.ends_with(r))?
+                .split_whitespace()
+                .next()?
+                .to_string(),
+        },
+        None => head.trim().to_string(),
+    };
+    Some(full.chars().take(7).collect())
+}
+
 /// How many leading lines, of these token counts, fit in `budget` tokens.
 fn lines_within(counts: &[usize], budget: usize) -> usize {
     let mut sum = 0;
@@ -5232,6 +5244,34 @@ mod tests {
         assert_eq!(at, dir.join("src"));
         assert_eq!(names, "engine.rs, reflect.rs");
         assert!(nearest_listing(&dir.join("src/engine.rs")).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_head_is_read_loose_or_packed() {
+        let dir = std::env::temp_dir().join(format!("phi-stream-head-{}", std::process::id()));
+        let git = dir.join(".git");
+        fs::create_dir_all(git.join("refs/heads")).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            git.join("packed-refs"),
+            "# pack-refs\n9bea30f0000000000000000000000000000000000 refs/heads/main\n",
+        )
+        .unwrap();
+        assert_eq!(head_of(&dir).as_deref(), Some("9bea30f"));
+        fs::write(
+            git.join("refs/heads/main"),
+            "564ad0b5088318ce54835dc7581845e911efdd53\n",
+        )
+        .unwrap();
+        assert_eq!(head_of(&dir).as_deref(), Some("564ad0b"));
+        fs::write(
+            git.join("HEAD"),
+            "1111111222222233333334444444555555566666\n",
+        )
+        .unwrap();
+        assert_eq!(head_of(&dir).as_deref(), Some("1111111"));
+        assert_eq!(head_of(&dir.join("none")), None);
         fs::remove_dir_all(&dir).unwrap();
     }
 

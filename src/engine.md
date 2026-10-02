@@ -550,7 +550,10 @@ repeated at 70 percent over five minutes). Its `wait` tool rests it
 (`Rest`): the turn's results are held, nothing is decoded, and the run
 loop looks every 200 ms (`rest_look`) for what wakes it: something waiting
 for it (a message, a line from the system, an objective), a new commit in
-the repository (`repo_head`, read from `.git` every 2 s), a quit (straight
+the repository (`head_of`, read from `.git` every 2 s, against the head it
+was last told, `head_told`: a rest that took the head at its start missed
+564ad0b, made during a turn 5 s after its `git log`; a commit made during a
+turn is told at its next user turn instead, `take_waiting`), a quit (straight
 to the summary), or the minutes it gave (15 by default, 60 at most). Its
 next turn opens with the rested turn's results and what woke it. The
 status says `resting`. The second chain's reflections wait apart (`asides`, the last
