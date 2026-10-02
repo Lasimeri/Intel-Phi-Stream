@@ -54,7 +54,7 @@ fn tools() -> Vec<String> {
     vec![
         tool(
             "run",
-            "Run a shell command in your sandbox and get its exit code and output (at most 16 KiB). It already starts in the repository, so paths are relative to it and no cd is needed; what it writes there lands in your working copy (the repository itself never changes). /tmp is kept between commands. No network, 60 s at most: a command stopped at the limit has no result. A Rust build (cargo) does not fit in that time here; Claude builds and tests the Rust code. Use it to build C with tcc, test, search (grep -n) and list; to read a file use read, to change one use edit.",
+            "Run a shell command in your sandbox and get its exit code and output (at most about 4096 tokens: past that its leading lines and how much was cut, so narrow a big output with head, tail or grep). It already starts in the repository, so paths are relative to it and no cd is needed; what it writes there lands in your working copy (the repository itself never changes). /tmp is kept between commands. No network, 60 s at most: a command stopped at the limit has no result. A Rust build (cargo) does not fit in that time here; Claude builds and tests the Rust code. Use it to build C with tcc, test, search (grep -n) and list; to read a file use read, to change one use edit.",
             &[("command", "string", "The command line, run by sh -c.")],
             &["command"],
         ),

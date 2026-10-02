@@ -553,10 +553,12 @@ for it (a message, a line from the system, an objective), a new commit in
 the repository (`head_of`, read from `.git` every 2 s, against the head it
 was last told, `head_told`: a rest that took the head at its start missed
 564ad0b, made during a turn 5 s after its `git log`; a commit made during a
-turn is told at its next user turn instead, `take_waiting`), a quit (straight
+turn is told at its next user turn instead, `take_waiting`; kept in the
+workspace, `head-told`, so a commit made while the service was down is told
+too), a quit (straight
 to the summary), or the minutes it gave (15 by default, 60 at most). Its
 next turn opens with the rested turn's results and what woke it. The
-status says `resting`. The second chain's reflections wait apart (`asides`, the last
+status says `resting`, with rates of 0 (nothing is decoded). The second chain's reflections wait apart (`asides`, the last
 two): they ride with the next turn but neither stop a rest nor wake one (at
 first each turn left one waiting, and every rest was refused); a rest
 refused because something came says so. The continue line and the circling nudge name
@@ -574,7 +576,12 @@ context went from 30k to 40k cells in one turn. Now:
   the leading lines that fit (`lines_within`, counted line by line) and a
   header saying which lines are not shown and the `start` that reads them;
   a single line past it is refused with its size. The room check
-  (`read_room`) stays the outer bound;
+  (`read_room`) stays the outer bound, and near a rollover the message
+  names the room (`past`);
+- a command's result too (`fit_output`): the grep above came back through
+  `run`, whose byte cut (16 KiB, about 8k tokens of log text) let it
+  through, and a turn may run four commands. Past the budget, its leading
+  lines and a line saying how much was cut and to narrow the command;
 - past one batch, the status says reading, how many of how many tokens,
   after each batch (`prefill`): it said speaking for those 42 s, on the
   terminal and the MCP screen.

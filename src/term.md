@@ -39,7 +39,12 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
 - at the lowest priority (`nice -n 19`) on the last CPU (`taskset`): the
   stream's own threads start from the first, and a second process on
   them cost the stream about ten times (xks measured 2026-10-01);
-- stopped after 60 s, the output (stdout and stderr) cut at 16 KiB.
+- stopped after 60 s, the output (stdout and stderr) cut at 16 KiB (in the
+  agent frame, then to about 4096 tokens, `engine.rs` `fit_output`);
+- started again, up to five times, when the overlay refuses its mount as
+  busy (`run`, `run_once`): the last command's mount is torn down after its
+  process ends, and a command started milliseconds later failed so, once
+  in about ten test runs; the command had not started.
 
 `[run: ...]` lines wait for an objective like its other tool lines
 (`engine.md`). Each command and its end are sent to the terminals

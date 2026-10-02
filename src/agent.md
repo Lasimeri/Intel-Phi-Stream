@@ -8,7 +8,9 @@ tool calls, as its chat template (read from the GGUF's
   `# Tools`, the functions in a `<tools>` block, one JSON object each in the
   form the template's `tojson` gives (keys in order, `", "` and `": "`
   between them), then the template's own instructions for the call format.
-  Seven functions: `run` (a command in the sandboxed terminal, `term.md`; it
+  Seven functions: `run` (a command in the sandboxed terminal, `term.md`; its
+  output at most about 4096 tokens, past that the leading lines and what
+  was cut, `engine.rs` `fit_output`; it
   starts in the repository, so no cd, and `/tmp` is kept between commands; a
   command stopped at its 60 s limit comes back as not finished, its result
   unknown, and the description says a Rust build does not fit there: three

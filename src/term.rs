@@ -168,7 +168,26 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
 }
 
 /// Run one command in the sandbox and wait for it (the terminal's thread).
+/// The overlay refuses a mount while the last command's is still being torn
+/// down (its namespace goes after the process; "Device or resource busy",
+/// a command run milliseconds after another, once in about ten test runs):
+/// the command never started then, and is started again.
 pub fn run(cfg: &TermConfig, id: u64, command: &str) -> Ran {
+    let mut ran = run_once(cfg, id, command);
+    for i in 1..=5 {
+        if !(ran.code == Some(1)
+            && ran.out.starts_with("bwrap: Can't make overlay mount")
+            && ran.out.contains("busy"))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20 * i));
+        ran = run_once(cfg, id, command);
+    }
+    ran
+}
+
+fn run_once(cfg: &TermConfig, id: u64, command: &str) -> Ran {
     let t0 = Instant::now();
     if let Some(o) = &cfg.overlay {
         let _ = std::fs::create_dir_all(o.join("upper"));

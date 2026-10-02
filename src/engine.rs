@@ -908,7 +908,19 @@ impl Engine {
             fs::read_to_string(cfg.workspace.join("to-claude.md")).map_or(0, |s| {
                 s.lines().filter(|l| l.starts_with("## m")).count() as u64
             }) + 1;
-        let head_told = cfg.dev.as_deref().and_then(head_of);
+        // Kept in the workspace across restarts: a commit made while the
+        // service was down is told too (564ad0b, made before a restart, was
+        // taken as already told).
+        let head_told = cfg.dev.as_deref().and_then(|repo| {
+            fs::read_to_string(cfg.workspace.join("head-told"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| head_of(repo))
+        });
+        if let Some(h) = &head_told {
+            let _ = fs::write(cfg.workspace.join("head-told"), h);
+        }
         let notes = read_notes(&cfg.workspace.join("notes.md"));
         let prefs = read_notes(&cfg.workspace.join("preferences.md"));
         // In development, notes already kept are checked against the code too
@@ -2280,7 +2292,10 @@ impl Engine {
         let h = head_of(self.cfg.dev.as_ref()?)?;
         let old = self.head_told.replace(h.clone());
         match old {
-            Some(old) if old != h => Some(format!("a new commit, {h} (it was {old}): review it")),
+            Some(old) if old != h => {
+                let _ = fs::write(self.cfg.workspace.join("head-told"), &h);
+                Some(format!("a new commit, {h} (it was {old}): review it"))
+            }
             _ => None,
         }
     }
@@ -2538,15 +2553,17 @@ impl Engine {
             let k = lines_within(&counts, budget);
             if k == 0 {
                 return Err(format!(
-                    "{} line {a} alone is {} tokens, more than the {budget} a read gives (room {room})",
+                    "{} line {a} alone is {} tokens, {}",
                     p.display(),
-                    counts[0]
+                    counts[0],
+                    past(budget, room)
                 ));
             }
             let e = a + k - 1;
             Ok(format!(
-                "{} (lines {a} to {e} of {n}; you asked to {b}, {tokens} tokens, more than the {budget} a read gives: lines {} to {b} are not shown, read them with start {}):\n{}",
+                "{} (lines {a} to {e} of {n}; you asked to {b}, {tokens} tokens, {}: lines {} to {b} are not shown, read them with start {}):\n{}",
                 p.display(),
+                past(budget, room),
                 e + 1,
                 e + 1,
                 lines[a - 1..e].join("\n")
@@ -2559,6 +2576,37 @@ impl Engine {
         let first = text.lines().next().unwrap_or("").to_string();
         self.act_end(id, ok, first);
         text
+    }
+
+    /// A command's output within what one result gives (`READ_MAX_TOKENS`,
+    /// and the room): its leading lines, and what was cut. The byte cut
+    /// (16 KiB) let one grep of `reflect.log` through at 9732 tokens (45 s
+    /// of prefill), and a turn may run four commands.
+    fn fit_output(&self, text: String) -> String {
+        let room = self.read_room();
+        let budget = room.min(READ_MAX_TOKENS);
+        let tokens = self.llm.tokenize(&text, false).map_or(0, |t| t.len());
+        if tokens <= budget {
+            return text;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let counts: Vec<usize> = lines
+            .iter()
+            .map(|l| self.llm.tokenize(l, false).map_or(0, |t| t.len()) + 1)
+            .collect();
+        let k = lines_within(&counts, budget);
+        // One line past it whole: its first characters (a token holds at
+        // least one).
+        let shown = if k == 0 {
+            lines[0].chars().take(budget).collect::<String>()
+        } else {
+            lines[..k].join("\n")
+        };
+        format!(
+            "{shown}\n[cut: {k} of {} lines shown; the output is {tokens} tokens, {}: narrow the command with head, tail or grep]",
+            lines.len(),
+            past(budget, room)
+        )
     }
 
     /// The `write` tool: a whole file into its working copy of the
@@ -2769,7 +2817,10 @@ impl Engine {
             // The agent frame waits for it: its result goes back in its slot.
             if let Some(w) = self.awaiting.as_mut() {
                 if let Some(slot) = w.runs.remove(&ran.id) {
-                    w.results[slot] = Some(format!("{what}:\n{text}"));
+                    let text = self.fit_output(text);
+                    if let Some(w) = self.awaiting.as_mut() {
+                        w.results[slot] = Some(format!("{what}:\n{text}"));
+                    }
                     continue;
                 }
             }
@@ -3202,8 +3253,17 @@ impl Engine {
         };
         Status {
             mode,
-            stream_tps: self.stream_rate.v,
-            side_tps: self.side_rate.v,
+            // Nothing is decoded at rest: its last rate is not its rate.
+            stream_tps: if self.rest.is_some() {
+                0.0
+            } else {
+                self.stream_rate.v
+            },
+            side_tps: if self.rest.is_some() {
+                0.0
+            } else {
+                self.side_rate.v
+            },
             cycle_ms: self.cycle_ms.v,
             pos: self.pos(),
             n_ctx: self.llm.n_ctx(),
@@ -4894,6 +4954,16 @@ fn head_of(repo: &Path) -> Option<String> {
         None => head.trim().to_string(),
     };
     Some(full.chars().take(7).collect())
+}
+
+/// Why a result was cut: the most one gives, or, near a rollover, the room
+/// left (a budget of 0 read as "more than the 0 a read gives").
+fn past(budget: usize, room: usize) -> String {
+    if budget < READ_MAX_TOKENS {
+        format!("more than the {room} there is room for now")
+    } else {
+        format!("more than the {READ_MAX_TOKENS} one result gives")
+    }
 }
 
 /// How many leading lines, of these token counts, fit in `budget` tokens.
