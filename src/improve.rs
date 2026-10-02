@@ -399,7 +399,9 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
         files: Vec::new(),
         verdict: Verdict::Refused,
         summary: String::new(),
-        dir: cfg.root.join(format!("cand-{id}")),
+        // Number 0 is a trial (`build`): staged and built the same way, in a
+        // directory of its own, never a candidate.
+        dir: cfg.root.join(cand_dir(id)),
         secs: 0.0,
     };
     let done = |mut o: Outcome, v: Verdict, s: String| {
@@ -500,8 +502,13 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
                 );
             }
             let s = format!(
-                "make check passed in its sandbox ({}); Claude reviews the change next",
-                tests.last().copied().unwrap_or("no test summary")
+                "make check passed in its sandbox ({}); {}",
+                tests.last().copied().unwrap_or("no test summary"),
+                if id == 0 {
+                    "a trial: nothing is sent; propose it when it is ready"
+                } else {
+                    "Claude reviews the change next"
+                }
             );
             done(o, Verdict::Passed, s)
         }
@@ -515,6 +522,87 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
             done(o, Verdict::Failed, s)
         }
         Err(e) => done(o, Verdict::Refused, format!("the build did not start: {e}")),
+    }
+}
+
+/// The working copy's change against the repository's `HEAD`, as a
+/// unified diff (`diff`): what a proposal would hold now.
+pub fn diff_text(cfg: &ImproveConfig) -> Result<String, String> {
+    let base = head(&cfg.repo)?;
+    let ch = changes(cfg, &base)?;
+    if ch.is_empty() {
+        return Ok("your working copy changes nothing against the repository".into());
+    }
+    let mut out = String::new();
+    for (rel, new) in &ch {
+        let old = cfg.repo.join(rel);
+        let old = if old.is_file() {
+            old
+        } else {
+            PathBuf::from("/dev/null")
+        };
+        let new = match new {
+            Some(_) => cfg.upper.join(rel),
+            None => PathBuf::from("/dev/null"),
+        };
+        let d = Command::new("git")
+            .args(["diff", "--no-index", "--no-color", "--"])
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .map_err(|e| format!("git diff: {e}"))?;
+        // Paths as the repository names them, not where the files lie.
+        let text = String::from_utf8_lossy(&d.stdout)
+            .replace(&format!("a{}", old.display()), &format!("a/{rel}"))
+            .replace(&format!("b{}", new.display()), &format!("b/{rel}"));
+        out.push_str(&text);
+    }
+    if denied_any(&ch) {
+        out.push_str("\n(note: it touches a path the loop may not change; propose refuses it)\n");
+    }
+    Ok(out)
+}
+
+fn denied_any(ch: &[Change]) -> bool {
+    ch.iter().any(|c| denied(&c.0))
+}
+
+/// One file of the working copy back to the repository's version
+/// (`revert`): its copy, or its deletion mark, taken out of the layer. The
+/// stream cannot do it itself: a delete inside the overlay hides the
+/// repository's file too (`term.md`). The path must be relative and stay
+/// inside the layer.
+pub fn revert(cfg: &ImproveConfig, rel: &str) -> Result<String, String> {
+    let rel = rel.trim().trim_start_matches("./");
+    let p = Path::new(rel);
+    if rel.is_empty()
+        || p.is_absolute()
+        || p.components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "{rel:?}: a path relative to the repository, without .. or a leading /"
+        ));
+    }
+    let f = cfg.upper.join(p);
+    match std::fs::symlink_metadata(&f) {
+        Ok(m) if m.is_dir() => Err(format!("{rel} is a directory: revert its files one by one")),
+        Ok(_) => {
+            std::fs::remove_file(&f).map_err(|e| format!("{rel}: {e}"))?;
+            Ok(format!(
+                "{rel}: your copy is gone; you read the repository's version again"
+            ))
+        }
+        Err(_) => Err(format!("{rel}: your working copy has no change to it")),
+    }
+}
+
+/// A candidate's directory name: `cand-N`, or `trial` for number 0.
+pub fn cand_dir(id: u64) -> String {
+    if id == 0 {
+        "trial".to_string()
+    } else {
+        format!("cand-{id}")
     }
 }
 
@@ -537,7 +625,7 @@ pub fn record(cfg: &ImproveConfig, o: &Outcome) {
         o.summary
     );
     let _ = std::fs::write(o.dir.join("outcome"), text);
-    let m = cfg.mirror.join(format!("cand-{}", o.id));
+    let m = cfg.mirror.join(cand_dir(o.id));
     if std::fs::create_dir_all(&m).is_ok() {
         for f in ["outcome", "change.patch", "build.log"] {
             let _ = std::fs::copy(o.dir.join(f), m.join(f));
@@ -597,6 +685,32 @@ impl Improver {
             let _ = tx.send(o);
         });
         Ok(id)
+    }
+
+    /// A trial build (`build`): the working copy's change staged and run
+    /// through make check as a candidate is, but numbered 0, never sent to
+    /// Claude; or the number still building.
+    pub fn trial(&mut self, told: Option<String>) -> Result<(), u64> {
+        if let Some(b) = self.busy {
+            return Err(b);
+        }
+        self.busy = Some(0);
+        let (cfg, tx) = (self.cfg.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let o = attempt(&cfg, 0, "trial build", told.as_deref());
+            record(&cfg, &o);
+            let _ = tx.send(o);
+        });
+        Ok(())
+    }
+
+    pub fn config(&self) -> &ImproveConfig {
+        &self.cfg
+    }
+
+    /// What is building: a candidate's number, 0 for a trial.
+    pub fn building(&self) -> Option<u64> {
+        self.busy
     }
 
     pub fn poll(&mut self) -> Option<Outcome> {
@@ -684,6 +798,30 @@ mod tests {
         let o = attempt(&cfg, 2, "touches the manifest", None);
         assert_eq!(o.verdict, Verdict::Refused);
         assert!(o.summary.contains("Cargo.toml"), "{}", o.summary);
+        // The diff names the repository's paths, and flags the denied one.
+        let d = diff_text(&cfg).unwrap();
+        assert!(
+            d.contains("a/src/a.rs") && d.contains("+fn a() { b() }"),
+            "{d}"
+        );
+        assert!(d.contains("propose refuses it"), "{d}");
+        // Revert: a path outside the layer is refused, a copy is dropped, and
+        // the diff no longer holds it.
+        for bad in ["../repo/src/a.rs", "/etc/hostname", "", "src/../../x"] {
+            assert!(revert(&cfg, bad).is_err(), "{bad}");
+        }
+        assert!(revert(&cfg, "Cargo.toml").is_ok());
+        assert!(revert(&cfg, "src/a.rs").is_ok());
+        assert!(
+            revert(&cfg, "src/a.rs").is_err(),
+            "no change left to revert"
+        );
+        assert!(
+            repo.join("src/a.rs").is_file(),
+            "the repository's file stays"
+        );
+        let d = diff_text(&cfg).unwrap();
+        assert!(d.contains("changes nothing"), "{d}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

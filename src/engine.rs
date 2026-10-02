@@ -2577,9 +2577,17 @@ impl Engine {
                     _ => "tell_claude needs a text".to_string(),
                 }),
                 "propose" => Some(self.agent_propose(c)),
+                "build" => Some(self.agent_build()),
+                "diff" => Some(self.agent_diff()),
+                "revert" => Some(self.agent_revert(c)),
+                "report" => Some(self.agent_report()),
                 other => Some(format!(
                     "there is no function {other:?}: the functions are run, read, edit, write, note, wait{} and tell_claude",
-                    if self.improver.is_some() { ", propose" } else { "" }
+                    if self.improver.is_some() {
+                        ", propose, build, diff, revert, report"
+                    } else {
+                        ""
+                    }
                 )),
             };
             wait.results[i] = result;
@@ -3162,6 +3170,119 @@ impl Engine {
         }
     }
 
+    /// `build`: a trial of its working copy's change, built and tested as a
+    /// candidate is but never sent (`improve.md`); the outcome at a later
+    /// turn.
+    fn agent_build(&mut self) -> String {
+        let told = self.head_told.clone();
+        let Some(imp) = self.improver.as_mut() else {
+            return "there is no improvement loop in this run (--improve)".to_string();
+        };
+        let r = imp.trial(told);
+        let act = self.act("build", "a trial of the working copy");
+        let (ok, said) = match r {
+            Ok(()) => (
+                true,
+                "building and testing your working copy as a trial (make check in its sandbox); the outcome comes at a later turn".to_string(),
+            ),
+            Err(0) => (false, "a trial is still building; its outcome comes first".to_string()),
+            Err(b) => (false, format!("candidate {b} is still building; its outcome comes first")),
+        };
+        self.act_end(act, ok, said.clone());
+        said
+    }
+
+    /// `diff`: its working copy's change against the repository's head.
+    fn agent_diff(&mut self) -> String {
+        let Some(cfg) = self.improver.as_ref().map(|i| i.config().clone()) else {
+            return "there is no improvement loop in this run (--improve)".to_string();
+        };
+        let act = self.act("diff", "the working copy against HEAD");
+        let (ok, text) = match crate::improve::diff_text(&cfg) {
+            Ok(t) => (true, t),
+            Err(e) => (false, e),
+        };
+        let lines = text.lines().count();
+        self.act_end(act, ok, format!("{lines} lines"));
+        self.fit_output(text)
+    }
+
+    /// `revert`: one file of its working copy back to the repository's.
+    fn agent_revert(&mut self, c: &crate::agent::Call) -> String {
+        let Some(cfg) = self.improver.as_ref().map(|i| i.config().clone()) else {
+            return "there is no improvement loop in this run (--improve)".to_string();
+        };
+        let Some(path) = c.param("path").map(str::trim).filter(|p| !p.is_empty()) else {
+            return "revert needs a path".to_string();
+        };
+        let act = self.act("revert", path);
+        let (ok, said) = match crate::improve::revert(&cfg, path) {
+            Ok(s) => (true, s),
+            Err(e) => (false, e),
+        };
+        self.act_end(act, ok, said.clone());
+        said
+    }
+
+    /// `report`: its own state in one look.
+    fn agent_report(&mut self) -> String {
+        let act = self.act("report", "its own state");
+        let now = clock::now_us();
+        let tail = |name: &str, bytes: u64| -> String {
+            use std::io::{Read, Seek, SeekFrom};
+            let Ok(mut f) = std::fs::File::open(self.cfg.workspace.join(name)) else {
+                return String::new();
+            };
+            let len = f.metadata().map_or(0, |m| m.len());
+            let _ = f.seek(SeekFrom::Start(len.saturating_sub(bytes)));
+            let mut s = String::new();
+            let _ = f.read_to_string(&mut s);
+            s
+        };
+        // The goal probe's answers in the last ten minutes.
+        let (mut n, mut sum) = (0u32, 0.0f64);
+        for l in tail("goal.log", 65536).lines() {
+            let mut f = l.split('\t');
+            let t: i64 = f.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+            if now - t > 600_000_000 {
+                continue;
+            }
+            if let Some(y) = f.find_map(|x| x.strip_prefix("yes=")) {
+                if let Ok(y) = y.parse::<f64>() {
+                    n += 1;
+                    sum += y;
+                }
+            }
+        }
+        let goal = if n > 0 {
+            format!("{n} answers, mean P(yes) {:.2}", sum / n as f64)
+        } else {
+            "no answers (no objective, or the probe is off)".to_string()
+        };
+        let building = match self.improver.as_ref().and_then(|i| i.building()) {
+            Some(0) => "a trial build".to_string(),
+            Some(b) => format!("candidate {b}"),
+            None => "nothing".to_string(),
+        };
+        let log: Vec<String> = tail("improve.log", 16384)
+            .lines()
+            .rev()
+            .take(5)
+            .map(|l| l.chars().take(300).collect())
+            .collect::<Vec<String>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let text = format!(
+            "status: {}\nobjective: {}\ngoal probe, last 10 min: {goal}\nbuilding: {building}\nimprove.log, last entries:\n{}",
+            status_text(&self.status()),
+            self.objective.as_ref().map_or("none", |o| o.1.as_str()),
+            if log.is_empty() { "(none yet)".to_string() } else { log.join("\n") }
+        );
+        self.act_end(act, true, "status, goal, building, improve.log".into());
+        text
+    }
+
     /// In development, its own status for it to read (`status.txt` in its
     /// workspace, every `STATUS_FILE_US`): the line `phi-stream status`
     /// prints, its time and its objective. The service's socket is outside
@@ -3190,9 +3311,14 @@ impl Engine {
         };
         let at = clock::hms(clock::now_us());
         let files = o.files.join(", ");
+        // Number 0 is a trial (`build`): told and logged, never sent.
+        let name = if o.id == 0 {
+            "trial".to_string()
+        } else {
+            format!("candidate {}", o.id)
+        };
         self.improve_log.line(&format!(
-            "{at}\tcandidate {}\t{}\t{}\tfiles: {files}\tbase {}\t{:.0} s\t{}",
-            o.id,
+            "{at}\t{name}\t{}\t{}\tfiles: {files}\tbase {}\t{:.0} s\t{}",
             o.verdict.word(),
             o.title,
             o.base.get(..12).unwrap_or(&o.base),
@@ -3200,20 +3326,18 @@ impl Engine {
             o.summary.replace('\n', " | ")
         ));
         self.note(format!(
-            "candidate {} {}: {} ({:.0} s)",
-            o.id,
+            "{name} {}: {} ({:.0} s)",
             o.verdict.word(),
             o.title,
             o.secs
         ));
         self.waiting.push(format!(
-            "[{at}] your candidate {} ({}) {}: {}",
-            o.id,
+            "[{at}] your {name} ({}) {}: {}",
             o.title,
             o.verdict.word(),
             o.summary
         ));
-        if o.verdict == crate::improve::Verdict::Passed {
+        if o.id != 0 && o.verdict == crate::improve::Verdict::Passed {
             let _ = self.send_claude(
                 &format!(
                     "[improve] candidate {} passed make check in its sandbox: {} (files: {files}; base {}). The change: {}",

@@ -84,6 +84,26 @@ and Claude's review ("nothing unreviewed runs").
    stream's copies of its files taken out of its layer
    (`scripts/phi-stream.sh accept PATH`), and the service restarted on it.
 
+## Its tools
+
+The person (2026-10-02): "give the harness and management interface more
+tools for the model", and "a better scope so it can be more dynamic and
+synchronous and develop itself more easily". Its `run` stops at 60 s,
+which no Rust build fits, so it could not compile its own changes; with
+the loop on it has, beside `propose`:
+- `build`: a trial: its working copy staged and run through the same
+  sandboxed `make check`, numbered 0 (`trial/`, mirrored to
+  `improve/trial/`), never sent to Claude, so it can fix compile errors
+  and failing tests itself before it proposes;
+- `diff`: its change against the repository's head (`diff_text`), with
+  the repository's paths and a note when it touches a denied one;
+- `revert`: one file back to the repository's version (`revert`: its copy
+  or deletion mark taken out of the layer; a relative path inside the
+  layer only), which it cannot do itself inside the overlay;
+- `report`: its status, objective, the goal probe over the last ten
+  minutes, what is building and the last entries of `improve.log`.
+One build at a time, trial or candidate.
+
 ## What it reads
 
 The person (2026-10-02): "the model needs to improve its harness with all

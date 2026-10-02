@@ -696,3 +696,7 @@ In development, its own status is written every 10 s to `status.txt` in
 its workspace (`write_status_file`: the line `phi-stream status` prints,
 `status_text`, with its time and objective), since the service's socket
 is outside its sandbox.
+With the loop on, `build`, `diff`, `revert` and `report` too
+(`agent_build`, `agent_diff`, `agent_revert`, `agent_report`;
+`improve.md`); a trial's outcome (number 0) is told and logged as
+`trial`, never sent to Claude.

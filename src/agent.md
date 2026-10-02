@@ -31,6 +31,12 @@ tool calls, as its chat template (read from the GGUF's
   the message of Claude's it answers). With `--improve`, `propose` too (a title
   and a why): its working copy's change built and tested in a sandbox,
   the outcome at a later turn and in `improve.log` (`improve.md`).
+  And with it `build` (a trial of the same build, never sent, to fix
+  errors before proposing), `diff` (its change against the repository's
+  head), `revert` (one file back to the repository's version, which it
+  cannot do inside its overlay) and `report` (its status, objective, the
+  goal probe over ten minutes, what is building, the last of
+  `improve.log`).
   The persona then gains a paragraph naming the loop and its log
   (`IMPROVE_AGENT`).
   In development the persona's text names these tools

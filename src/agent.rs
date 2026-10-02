@@ -122,6 +122,30 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["title", "why"],
         ));
+        list.push(tool(
+            "build",
+            "Build and test your working copy's change now, as a trial: the same sandbox and make check as propose (format, clippy, release build, tests), but nothing is sent to Claude and no candidate is made. Use it to find and fix compile errors and failing tests before you propose. The outcome comes at a later turn (about a minute, longer for a big change); the whole log is improve/trial/build.log in your workspace.",
+            &[],
+            &[],
+        ));
+        list.push(tool(
+            "diff",
+            "Show your working copy's change against the repository's current commit, as a unified diff: exactly what propose or build would take. Read it before you propose.",
+            &[],
+            &[],
+        ));
+        list.push(tool(
+            "revert",
+            "Take one file of your working copy back to the repository's version (your copy of it is dropped). Use it to undo a change that failed, or a stray file; you cannot delete from your working copy yourself.",
+            &[("path", "string", "The file, relative to the repository.")],
+            &["path"],
+        ));
+        list.push(tool(
+            "report",
+            "Your own state in one look: your status (rate, cycle, memory used, checks), your objective, the goal probe's answers over the last ten minutes, what is building, and the last entries of improve.log.",
+            &[],
+            &[],
+        ));
     }
     list
 }
