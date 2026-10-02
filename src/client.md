@@ -39,7 +39,8 @@ id=mN re=cM|- TEXT` is a message the stream sent Claude (`tell_claude`;
 it: the first naming its id (as `c3`, `3` or `message c3`); one naming
 none is not its answer (m24, sent as the stream finished another turn,
 was taken for c1's, which m25 gave). `guide t=US pos=P kl=K flip=0|1
-shared=S|- mix=G` is the guide lane at one thinking token (`GuideLine`,
+shared=S|- mix=G src=chain|lens|placebo` is the guide lane at one thinking token
+(`src`, the aside's source, `engine.md`; a line without it is the chain's) (`GuideLine`,
 `guide_line`), sent per token like `mind` lines and not replayed. `term start t=US id=N COMMAND` and `term end
 t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT` carry its terminal
 (`term_end_line`, `TermLine`). `leaks` in the status counts the lines

@@ -252,6 +252,75 @@ fn piece(llm: &Llm, t: i32) -> String {
     llm.text(&[t])
 }
 
+/// Whether the lens's word `w` is one the line `said` holds: in it, or a
+/// form of one of its words (a common start of four letters or more, three
+/// quarters of the shorter word: under "Rebuild and test" the lens's
+/// strongest were testing, tests and rebuilt). Both lowercase.
+fn in_line(w: &str, said: &str) -> bool {
+    if said.contains(w) {
+        return true;
+    }
+    let w: Vec<char> = w.chars().collect();
+    said.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.chars().count() >= 4)
+        .any(|s| {
+            let s: Vec<char> = s.chars().collect();
+            let common = w.iter().zip(&s).take_while(|(a, b)| a == b).count();
+            common >= 4 && common * 4 >= w.len().min(s.len()) * 3
+        })
+}
+
+/// Words with weights, strongest first.
+type Words = Vec<(String, f32)>;
+
+/// A line's lens words (each word's probability summed over its tokens and
+/// the blocks read, `sums`, over `readings`: tokens times blocks), lowercase,
+/// three letters or more, strongest first, split by whether the line holds
+/// them.
+fn split_words(sums: &[(String, f32)], readings: usize, said: &str) -> (Words, Words) {
+    let said = said.to_lowercase();
+    let mut merged: Vec<(String, f32)> = Vec::new();
+    for (w, p) in sums {
+        let w = w.trim().to_lowercase();
+        if w.chars().count() < 3 {
+            continue;
+        }
+        match merged.iter_mut().find(|(x, _)| *x == w) {
+            Some(e) => e.1 += p,
+            None => merged.push((w, *p)),
+        }
+    }
+    for e in &mut merged {
+        e.1 /= readings.max(1) as f32;
+    }
+    merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+    merged.into_iter().partition(|(w, _)| !in_line(w, &said))
+}
+
+/// What was on its mind over a line that the line does not say, the one
+/// rule for the terminal's row under the line (`tui.md`) and the guide
+/// lane's lens aside (`engine.md`): none unless the strongest weighs `min`
+/// or more; then it and the others of at least half its weight, four at
+/// most.
+pub fn unsaid(sums: &[(String, f32)], readings: usize, said: &str, min: f32) -> Vec<(String, f32)> {
+    let (out, _) = split_words(sums, readings, said);
+    let Some(top) = out.first().map(|w| w.1).filter(|t| *t >= min) else {
+        return Vec::new();
+    };
+    out.into_iter()
+        .take(4)
+        .filter(|w| w.1 >= top / 2.0)
+        .collect()
+}
+
+/// The placebo of `unsaid`: the `n` strongest lens words the line does say
+/// (an aside of the same frame and length whose content is in the context
+/// already).
+pub fn said(sums: &[(String, f32)], readings: usize, said: &str, n: usize) -> Vec<(String, f32)> {
+    let (_, inside) = split_words(sums, readings, said);
+    inside.into_iter().take(n).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +359,29 @@ mod tests {
         assert!((back.layers[0].1[1].1 + 2.5).abs() < 1e-6);
         assert!(back.layers[1].1.is_empty());
         assert_eq!(back.t_us, 1_790_000_000_123_456);
+    }
+
+    #[test]
+    fn unsaid_leaves_out_the_line_and_its_forms() {
+        // Under "3. Rebuild and test" on the live service the strongest
+        // were testing, tests and rebuilt: forms of what the line says.
+        let sums: Vec<(String, f32)> = [
+            ("testing", 1.5),
+            ("tests", 0.6),
+            ("Rebuilt", 0.9),
+            ("verify", 0.9),
+            ("using", 0.15),
+            ("to", 2.7),
+        ]
+        .iter()
+        .map(|(w, p)| (w.to_string(), *p))
+        .collect();
+        let line = "3. Rebuild and test";
+        let names = |v: Vec<(String, f32)>| v.into_iter().map(|w| w.0).collect::<Vec<_>>();
+        // Over 3 readings: verify 0.30, using 0.05 (under half of it).
+        assert_eq!(names(unsaid(&sums, 3, line, 0.10)), vec!["verify"]);
+        assert!(unsaid(&sums, 3, line, 0.31).is_empty());
+        // The placebo: the strongest the line does say.
+        assert_eq!(names(said(&sums, 3, line, 2)), vec!["testing", "rebuilt"]);
     }
 }

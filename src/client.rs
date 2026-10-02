@@ -516,18 +516,21 @@ pub struct GuideLine {
     pub flip: bool,
     pub shared: Option<f32>,
     pub mix: f32,
+    /// Where the guide's aside came from: chain, lens or placebo.
+    pub src: String,
 }
 
 /// A `guide` line as the service sends it.
 pub fn guide_line(g: &GuideLine) -> String {
     format!(
-        "guide t={} pos={} kl={:.4} flip={} shared={} mix={}",
+        "guide t={} pos={} kl={:.4} flip={} shared={} mix={} src={}",
         g.t_us,
         g.pos,
         g.kl,
         g.flip as u8,
         g.shared.map_or("-".to_string(), |s| format!("{s:.3}")),
-        g.mix
+        g.mix,
+        g.src
     )
 }
 
@@ -541,6 +544,7 @@ fn parse_guide(rest: &str) -> Option<GuideLine> {
         flip: get("flip")? == "1",
         shared: get("shared").and_then(|s| s.parse().ok()),
         mix: get("mix").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+        src: get("src").unwrap_or("chain").to_string(),
     })
 }
 
@@ -653,6 +657,7 @@ mod tests {
             flip: true,
             shared: Some(0.5),
             mix: 0.5,
+            src: "lens".into(),
         };
         match parse(&guide_line(&g)) {
             Msg::Guide(back) => assert_eq!(back, g),
@@ -666,6 +671,11 @@ mod tests {
         };
         match parse(&guide_line(&none)) {
             Msg::Guide(back) => assert_eq!(back, none),
+            other => panic!("{other:?}"),
+        }
+        // An older service's line names no source: the chain's.
+        match parse("guide t=1 pos=2 kl=0.1 flip=0 shared=- mix=0") {
+            Msg::Guide(back) => assert_eq!(back.src, "chain"),
             other => panic!("{other:?}"),
         }
         let m = ToClaude {

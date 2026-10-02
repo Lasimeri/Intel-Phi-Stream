@@ -163,7 +163,8 @@ label in its top edge (the management plan's layout, 2.6):
   (`claude` lines) are there too: `to Claude (m5, answering c3): TEXT`.
 - The MIND strip starts with the guide lane at the same token when the
   service runs one: `GUIDE shadow kl 0.41 top changed experts 62% shared`
-  (its weight in the choice in place of `shadow` when mixed).
+  (its weight in the choice in place of `shadow` when mixed; the aside's
+  source before it when not the chain: `GUIDE lens shadow ...`).
 
 - With nothing yet, a compartment says what it knows: no status yet, no
   check since this terminal connected (with the service's count), no

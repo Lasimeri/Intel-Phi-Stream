@@ -535,6 +535,35 @@ tokens a report (a note, and a line in DELIBERATION).
   the room a batch leaves, with no row until it holds the pending token.
 - Inside thinking only: not in a tool call, not in code.
 - `guide on|off` turns it live (when started with `--guide`).
+- **Its aside's source** (`GuideSrc`, `guide chain|lens|placebo`, live;
+  2026-10-02, the person: weave the J-lens into the reasoning):
+  - `chain` (as before): the second chain's reflection;
+  - `lens`: at the end of a thinking line, the J-lens words strong on its
+    mind over the line that the line does not say (`mind::unsaid`, the
+    terminal's row's own rule: its strongest at `LENS_ASIDE_MIN`, 10
+    percent, and the others of at least half its weight), as
+    `(on my mind: again, timestamp)` in its own voice (`lens_aside`; the
+    line's text from `history`, its words from its readings counted per
+    block, `lens_sums`, `lens_readings`);
+  - `placebo`: at the same moments, the same frame holding as many of the
+    line's lens words it does say (`mind::said`): any aside moves the next
+    token (the reflection's frame alone moved it 7 to 14 nats), so lens
+    against placebo is what says whether its J-space content does.
+  - A lens or placebo aside at most every `LENS_EVERY_US` (10 s) and never
+    the same words twice running: each fork copies 62.8 MiB of recurrent
+    state, and 22.7 percent of thinking lines pass the bar. A change of
+    source drops the lane and starts the report's counts afresh, so no
+    window mixes two; each `guide.log` line and `guide` line names its
+    source (`src=`), the report too.
+  - Decided before measuring: over interleaved windows of its active work,
+    1500 thinking tokens or more measured per arm, lens against placebo.
+    If lens moves a token by at least 1.5 times placebo's mean KL and
+    changes the likeliest one at least 3 points more often, its J-space
+    content carries something the frame does not, and a mixing test may
+    follow (`guide-mix` at most 0.3, stopped when the thinking's repeated
+    8-grams pass twice the window before). Otherwise the lens stays in
+    the terminal (`tui.md`) and is not mixed. Each arm's rate is recorded:
+    a lens arm 10 percent slower than the chain arm counts against it.
 - With `experts on` (`capture.md`), each thinking token also compares
   the experts the guided token and the live one were routed to at the
   mind's blocks: the share they hold in common, block by block

@@ -48,4 +48,16 @@ nothing of this runs.
 by token in place of the stream); `mind.log`; the status line's
 `mind_ms`.
 
-Tests: the display rule, the line format's round trip.
+One rule for what is on its mind over a line and the line does not say
+(`unsaid`): each lens word's probability summed over the line's tokens and
+the blocks read, over tokens times blocks; words of three letters or more;
+left out the words the line holds and forms of them (a common start of four
+letters or more, three quarters of the shorter word: under "Rebuild and
+test" the strongest were testing, tests and rebuilt); none unless the
+strongest weighs the bar, then it and the others of at least half its
+weight, four at most. The terminal's row under a line (`tui.md`) and the
+guide lane's lens aside (`engine.md`) both use it; `said` gives the
+placebo's words, the strongest the line does say.
+
+Tests: the display rule, the line format's round trip, unsaid leaves out
+the line and its forms (and the placebo's words).

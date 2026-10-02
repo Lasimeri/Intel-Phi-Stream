@@ -341,6 +341,9 @@ fn connection(
             },
             "breaker" | "nudges" | "guide" | "experts" => match arg.trim() {
                 "on" | "off" => ctx.send(Command::Guard(cmd.to_string(), arg.trim() == "on")).map(|_| format!("{cmd} {}", arg.trim())).map_err(|_| "the engine is gone".to_string()),
+                // The guide's aside source (engine.md): one of three.
+                s @ ("chain" | "lens" | "placebo") if cmd == "guide" => ctx.send(Command::Guard(s.to_string(), true)).map(|_| format!("guide asides from {s}")).map_err(|_| "the engine is gone".to_string()),
+                _ if cmd == "guide" => Err("guide takes on, off, chain, lens or placebo".to_string()),
                 _ => Err(format!("{cmd} takes on or off")),
             },
             "temp" => match arg.parse::<f32>() {

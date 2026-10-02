@@ -194,67 +194,31 @@ fn lens_weight(row: &[(char, Kind)]) -> f32 {
 
 /// What the J-lens read on its mind over a line it wrote: for each of its
 /// tokens (`pos`, the newest reading at each), each block's words summed as
-/// probability, over tokens times blocks; words of fewer than three letters,
-/// words the line holds (`said`) and forms of them left out. A row when the
-/// strongest weighs `min` or more: it and the others of at least half its
-/// weight, four at most, each with its weight.
+/// probability over the readings, and `mind::unsaid` (the one rule, the
+/// guide lane's lens aside uses it too): words of fewer than three letters,
+/// words the line holds (`said`) and forms of them left out; a row when the
+/// strongest weighs `min` or more, it and the others of at least half its
+/// weight (a tail of 3 percent words, seen at a 5 percent bar, said
+/// nothing), four at most, each with its weight.
 fn lens_row(minds: &VecDeque<Reading>, pos: &[i32], said: &str, min: f32) -> Option<String> {
-    let said = said.to_lowercase();
-    let said_words: Vec<Vec<char>> = said
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 4)
-        .map(|w| w.chars().collect())
-        .collect();
-    // A form of a word the line holds is not unsaid (under "Rebuild and
-    // test" the lens's strongest were testing, tests and rebuilt): a common
-    // start of four letters or more, three quarters of the shorter word.
-    let a_form_of_said = |w: &str| {
-        let w: Vec<char> = w.chars().collect();
-        said_words.iter().any(|s| {
-            let common = w.iter().zip(s).take_while(|(a, b)| a == b).count();
-            common >= 4 && common * 4 >= w.len().min(s.len()) * 3
-        })
-    };
-    let mut weights: Vec<(String, f32)> = Vec::new();
-    let mut blocks = 0usize;
+    let mut sums: Vec<(String, f32)> = Vec::new();
+    let mut readings = 0usize;
     for p in pos {
         let Some(r) = minds.iter().rev().find(|r| r.pos == *p) else {
             continue;
         };
         for (_, ws) in &r.layers {
-            blocks += 1;
+            readings += 1;
             for (w, lp) in ws {
-                let w = w.trim().to_lowercase();
-                if w.chars().count() < 3 || said.contains(&w) || a_form_of_said(&w) {
-                    continue;
-                }
-                match weights.iter_mut().find(|(x, _)| *x == w) {
-                    Some(e) => e.1 += lp.exp(),
-                    None => weights.push((w, lp.exp())),
-                }
+                sums.push((w.clone(), lp.exp()));
             }
         }
     }
-    if blocks == 0 {
-        return None;
-    }
-    for e in &mut weights {
-        e.1 /= blocks as f32;
-    }
-    weights.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let top = match weights.first() {
-        Some(w) if w.1 >= min => w.1,
-        _ => return None,
-    };
-    // Only the strong: a tail of 3 percent words (seen at a 5 percent bar)
-    // says nothing to a person.
-    let shown: Vec<String> = weights
-        .iter()
-        .take(4)
-        .filter(|w| w.1 >= top / 2.0)
+    let shown: Vec<String> = crate::mind::unsaid(&sums, readings, said, min)
+        .into_iter()
         .map(|(w, x)| format!("{w} {:.0}%", x * 100.0))
         .collect();
-    Some(format!("on its mind: {}", shown.join(" · ")))
+    (!shown.is_empty()).then(|| format!("on its mind: {}", shown.join(" · ")))
 }
 
 /// The service as this terminal sees it.
@@ -1510,8 +1474,14 @@ fn draw(
         .as_ref()
         .filter(|g| v.minds.back().is_some_and(|r| (r.pos - g.pos).abs() <= 2))
         .map(|g| {
+            // Its aside's source (chain, lens, placebo) when not the chain.
+            let src = if g.src == "chain" {
+                String::new()
+            } else {
+                format!("{} ", g.src)
+            };
             format!(
-                "GUIDE {} kl {:.2}{}{}   ",
+                "GUIDE {src}{} kl {:.2}{}{}   ",
                 if g.mix > 0.0 {
                     format!("mix {}", g.mix)
                 } else {

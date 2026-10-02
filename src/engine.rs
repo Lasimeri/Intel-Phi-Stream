@@ -434,7 +434,50 @@ struct Guide {
     /// Live tokens after `from` it holds, and its next position.
     fed: usize,
     pos: i32,
+    /// Where its aside came from.
+    src: GuideSrc,
 }
+
+/// Where the guide lane's aside comes from (`guide chain|lens|placebo`,
+/// live): the second chain's reflection; the J-lens words strong on its
+/// mind over the line just ended that the line does not say (`mind::unsaid`,
+/// "on my mind: ..."); or, the placebo, the same frame holding as many of
+/// that line's lens words it does say (`mind::said`), whose content is in
+/// the context already: any aside moves the next token, and lens against
+/// placebo is what says whether its J-space content does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuideSrc {
+    Chain,
+    Lens,
+    Placebo,
+}
+
+impl GuideSrc {
+    pub fn name(self) -> &'static str {
+        match self {
+            GuideSrc::Chain => "chain",
+            GuideSrc::Lens => "lens",
+            GuideSrc::Placebo => "placebo",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<GuideSrc> {
+        match s {
+            "chain" => Some(GuideSrc::Chain),
+            "lens" => Some(GuideSrc::Lens),
+            "placebo" => Some(GuideSrc::Placebo),
+            _ => None,
+        }
+    }
+}
+
+/// A lens aside needs its strongest unsaid word at this weight (the
+/// terminal's row too, `tui.md`: under 22.7 percent of thinking lines), and
+/// comes at most this often, never twice with the same words: each fork
+/// copies 62.8 MiB of recurrent state and the lane has no row until it has
+/// caught up (the chain's reflections came about 5 a minute).
+const LENS_ASIDE_MIN: f32 = 0.10;
+const LENS_EVERY_US: i64 = 10_000_000;
 
 /// The agent frame at rest (`wait`): nothing is decoded until something new
 /// comes. Without it, a finished objective was answered every turn with "go
@@ -691,6 +734,19 @@ pub struct Engine {
     guide_seq: Option<i32>,
     guide: Option<Guide>,
     guide_next: Option<String>,
+    /// The guide's aside source now, and the next aside's.
+    guide_src: GuideSrc,
+    guide_next_src: GuideSrc,
+    /// The line being written, for the lens aside: its lens words (each
+    /// with its probability, one per word per block read), the readings
+    /// (tokens times blocks), where it began in `history`, that it ended;
+    /// the last lens fork and its words.
+    lens_sums: Vec<(String, f32)>,
+    lens_readings: usize,
+    line_from: usize,
+    lens_line_ended: bool,
+    lens_fork_mono: i64,
+    lens_last: Vec<String>,
     guide_n: u32,
     guide_kl: f64,
     guide_flips: u32,
@@ -1087,6 +1143,14 @@ impl Engine {
             guide_seq,
             guide: None,
             guide_next: None,
+            guide_src: GuideSrc::Chain,
+            guide_next_src: GuideSrc::Chain,
+            lens_sums: Vec::new(),
+            lens_readings: 0,
+            line_from: 0,
+            lens_line_ended: false,
+            lens_fork_mono: 0,
+            lens_last: Vec::new(),
             guide_n: 0,
             guide_kl: 0.0,
             guide_flips: 0,
@@ -1650,6 +1714,41 @@ impl Engine {
     /// A line of the journal ended (`after`): the waiting reflection joins
     /// it, and the second chain forks to reflect on the line just ended,
     /// when nothing else is in flight.
+    /// A line ended: with the guide's source `lens` (or `placebo`), the next
+    /// aside from its J-lens words (`GuideSrc`). The line's text from
+    /// `history` (the released text lags by the horizon), its words from its
+    /// readings; only in thinking, at most every `LENS_EVERY_US`, never the
+    /// same words twice running.
+    fn lens_aside(&mut self) {
+        let from = self.line_from.min(self.history.len());
+        let said = self.llm.text(&self.history[from..]);
+        self.line_from = self.history.len();
+        let sums = std::mem::take(&mut self.lens_sums);
+        let readings = std::mem::take(&mut self.lens_readings);
+        if !self.guide_on || self.guide_src == GuideSrc::Chain || self.speaking || self.in_code {
+            return;
+        }
+        let words = crate::mind::unsaid(&sums, readings, &said, LENS_ASIDE_MIN);
+        let mono = clock::mono_us();
+        if words.is_empty() || mono - self.lens_fork_mono < LENS_EVERY_US {
+            return;
+        }
+        let names: Vec<String> = match self.guide_src {
+            GuideSrc::Placebo => crate::mind::said(&sums, readings, &said, words.len()),
+            _ => words,
+        }
+        .into_iter()
+        .map(|w| w.0)
+        .collect();
+        if names.is_empty() || names == self.lens_last {
+            return;
+        }
+        self.lens_fork_mono = mono;
+        self.lens_last = names.clone();
+        self.guide_next = Some(format!("on my mind: {}", names.join(", ")));
+        self.guide_next_src = self.guide_src;
+    }
+
     fn on_line_end(&mut self) -> Result<()> {
         let quiet = self.check.is_none()
             && self.reading.is_none()
@@ -1847,8 +1946,9 @@ impl Engine {
             while self.recent_reflections.len() > CHAIN_RECENT {
                 self.recent_reflections.pop_front();
             }
-            if self.guide_on {
+            if self.guide_on && self.guide_src == GuideSrc::Chain {
                 self.guide_next = Some(text.clone());
+                self.guide_next_src = GuideSrc::Chain;
             }
             self.reflection = Some(text);
             if self.cfg.agent {
@@ -1908,6 +2008,7 @@ impl Engine {
                         pending: aside[1..].to_vec(),
                         fed: 0,
                         pos: from as i32 + 1,
+                        src: self.guide_next_src,
                     });
                 }
             }
@@ -1996,6 +2097,7 @@ impl Engine {
             self.guide_shared += s;
             self.guide_shared_n += 1;
         }
+        let src = self.guide.as_ref().map_or(GuideSrc::Chain, |g| g.src);
         let _ = self.tx.send(Event::Guide(crate::client::GuideLine {
             t_us: clock::now_us(),
             pos: self.history.len() as i32,
@@ -2003,14 +2105,16 @@ impl Engine {
             flip,
             shared: shared.map(|s| s as f32),
             mix: self.guide_mix,
+            src: src.name().to_string(),
         }));
         let (tl, tg) = (self.llm.text(&[al as i32]), self.llm.text(&[ag as i32]));
         self.guide_log.line(&format!(
-            "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}{}",
+            "{}\tpos={}\tkl={kl:.4}\tflip={}\tlive={tl:?}\tguide={tg:?}{}\tsrc={}",
             clock::now_us(),
             self.history.len(),
             flip as u8,
-            shared.map_or(String::new(), |s| format!("\texperts_shared={s:.3}"))
+            shared.map_or(String::new(), |s| format!("\texperts_shared={s:.3}")),
+            src.name()
         ));
         if self.guide_n >= GUIDE_REPORT {
             let experts = if self.guide_shared_n > 0 {
@@ -2027,7 +2131,8 @@ impl Engine {
                 "shadow".to_string()
             };
             let said = format!(
-                "guide ({mode}), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%{experts}",
+                "guide ({mode}, {} asides), {} thinking tokens: the aside would move each by {:.3} nats on average and change the likeliest token at {:.1}%{experts}",
+                src.name(),
                 self.guide_n,
                 self.guide_kl / self.guide_n as f64,
                 100.0 * self.guide_flips as f64 / self.guide_n as f64
@@ -3082,6 +3187,16 @@ impl Engine {
                     }
                 }
             }
+            // The same for the lens aside, kept apart and counted per
+            // reading (the chain's words can outlast a line).
+            if self.guide_on && self.guide_src != GuideSrc::Chain {
+                for (_, ws) in &r.layers {
+                    self.lens_readings += 1;
+                    for (w, lp) in ws {
+                        self.lens_sums.push((w.clone(), lp.exp()));
+                    }
+                }
+            }
             let _ = self.tx.send(Event::Mind(r));
         }
         Ok(())
@@ -3607,9 +3722,11 @@ impl Engine {
     /// checking it, show it.
     fn advance(&mut self, row: i32) -> Result<()> {
         self.mind_step(self.pos(), self.next)?;
-        // A line ends with this token: the second chain's moment (`after`).
-        if self.chain_on && self.llm.text(&[self.next]).contains('\n') {
-            self.line_ended = true;
+        // A line ends with this token: the second chain's moment (`after`),
+        // and the lens aside's.
+        if self.llm.text(&[self.next]).contains('\n') {
+            self.line_ended |= self.chain_on;
+            self.lens_line_ended = true;
         }
         self.history.push(self.next);
         let forced = self.forced.pop_front();
@@ -4303,9 +4420,12 @@ impl Engine {
             self.held_back.retain(|(_, u)| *u > mono_now);
             self.apply_gate();
         }
-        // A line ended: the second chain's moment.
+        // A line ended: the second chain's moment, and the lens aside's.
         if std::mem::take(&mut self.line_ended) {
             self.on_line_end()?;
+        }
+        if std::mem::take(&mut self.lens_line_ended) {
+            self.lens_aside();
         }
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
@@ -4656,9 +4776,27 @@ impl Engine {
                             self.drop_guide();
                         }
                     }
+                    // Where its aside comes from (`GuideSrc`): the lane
+                    // forks again from the next one, and the report counts
+                    // afresh, so no window mixes two sources.
+                    "chain" | "lens" | "placebo" => {
+                        self.guide_src = GuideSrc::from_name(&which).unwrap_or(GuideSrc::Chain);
+                        self.drop_guide();
+                        self.guide_next = None;
+                        self.lens_sums.clear();
+                        self.lens_readings = 0;
+                        self.lens_last.clear();
+                        self.line_from = self.history.len();
+                        self.guide_n = 0;
+                        self.guide_kl = 0.0;
+                        self.guide_flips = 0;
+                        self.note(format!("the guide's asides from: {which}"));
+                    }
                     _ => {}
                 }
-                self.note(format!("{which} {}", if on { "on" } else { "off" }));
+                if GuideSrc::from_name(&which).is_none() {
+                    self.note(format!("{which} {}", if on { "on" } else { "off" }));
+                }
             }
             Command::Temp(t) => {
                 self.cfg.sampling.temp = t;

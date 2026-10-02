@@ -38,7 +38,8 @@ Nothing here touches the model: every command becomes an engine
 `Command` through the channel, and every event is relayed as it comes.
 
 `objective TEXT` sets what the stream works toward (empty clears it;
-`engine.md`). `chain on|off` turns the second chain on or off. The last
+`engine.md`). `chain on|off` turns the second chain on or off; `guide on|off` the guide
+lane, and `guide chain|lens|placebo` where its asides come from (`engine.md`). The last
 400 `delib` lines are replayed to a new tail too. The last `objective` line and the last 64 `term` lines are
 replayed to a new tail, after the stream's text and the readings, so a
 terminal that connects (or reloads) shows the objective and the recent
