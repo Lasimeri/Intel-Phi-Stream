@@ -445,3 +445,20 @@ A summary is asked for with its real reason: the context nearly full
 persona. Every quit had asked "your memory is nearly full" at a few
 thousand of 205 thousand cells. `--rollover-tokens` sets the rollover
 point in cells instead of a share (`dev`: 150000).
+
+## Stability: refused summaries, live knobs (2026-10-01 evening)
+
+The fixes for the loops compounded: each restart resumed from a summary a
+degenerating stream had written (one held 26 fragments of the person's
+delimiters), and the breaker's holding back cascaded. Now:
+- a summary is refused when it is degenerate (`degenerate`: the
+  delimiters, a third of its lines repeating earlier ones, or two fifths
+  of its word 4-grams repeating); the last good one stays, and the refused
+  one is kept apart in `summaries/` as `...-refused.md`;
+- tokens carrying `•` are never sampled in the journal (the person's
+  response delimiters belong to another harness);
+- the breaker is off by default, `breaker on|off` and `nudges on|off`
+  turn the harness's own interventions on and off live, and `set KEY
+  VALUE` changes temp, top-k, top-p, min-p, dry or repeat-penalty live
+  (the sampler rebuilt with its history), so a change is measured on one
+  service without a restart.

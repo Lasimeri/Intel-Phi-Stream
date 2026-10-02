@@ -137,6 +137,12 @@ pub enum Command {
     Objective(String),
     /// The second chain on or off, live (an A/B of its cost).
     Chain(bool),
+    /// A sampling setting, live: temp, top-k, top-p, min-p, dry (DRY's
+    /// multiplier), repeat-penalty. The sampler is rebuilt with its history.
+    Set(String, f32),
+    /// The harness's own interventions on or off, live: `breaker` (a line
+    /// repeated is held back) and `nudges` (circling, no tool used).
+    Guard(String, bool),
     Quit,
 }
 
@@ -517,6 +523,9 @@ pub struct Engine {
     /// the terminal's id, when it last used a tool and was last reminded to.
     /// The last line it wrote and how many times running since, and the
     /// tokens held back after a repeated line (token, until when).
+    /// The harness's own interventions, on or off live (`Guard`).
+    breaker_on: bool,
+    nudges_on: bool,
     last_line: String,
     line_repeats: u32,
     held_back: Vec<(i32, i64)>,
@@ -647,6 +656,10 @@ impl Engine {
             // apart from the sampler and keeps it.
             let mut control = control;
             control.extend(llm.tokens_containing("«"));
+            // The person's response delimiters (`<•••>` in their CLAUDE.md)
+            // belong to another harness: on the live service the journal wrote
+            // them as lines, and a summary of nothing else.
+            control.extend(llm.tokens_containing("•"));
             // Speech is a » line: held back while it has no objective.
             (control, llm.tokens_containing("»"))
         } else {
@@ -823,6 +836,10 @@ impl Engine {
             failed_reads: HashMap::new(),
             term,
             term_pending: 0,
+            // Off by default: its holding back cascaded on the live service
+            // (`breaker on` turns it on, measured).
+            breaker_on: false,
+            nudges_on: true,
             last_line: String::new(),
             line_repeats: 0,
             held_back: Vec::new(),
@@ -1318,7 +1335,14 @@ impl Engine {
         // a row its first token is held back for `HOLD_BACK_US`, and it is told.
         if !l.is_empty() && l == self.last_line {
             self.line_repeats += 1;
-            if self.line_repeats + 1 >= LINE_REPEATS {
+            // Only a line of some length, and one token held back at a time:
+            // holding back "I", "The", "." as each repeated in turn forced it
+            // into stranger output still, on the live service.
+            if self.breaker_on
+                && self.line_repeats + 1 >= LINE_REPEATS
+                && l.chars().count() >= 3
+                && self.held_back.is_empty()
+            {
                 self.line_repeats = 0;
                 self.hold_back(l);
             }
@@ -2988,13 +3012,26 @@ impl Engine {
                 if let Some(i) = text.rfind("\n---") {
                     text.truncate(i);
                 }
-                // Kept on disk: a restart resumes from it, as a rollover does;
-                // and every one kept by its time, so none is lost to the next.
-                let _ = fs::write(self.cfg.workspace.join("summary.md"), text.trim());
+                // A summary written by a degenerating stream is refused, and the
+                // last good one kept: on the live service one full of the
+                // delimiters and repeated lines was resumed from, and every
+                // restart carried the degeneration on (`degenerate`).
+                let stamp = clock::datetime(clock::now_us()).replace([' ', ':'], "-");
                 let dir = self.cfg.workspace.join("summaries");
                 let _ = fs::create_dir_all(&dir);
-                let stamp = clock::datetime(clock::now_us()).replace([' ', ':'], "-");
-                let _ = fs::write(dir.join(format!("{stamp}.md")), text.trim());
+                if let Some(why) = degenerate(&text) {
+                    let _ = fs::write(dir.join(format!("{stamp}-refused.md")), text.trim());
+                    self.note(format!(
+                        "the summary was refused ({why}); the last good one stays"
+                    ));
+                    text = fs::read_to_string(self.cfg.workspace.join("summary.md"))
+                        .unwrap_or_default();
+                } else {
+                    // Kept on disk: a restart resumes from it, as a rollover
+                    // does; and every one kept by its time.
+                    let _ = fs::write(self.cfg.workspace.join("summary.md"), text.trim());
+                    let _ = fs::write(dir.join(format!("{stamp}.md")), text.trim());
+                }
                 // Asked to quit: the summary was its last act.
                 if self.quit_deadline.is_some() {
                     self.note("the summary is kept; stopping".into());
@@ -3104,6 +3141,7 @@ impl Engine {
         // (what it has not checked with a tool it does not know), at a line's
         // end, at most once per `TOOL_IDLE_US`.
         if idle
+            && self.nudges_on
             && !self.in_code
             && self.line_start
             && self.summary.is_none()
@@ -3122,6 +3160,7 @@ impl Engine {
 
         // Thoughts going round: a nudge, at most once per `nudge_every_us`.
         if idle
+            && self.nudges_on
             && !self.in_code
             && mono - self.last_nudge_mono >= self.cfg.nudge_every_us
             && self.circling()
@@ -3202,6 +3241,35 @@ impl Engine {
                         1.0 - p
                     ));
                 }
+            }
+            Command::Set(key, v) => {
+                let s = &mut self.cfg.sampling;
+                match key.as_str() {
+                    "temp" => s.temp = v,
+                    "top-k" => s.top_k = v as i32,
+                    "top-p" => s.top_p = v,
+                    "min-p" => s.min_p = v,
+                    "dry" => s.dry_multiplier = v,
+                    "repeat-penalty" => s.repeat_penalty = v,
+                    _ => {}
+                }
+                let s = self.cfg.sampling.clone();
+                self.llm.reset_sampler(&s, s.seed, &self.history);
+                self.note(format!("sampling: {key} {v}"));
+            }
+            Command::Guard(which, on) => {
+                match which.as_str() {
+                    "breaker" => {
+                        self.breaker_on = on;
+                        if !on {
+                            self.held_back.clear();
+                            self.apply_gate();
+                        }
+                    }
+                    "nudges" => self.nudges_on = on,
+                    _ => {}
+                }
+                self.note(format!("{which} {}", if on { "on" } else { "off" }));
             }
             Command::Temp(t) => {
                 self.cfg.sampling.temp = t;
@@ -3345,6 +3413,41 @@ impl Engine {
             }
         }
     }
+}
+
+/// Why a text is degenerate, if it is (`summary` refused): the person's
+/// response delimiters in it, lines repeating earlier ones (a third or
+/// more of six or more), or its word 4-grams repeating (two fifths or more
+/// of forty or more words).
+fn degenerate(text: &str) -> Option<&'static str> {
+    if text.contains('•') {
+        return Some("delimiter fragments");
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() >= 6 {
+        let repeated = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| lines[..*i].contains(l))
+            .count();
+        if repeated * 3 >= lines.len() {
+            return Some("repeated lines");
+        }
+    }
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    if words.len() >= 40 {
+        let grams: Vec<&[String]> = words.windows(4).collect();
+        let mut seen = std::collections::HashSet::new();
+        let repeated = grams.iter().filter(|g| !seen.insert(**g)).count();
+        if repeated * 5 >= grams.len() * 2 {
+            return Some("repeated phrases");
+        }
+    }
+    None
 }
 
 /// A text's words, lowercased, sorted, once each.
@@ -3701,6 +3804,21 @@ mod tests {
             vec!["first".to_string(), "second".to_string()]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_degenerate_summary_is_known() {
+        // Excerpts of the live service's summaries, 2026-10-01.
+        let bad =
+            "<•••>The engine.rs file is 3808 lines long.\n<\n<\n<•••>[run: cat src/engine.rs]\n";
+        assert_eq!(degenerate(bad), Some("delimiter fragments"));
+        let lines =
+            "This is the running\nThis is the running\nThis is the running\nI\nI\nneed\nneed\n";
+        assert_eq!(degenerate(lines), Some("repeated lines"));
+        let phrases = "the journal is looping the journal is looping ".repeat(8);
+        assert_eq!(degenerate(&phrases), Some("repeated phrases"));
+        let good = "Tasks blocked: parallel reflection thread integration into engine.rs check_cycle(); the architecture is documented in diff-second-chain.txt. Retention filter analysis complete: no spike at 0.55, about 1.3 percent error detection and 6 percent threshold rejection; keep and top1p are separate metrics, so keep is not top1p clamped. Next: read the rest of engine.rs in parts and propose one checked improvement.";
+        assert_eq!(degenerate(good), None);
     }
 
     #[test]
