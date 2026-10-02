@@ -600,6 +600,8 @@ pub struct Engine {
     to_claude_next: u64,
     /// Its last message to Claude: its id and its words (a repeat is not sent).
     last_to_claude: Option<(u64, Vec<String>)>,
+    /// The ids of the messages Claude sent that wait for an answer (`ask`).
+    asked: std::collections::HashSet<u64>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -983,6 +985,7 @@ impl Engine {
             summary_due: None,
             to_claude_next,
             last_to_claude: None,
+            asked: std::collections::HashSet::new(),
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -1851,6 +1854,11 @@ impl Engine {
     /// nats) and whether it changes the likeliest token; a line in
     /// `guide.log`, and every `GUIDE_REPORT` tokens a report.
     fn guide_measure(&mut self, live: i32, guide: i32) -> Result<()> {
+        if let Some(e) = self.llm.capture().and_then(|c| c.experts_error.take()) {
+            self.note(format!(
+                "the experts' capture failed and was turned off: {e}"
+            ));
+        }
         let lg = self.llm.logits(guide)?.to_vec();
         let ll = self.llm.logits(live)?;
         let (kl, ag, al) = kl_and_tops(&lg, ll);
@@ -2479,6 +2487,29 @@ impl Engine {
     /// to the terminals as a `claude` line (`phi-stream ask` waits for one,
     /// the MCP server's `inbox` reads them).
     fn send_claude(&mut self, text: &str, re: Option<&str>) -> String {
+        // An answer names a message Claude sent (`c3`); an id Claude never
+        // sent is no answer (on the live service it named c3 while none had
+        // been asked, which also passed the repeat check below).
+        let mut unknown = None;
+        let re = re.and_then(|r| {
+            let n: Option<u64> = r
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok();
+            match n {
+                Some(n) if self.asked.contains(&n) => Some(format!("c{n}")),
+                _ => {
+                    unknown = Some(r.trim().to_string());
+                    None
+                }
+            }
+        });
+        let re = re.as_deref();
+        let warn = unknown.map_or(String::new(), |u| {
+            format!(" ({u} is no message of Claude's, so it went as a message of your own)")
+        });
         // A message that says again what its last one said is not sent: on
         // the live service each review was followed a turn later by a
         // "final" one restating it (m4 after m3, m6 after m5).
@@ -2489,7 +2520,7 @@ impl Engine {
                     "a message to Claude repeating m{last} was not sent"
                 ));
                 return format!(
-                    "not sent: it repeats m{last}, which Claude has; send only what is new"
+                    "not sent: it repeats m{last}, which Claude has; send only what is new{warn}"
                 );
             }
         }
@@ -2512,7 +2543,7 @@ impl Engine {
             re,
             text: text.to_string(),
         }));
-        let said = format!("sent to Claude as m{id}; Claude answers in a later turn");
+        let said = format!("sent to Claude as m{id}; Claude answers in a later turn{warn}");
         self.act_end(act, true, said.clone());
         said
     }
@@ -4158,6 +4189,7 @@ impl Engine {
             }
             Command::Ask(id, s, t) => {
                 self.last_outside_mono = clock::mono_us();
+                self.asked.insert(id);
                 let text = if self.cfg.agent {
                     format!(
                         "[{}] Claude (message c{id}): {}\n(Answer it with tell_claude, re c{id}.)",

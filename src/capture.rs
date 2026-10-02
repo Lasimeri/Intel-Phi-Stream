@@ -103,6 +103,8 @@ pub struct Capture {
     /// (`ffn_moe_topk-L`, live: `experts_on`): asked only when on (each asked
     /// node is one more synchronization of the scheduler).
     pub experts_on: bool,
+    /// Why the experts were turned off, if a capture of them failed.
+    pub experts_error: Option<String>,
     pending_topk: Vec<(i32, usize, Vec<i32>)>,
     selected_topk: Vec<BlockExperts>,
     /// Since the last `take`: per output row, its micro-batch, its batch
@@ -139,6 +141,7 @@ impl Capture {
                 .unwrap_or_default(),
             extra: Vec::new(),
             experts_on: false,
+            experts_error: None,
             pending_topk: Vec::new(),
             selected_topk: Vec::new(),
             row_experts: Vec::new(),
@@ -535,7 +538,13 @@ impl Capture {
         let r = if let Some(l) = self.wanted_layer(&name) {
             self.take_layer(t, l)
         } else if let Some(l) = self.wanted_topk(&name) {
-            self.take_topk(t, l)
+            // A failure here turns the experts off and says why; it never
+            // stops the capture the mind reads.
+            if let Err(e) = self.take_topk(t, l) {
+                self.experts_on = false;
+                self.experts_error = Some(e);
+            }
+            Ok(())
         } else if unsafe { is_output_rows(t) } {
             self.take_ids(t)
         } else if name == "result_output" {

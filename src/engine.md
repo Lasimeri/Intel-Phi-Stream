@@ -497,7 +497,10 @@ and two tool calls. Now:
   line (a message whose words are 60 percent or more in its last one, and
   that answers nothing, is not sent: each review was followed by a
   "final" one restating it, at 0.64 and 0.71, while new messages held 0.09
-  to 0.29 of the last one's words); `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
+  to 0.29 of the last one's words); an answer's `re` must name a message Claude sent
+  (`asked`): an id Claude never sent goes as a message of its own, under
+  the repeat check, and it is told so (it named c3 while none had been
+  asked, which also passed the check); `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
   message from Claude with an id, which it answers with `re`.
 
 ## The guide lane (`--guide`, shadow, 2026-10-02)

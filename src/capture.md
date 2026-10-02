@@ -63,7 +63,9 @@ row with its batch row (`row_experts`, cleared by `take`). Each asked node
 is one more synchronization of the scheduler, so it costs a little at
 every cycle: measured before it stays on. The guide lane reads them to
 compare the experts the guided and the live token were routed to
-(`engine.md`).
+(`engine.md`). A failure to read them (a llama.cpp whose top-k is a
+view, say) turns them off and is noted (`experts_error`); it never stops
+the capture the mind reads.
 
 Tests: `cargo test` covers the row selection and the layer names;
 `phi-stream lens check` (`check.md`) is the end-to-end gate.
