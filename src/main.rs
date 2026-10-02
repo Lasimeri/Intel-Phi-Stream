@@ -920,6 +920,8 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             }
             Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", engine::status_text(&st)),
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
+            // The diagnostics are for the terminal and the stream (diag.md).
+            Ok(Event::Diag(_)) => {}
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
             Ok(Event::Reflect(e)) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
             Ok(Event::Objective(_, t)) => eprintln!("\x1b[2mobjective: {t}\x1b[0m"),

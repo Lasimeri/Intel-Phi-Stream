@@ -136,6 +136,8 @@ struct View {
     minds: VecDeque<Reading>,
     /// The guide lane at the last thinking token (`guide` lines).
     guide: Option<crate::client::GuideLine>,
+    /// The engine's diagnostics, the last sent (DIAGNOSTICS).
+    diag: Option<String>,
     /// What the main compartment shows (Tab cycles it).
     view: Pane,
     /// The checks and the engine's notes, oldest first: (real time, text).
@@ -505,6 +507,7 @@ impl View {
                 Pane::Delib => 3,
                 Pane::Output => 4,
                 Pane::Term => 5,
+                Pane::Diag => 6,
             },
             self.scroll,
             self.heard,
@@ -533,6 +536,7 @@ impl View {
                         3 => Pane::Delib,
                         4 => Pane::Output,
                         5 => Pane::Term,
+                        6 => Pane::Diag,
                         _ => Pane::Feed,
                     }
                 }
@@ -773,6 +777,9 @@ enum Pane {
     /// Its terminal: the commands it runs and their output (in the side
     /// column from `WIDE` columns; a view under it).
     Term,
+    /// Its diagnostics: the one text the engine writes every few seconds,
+    /// the same that the stream reads (`diag.md`, `report`).
+    Diag,
 }
 
 impl Pane {
@@ -784,6 +791,7 @@ impl Pane {
             Pane::Delib => "DELIBERATION",
             Pane::Output => "OUTPUT",
             Pane::Term => "TERMINAL",
+            Pane::Diag => "DIAGNOSTICS",
         }
     }
 
@@ -794,7 +802,8 @@ impl Pane {
             Pane::Output => Pane::Term,
             Pane::Term => Pane::Mind,
             Pane::Mind => Pane::Log,
-            Pane::Log => Pane::Feed,
+            Pane::Log => Pane::Diag,
+            Pane::Diag => Pane::Feed,
         }
     }
 }
@@ -1211,6 +1220,33 @@ fn draw_output(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
 /// The deliberation: what the stream is working toward on top (its
 /// `objective`), under it each check's question, its own reasoning and
 /// its outcome. Says what it lacks rather than leaving it blank.
+/// DIAGNOSTICS: the engine's one text, as the stream reads it; a section's
+/// head (a line without indent) bright, its lines plain.
+fn draw_diag(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
+    let end = inner.left + inner.w;
+    let width = inner.w.saturating_sub(2);
+    let text = v.diag.as_deref().unwrap_or(
+        "no diagnostics from this service yet: it sends them every few seconds (the same text the stream reads as diag.md)",
+    );
+    let mut rows: Vec<(String, bool)> = Vec::new();
+    for l in text.lines() {
+        let head = !l.starts_with(' ');
+        for w in wrap(l, width, 4) {
+            rows.push((w, head));
+        }
+    }
+    let last = rows.len().saturating_sub(scroll);
+    let first = last.saturating_sub(inner.h);
+    for (r, (l, head)) in rows[first..last].iter().enumerate() {
+        let style = if *head {
+            plain(theme::WHITE, theme::BG)
+        } else {
+            plain(theme::GIVEN, theme::BG)
+        };
+        s.put_to(inner.top + r, inner.left + 1, end, l, style);
+    }
+}
+
 fn draw_delib(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
     let end = inner.left + inner.w;
     let width = inner.w.saturating_sub(2);
@@ -1321,6 +1357,7 @@ fn draw(
         Pane::Delib => draw_delib(&mut s, inner, v, v.scroll),
         Pane::Output => draw_output(&mut s, inner, v, v.scroll),
         Pane::Term => draw_term(&mut s, inner, v, v.scroll),
+        Pane::Diag => draw_diag(&mut s, inner, v, v.scroll),
         Pane::Mind => {
             // The readings, newest at the bottom; a check beside the
             // reading it was asked from (the one before its token).
@@ -1716,6 +1753,7 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
             last_t_us: 0,
             minds: VecDeque::new(),
             guide: None,
+            diag: None,
             view: Pane::Feed,
             log: VecDeque::new(),
             utf8: screen::utf8_locale(|k| std::env::var(k).ok()),
@@ -1830,6 +1868,10 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                     }
                     Ok(Msg::Guide(g)) => {
                         v.guide = Some(g);
+                        dirty = true;
+                    }
+                    Ok(Msg::Diag(d)) => {
+                        v.diag = Some(d);
                         dirty = true;
                     }
                     Ok(Msg::Mind(r)) => {
@@ -1988,6 +2030,7 @@ mod tests {
             last_t_us: 0,
             minds: VecDeque::new(),
             guide: None,
+            diag: None,
             view: Pane::Feed,
             log: VecDeque::new(),
             utf8: true,

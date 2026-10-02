@@ -180,6 +180,10 @@ pub fn serve(
                         let line = format!("note {}", escape(&n));
                         h.broadcast(&line);
                     }
+                    Event::Diag(d) => {
+                        let line = format!("diag {}", escape(&d));
+                        h.broadcast(&line);
+                    }
                     Event::Mind(r) => {
                         let line = format!("mind {}", crate::mind::line(&r));
                         h.minds.push_back(line.clone());

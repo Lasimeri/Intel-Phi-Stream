@@ -88,6 +88,9 @@ pub enum Msg {
     Text(String, Kind, i64, Option<i32>),
     Status(Status),
     Note(String),
+    /// The engine's diagnostics (`diag` lines): the one text the stream reads
+    /// too (`diag.md`).
+    Diag(String),
     /// What was on its mind at one token (`mind.rs`).
     Mind(crate::mind::Reading),
     /// A check of a token, start to end (`reflect.rs`).
@@ -217,6 +220,7 @@ pub fn parse(line: &str) -> Msg {
             })
         }
         "note" => Msg::Note(unescape(rest)),
+        "diag" => Msg::Diag(unescape(rest)),
         "mind" => match crate::mind::parse_line(rest) {
             Some(r) => Msg::Mind(r),
             None => Msg::Other(line.to_string()),

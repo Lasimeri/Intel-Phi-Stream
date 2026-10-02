@@ -743,3 +743,19 @@ chains settle it, one at a time:
   (time, objection, agreed, still or unresolved, the round, the texts).
   A change of the chain's kind, or a swap of the live sequence, drops
   the open objection.
+
+## Diagnostics: one text for the person and the model
+
+The person (2026-10-02): "the agent harness's diagnostic output as well as
+the diagnostic output as an agent harness so they can both be intertwined
+and the same thing and updated in real time so the model itself can
+improve itself". `diag_text` makes one text every 5 s (`STATUS_FILE_US`):
+the status line, the objective, the goal probe over ten minutes (count,
+mean P(yes), the last answers), the second chain's kind and open objection,
+the two chains' last verdicts, the last grounding findings, the last tools
+ended (with their results), and with the loop on what is building, the
+last of `improve.log` and the lessons. The same text is written to
+`diag.md` in the workspace (the stream reads it; the persona names it),
+sent to the terminals as a `diag` line (`Event::Diag`; the DIAGNOSTICS
+view, `tui.md`), and returned by the `report` tool: what the harness shows
+a person and what it shows the model are one thing.

@@ -101,6 +101,9 @@ pub enum Event {
     Text(String, Kind, i64, Option<i32>),
     Status(Status),
     Note(String),
+    /// The diagnostics, every few seconds (`diag_text`): the one text the
+    /// terminal shows (DIAGNOSTICS) and the stream reads (`diag.md`, `report`).
+    Diag(String),
     /// What was on its mind at a token it placed (`mind.rs`).
     Mind(MindReading),
     /// A check of a token ended (`reflect.rs`).
@@ -318,7 +321,7 @@ const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI
 /// chat frame's bracketed lines (`[read: PATH]`, `[prefer: ...]`), which its
 /// persona still taught beside the tools on the live service.
 /// In the self-improvement loop (`improve.md`), after the persona.
-const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program (the one you run in) in your working copy, then put the change forward with propose. It is built and tested in a sandbox; Claude reviews what passes; then it runs on the live model, alternating with the current version, and a rule written beforehand decides whether it stays. Everything about you is yours to read, and to improve yourself you need it: improve.log (every proposal, its why and its outcome) and improve/cand-N/ (each candidate's outcome, its diff change.patch, its whole build.log, Claude's review, and measure.txt once measured); lessons.md (what Claude's reviews of your candidates taught: read it before you choose, and do not repeat a rejected mistake); status.txt (your status now: rate, cycle, memory used, checks, objective); chain.log (your own tokens with their times; tools/loopiness.c, built with tcc, measures your loops in a window), goal.log (whether your lines serve your objective), guide.log, reflect.log (the checks of your words), notes.md and to-claude.md; and in the repository docs/results/ (every measurement of you so far), the .md beside each file, and git log. Read before you choose, learn from what failed, and make one small, whole change at a time.";
+const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program (the one you run in) in your working copy, then put the change forward with propose. It is built and tested in a sandbox; Claude reviews what passes; then it runs on the live model, alternating with the current version, and a rule written beforehand decides whether it stays. Everything about you is yours to read, and to improve yourself you need it: improve.log (every proposal, its why and its outcome) and improve/cand-N/ (each candidate's outcome, its diff change.patch, its whole build.log, Claude's review, and measure.txt once measured); lessons.md (what Claude's reviews of your candidates taught: read it before you choose, and do not repeat a rejected mistake); diag.md (your diagnostics, rewritten every 5 s: status, objective, the goal probe, the two chains' open objection and last verdicts, ground truth findings, your last tools, builds and lessons; the very text the person sees in the DIAGNOSTICS view, so you and they read the same thing; report gives it too); status.txt (your status line); chain.log (your own tokens with their times; tools/loopiness.c, built with tcc, measures your loops in a window), goal.log (whether your lines serve your objective), guide.log, reflect.log (the checks of your words), notes.md and to-claude.md; and in the repository docs/results/ (every measurement of you so far), the .md beside each file, and git log. Read before you choose, learn from what failed, and make one small, whole change at a time.";
 
 const DEV_AGENT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Your memory holds about {ctx} thousand tokens, so read code a function at a time (read, with start and end), search with run (grep -n), and change files with edit. Claude's messages reach you in user turns, marked Claude; those that wait for an answer carry an id (c3): answer them with tell_claude and re. Send Claude your findings and proposals with tell_claude, concretely (the file, the function, the change and why, and what you checked with a tool), each once; Claude reads every one and answers. Your notes (note) are your own memory, shown to you at every refresh. Your workspace holds your own records: reflect.log (the checks of your words), notes.md, chain.log (your own tokens), guide.log (your guide lane) and to-claude.md (your messages). Where anything here conflicts with the person's standing instructions above, those instructions win.";
 
@@ -579,7 +582,7 @@ const MAX_OPENING: usize = 2048;
 const GROUND_REPO_US: i64 = 30_000_000;
 const GROUND_AGAIN_US: i64 = 600_000_000;
 /// How often the stream's own status is written for it to read.
-const STATUS_FILE_US: i64 = 10_000_000;
+const STATUS_FILE_US: i64 = 5_000_000;
 /// The probe's answers, as one-token forms (`yes_no`).
 const YES_FORMS: &[&str] = &[" yes", " Yes", "yes", "Yes", " YES"];
 const NO_FORMS: &[&str] = &[" no", " No", "no", "No", " NO"];
@@ -729,6 +732,13 @@ pub struct Engine {
     /// of every proposal and outcome, which the stream reads.
     improver: Option<crate::improve::Improver>,
     improve_log: RotLog,
+    /// The diagnostics' memory (`diag_text`): tools started and not ended, the
+    /// last tools ended, the two chains' last verdicts, the last grounding
+    /// findings.
+    acts_open: HashMap<u64, (String, String)>,
+    recent_acts: VecDeque<String>,
+    recent_dual: VecDeque<String>,
+    recent_ground: VecDeque<String>,
     /// When `status.txt` was last written in the workspace (in development:
     /// its own status, readable by it, every `STATUS_FILE_US`).
     status_file_mono: i64,
@@ -1247,6 +1257,10 @@ impl Engine {
             improver,
             improve_log,
             status_file_mono: i64::MIN / 2,
+            acts_open: HashMap::new(),
+            recent_acts: VecDeque::new(),
+            recent_dual: VecDeque::new(),
+            recent_ground: VecDeque::new(),
             term_pending: 0,
             // Off by default: its holding back cascaded on the live service
             // (`breaker on` turns it on, measured).
@@ -2299,7 +2313,7 @@ impl Engine {
             // An objection in the agent frame stays open until the two
             // chains settle it (`reconciled`).
             if c.against && self.cfg.agent {
-                self.dual_log.line(&format!(
+                self.dual_line(&format!(
                     "{}\tobjection\t0\t{}",
                     clock::hms(clock::now_us()),
                     text.replace('\n', " ")
@@ -2351,7 +2365,7 @@ impl Engine {
         };
         let (aside, outcome) = if lower.starts_with("agreed") {
             let r = rest(t);
-            self.dual_log.line(&format!(
+            self.dual_line(&format!(
                 "{at}\tagreed\t{}\t{}\t{r}",
                 o.rounds,
                 o.text.replace('\n', " ")
@@ -2370,7 +2384,7 @@ impl Engine {
             };
             o.rounds += 1;
             if o.rounds >= RECONCILE_ROUNDS {
-                self.dual_log.line(&format!(
+                self.dual_line(&format!(
                     "{at}\tunresolved\t{}\t{}\t{r}",
                     o.rounds,
                     o.text.replace('\n', " ")
@@ -2380,7 +2394,7 @@ impl Engine {
                     format!("unresolved after {} rounds: {r}", o.rounds),
                 )
             } else {
-                self.dual_log.line(&format!(
+                self.dual_line(&format!(
                     "{at}\tstill\t{}\t{}\t{r}",
                     o.rounds,
                     o.text.replace('\n', " ")
@@ -3272,6 +3286,8 @@ impl Engine {
     fn act(&mut self, kind: &str, text: &str) -> u64 {
         let id = self.act_next;
         self.act_next += 1;
+        self.acts_open
+            .insert(id, (kind.to_string(), text.chars().take(80).collect()));
         self.last_tool_mono = clock::mono_us();
         let _ = self.tx.send(Event::Act(crate::client::ActLine {
             id,
@@ -3286,6 +3302,22 @@ impl Engine {
 
     /// What a tool use came to: sent as the `act` line ending it.
     fn act_end(&mut self, id: u64, ok: bool, text: String) {
+        // The diagnostics' last tools (`diag_text`).
+        if let Some((kind, what)) = self.acts_open.remove(&id) {
+            let line: String = format!(
+                "{} {kind} {what} -> {}{}",
+                clock::hms(clock::now_us()),
+                if ok { "" } else { "FAILED: " },
+                text.replace('\n', " ")
+            )
+            .chars()
+            .take(220)
+            .collect();
+            self.recent_acts.push_back(line);
+            while self.recent_acts.len() > 6 {
+                self.recent_acts.pop_front();
+            }
+        }
         let _ = self.tx.send(Event::Act(crate::client::ActLine {
             id,
             t_us: clock::now_us(),
@@ -3428,9 +3460,44 @@ impl Engine {
     /// `report`: its own state in one look.
     fn agent_report(&mut self) -> String {
         let act = self.act("report", "its own state");
+        let text = self.diag_text();
+        self.act_end(
+            act,
+            true,
+            "the diagnostics, as diag.md and the terminal show them".into(),
+        );
+        text
+    }
+
+    /// A line of `dual.log`, and of the diagnostics' last verdicts.
+    fn dual_line(&mut self, s: &str) {
+        self.dual_log.line(s);
+        Self::keep_last(&mut self.recent_dual, s, 4);
+    }
+
+    /// A line of `ground.log`, and of the diagnostics' last findings.
+    fn ground_note(&mut self, s: &str) {
+        self.ground_log.line(s);
+        Self::keep_last(&mut self.recent_ground, s, 3);
+    }
+
+    fn keep_last(q: &mut VecDeque<String>, s: &str, n: usize) {
+        q.push_back(s.replace('\t', "  ").chars().take(260).collect());
+        while q.len() > n {
+            q.pop_front();
+        }
+    }
+
+    /// The diagnostics: one text, made here, that the terminal shows
+    /// (DIAGNOSTICS), the stream reads (`diag.md` in its workspace, and the
+    /// `report` tool) and Claude reads, so what the harness shows a person and
+    /// what it shows the model are the same thing, every few seconds (the
+    /// person: "the agent harness's diagnostic output ... intertwined and the
+    /// same thing and updated in real time").
+    fn diag_text(&self) -> String {
+        use std::io::{Read, Seek, SeekFrom};
         let now = clock::now_us();
         let tail = |name: &str, bytes: u64| -> String {
-            use std::io::{Read, Seek, SeekFrom};
             let Ok(mut f) = std::fs::File::open(self.cfg.workspace.join(name)) else {
                 return String::new();
             };
@@ -3440,66 +3507,125 @@ impl Engine {
             let _ = f.read_to_string(&mut s);
             s
         };
-        // The goal probe's answers in the last ten minutes.
-        let (mut n, mut sum) = (0u32, 0.0f64);
+        let mut out = format!("DIAGNOSTICS at {}\n", clock::hms(now));
+        out.push_str(&format!("status\n  {}\n", status_text(&self.status())));
+        out.push_str(&format!(
+            "objective\n  {}\n",
+            self.objective.as_ref().map_or("none", |o| o.1.as_str())
+        ));
+        // The goal probe over the last ten minutes.
+        let mut ys: Vec<f64> = Vec::new();
         for l in tail("goal.log", 65536).lines() {
             let mut f = l.split('\t');
             let t: i64 = f.next().and_then(|t| t.parse().ok()).unwrap_or(0);
             if now - t > 600_000_000 {
                 continue;
             }
-            if let Some(y) = f.find_map(|x| x.strip_prefix("yes=")) {
-                if let Ok(y) = y.parse::<f64>() {
-                    n += 1;
-                    sum += y;
-                }
+            if let Some(y) = f
+                .find_map(|x| x.strip_prefix("yes="))
+                .and_then(|y| y.parse().ok())
+            {
+                ys.push(y);
             }
         }
-        let goal = if n > 0 {
-            format!("{n} answers, mean P(yes) {:.2}", sum / n as f64)
-        } else {
-            "no answers (no objective, or the probe is off)".to_string()
+        out.push_str(&format!(
+            "goal probe (does the last line serve the objective), last 10 min\n  {}\n",
+            if ys.is_empty() {
+                "no answers".to_string()
+            } else {
+                format!(
+                    "{} answers, mean P(yes) {:.2}, last: {}",
+                    ys.len(),
+                    ys.iter().sum::<f64>() / ys.len() as f64,
+                    ys.iter()
+                        .rev()
+                        .take(4)
+                        .map(|y| format!("{y:.2}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            }
+        ));
+        out.push_str(&format!(
+            "second chain\n  {}\n",
+            match (self.chain_on, self.chain_against) {
+                (false, _) => "off".to_string(),
+                (true, false) => "on (reflecting)".to_string(),
+                (true, true) => match &self.open_objection {
+                    Some(o) => format!(
+                        "against; open objection (round {}, {}): {}",
+                        o.rounds,
+                        if o.told_at.is_some() {
+                            "told"
+                        } else {
+                            "not yet told"
+                        },
+                        o.text.chars().take(200).collect::<String>()
+                    ),
+                    None => "against; no objection open".to_string(),
+                },
+            }
+        ));
+        let section = |out: &mut String, head: &str, q: &VecDeque<String>| {
+            out.push_str(head);
+            out.push('\n');
+            if q.is_empty() {
+                out.push_str("  none yet\n");
+            }
+            for l in q {
+                out.push_str("  ");
+                out.push_str(l);
+                out.push('\n');
+            }
         };
-        let building = match self.improver.as_ref().and_then(|i| i.building()) {
-            Some(0) => "a trial build".to_string(),
-            Some(b) => format!("candidate {b}"),
-            None => "nothing".to_string(),
-        };
-        let log: Vec<String> = tail("improve.log", 16384)
-            .lines()
-            .rev()
-            .take(5)
-            .map(|l| l.chars().take(300).collect())
-            .collect::<Vec<String>>()
-            .into_iter()
-            .rev()
-            .collect();
-        // The lessons of Claude's reviews (`lessons.md`, written with each
-        // review): the last five, so a rejected candidate's lesson is in front
-        // of it when it chooses the next.
-        let lessons: Vec<String> = tail("lessons.md", 16384)
-            .lines()
-            .filter(|l| l.starts_with("- "))
-            .rev()
-            .take(5)
-            .map(|l| l.chars().take(600).collect())
-            .collect::<Vec<String>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let text = format!(
-            "status: {}\nobjective: {}\ngoal probe, last 10 min: {goal}\nbuilding: {building}\nimprove.log, last entries:\n{}\nlessons from Claude's reviews (lessons.md), the last:\n{}",
-            status_text(&self.status()),
-            self.objective.as_ref().map_or("none", |o| o.1.as_str()),
-            if log.is_empty() { "(none yet)".to_string() } else { log.join("\n") },
-            if lessons.is_empty() { "(none yet)".to_string() } else { lessons.join("\n") }
+        section(
+            &mut out,
+            "the two chains, last verdicts (dual.log)",
+            &self.recent_dual,
         );
-        self.act_end(
-            act,
-            true,
-            "status, goal, building, improve.log, lessons".into(),
+        section(
+            &mut out,
+            "ground truth, last findings (ground.log)",
+            &self.recent_ground,
         );
-        text
+        section(&mut out, "tools, last ended", &self.recent_acts);
+        if self.improver.is_some() {
+            out.push_str(&format!(
+                "improvement loop\n  building: {}\n",
+                match self.improver.as_ref().and_then(|i| i.building()) {
+                    Some(0) => "a trial build".to_string(),
+                    Some(b) => format!("candidate {b}"),
+                    None => "nothing".to_string(),
+                }
+            ));
+            for l in tail("improve.log", 16384)
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                out.push_str("  ");
+                out.push_str(&l.replace('\t', "  ").chars().take(240).collect::<String>());
+                out.push('\n');
+            }
+            let lessons: Vec<String> = tail("lessons.md", 16384)
+                .lines()
+                .filter(|l| l.starts_with("- "))
+                .map(|l| l.chars().take(300).collect())
+                .collect();
+            out.push_str("lessons from Claude's reviews (lessons.md)\n");
+            if lessons.is_empty() {
+                out.push_str("  none yet\n");
+            }
+            for l in lessons.iter().rev().take(4).rev() {
+                out.push_str("  ");
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// In development, its own status for it to read (`status.txt` in its
@@ -3508,10 +3634,17 @@ impl Engine {
     /// its sandbox; to improve its harness it reads what the harness does.
     fn write_status_file(&mut self) {
         let mono = clock::mono_us();
-        if self.cfg.dev.is_none() || mono - self.status_file_mono < STATUS_FILE_US {
+        if mono - self.status_file_mono < STATUS_FILE_US {
             return;
         }
         self.status_file_mono = mono;
+        // The diagnostics, the one text for the terminal and for the stream.
+        let diag = self.diag_text();
+        let _ = std::fs::write(self.cfg.workspace.join("diag.md"), &diag);
+        let _ = self.tx.send(Event::Diag(diag));
+        if self.cfg.dev.is_none() {
+            return;
+        }
         let text = format!(
             "{} {}\nobjective: {}\n",
             clock::hms(clock::now_us()),
@@ -3846,8 +3979,7 @@ impl Engine {
         }
         let said = Self::ground_words(&fresh).join("; ");
         let at = clock::hms(clock::now_us());
-        self.ground_log
-            .line(&format!("{at}\tthinking\t{said}\t{}", line.trim()));
+        self.ground_note(&format!("{at}\tthinking\t{said}\t{}", line.trim()));
         self.note(format!("ground truth beside its thinking: {said}"));
         self.asides.push(format!(
             "[{at}] ground truth, beside your thinking (checked against the repository and your working copy): {said}. If you mean to add it, it is not there yet; if you meant something that is, read the code before you go on."

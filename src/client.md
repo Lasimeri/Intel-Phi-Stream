@@ -52,3 +52,4 @@ for the `ok` or `err`, skipping what comes between); `parse` turns a
 service line into a `Msg`; `status_line` and `kind_name` are the service's
 side of the same format. A script needs nothing more than `nc -U` or a
 socket in any language to do what the terminal does.
+- `diag TEXT` (escaped): the engine's diagnostics (`Msg::Diag`), every 5 s.

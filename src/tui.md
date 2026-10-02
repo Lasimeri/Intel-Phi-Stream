@@ -218,3 +218,6 @@ quietly: a newer service may send one at every token.
 - TERMINAL (the side column, between ASSESSMENT and LOG, from 120
   columns; a view under 120): each command it runs (`$ COMMAND` under its
   time) and its output with how it ended. LOG lists each command too.
+- DIAGNOSTICS (a view, after LOG in the Tab cycle): the engine's one
+  diagnostics text (`engine.md`), the same the stream reads as `diag.md`,
+  replaced as each `diag` line comes (every 5 s); a section's head bright.
