@@ -1721,7 +1721,11 @@ impl Engine {
                 self.guide_next = Some(text.clone());
             }
             self.reflection = Some(text);
-            "into the journal at its next line's end"
+            if self.cfg.agent {
+                "kept for its next turn"
+            } else {
+                "into the journal at its next line's end"
+            }
         } else if keep {
             "nothing to say"
         } else {

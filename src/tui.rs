@@ -112,6 +112,7 @@ pub struct Placement {
     pub n_ctx: u32,
     pub frame: String,
     pub workspace: String,
+    pub started: i64,
 }
 
 struct Piece {
@@ -1129,7 +1130,12 @@ fn draw(
         p.gpu_gib,
         p.host_gib,
         p.n_ctx / 1000,
-        v.started.elapsed().as_secs() / 60,
+        // The service's own time up (this terminal's, from an older one).
+        if p.started > 0 {
+            (crate::clock::now_us() - p.started).max(0) as u64 / 60_000_000
+        } else {
+            v.started.elapsed().as_secs() / 60
+        },
         v.heard,
         if v.last_t_us > 0 { crate::clock::hms(v.last_t_us) } else { String::new() }
     );
@@ -1186,10 +1192,19 @@ fn draw(
         }
     }
 
-    // Both reasoning streams at once, when there is room.
+    // Both reasoning streams at once, when there is room: with the
+    // deliberation in the main view, the reasoning beside it (seen through
+    // the MCP screen: both columns showed the deliberation).
     if let Some(dr) = lay.delib {
-        s.frame(dr, g, edge, "DELIBERATION", label);
-        draw_delib(&mut s, dr.inner(), v, 0);
+        if v.view == Pane::Delib {
+            s.frame(dr, g, edge, "REASONING", label);
+            let inner = dr.inner();
+            let rows = v.rows(inner.w.saturating_sub(2));
+            draw_rows(&mut s, inner, &rows, 0);
+        } else {
+            s.frame(dr, g, edge, "DELIBERATION", label);
+            draw_delib(&mut s, dr.inner(), v, 0);
+        }
     }
     if let Some(tr) = lay.term {
         s.frame(tr, g, edge, "TERMINAL", label);
@@ -1449,6 +1464,7 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
         n_ctx: 0,
         frame: String::new(),
         workspace: String::new(),
+        started: 0,
     };
     let mut out = io::stdout();
     terminal::enable_raw_mode()?;
@@ -1554,6 +1570,7 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                             n_ctx: i.n_ctx,
                             frame: i.frame,
                             workspace: i.workspace,
+                            started: i.started,
                         };
                         dirty = true;
                     }

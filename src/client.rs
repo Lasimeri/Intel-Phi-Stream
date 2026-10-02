@@ -75,6 +75,8 @@ pub struct Info {
     pub n_ctx: u32,
     pub frame: String,
     pub workspace: String,
+    /// When the service started (microseconds; 0 from an older service).
+    pub started: i64,
 }
 
 /// A line from the service, parsed.
@@ -138,6 +140,7 @@ pub fn parse(line: &str) -> Msg {
                 n_ctx: field(&f, "n_ctx").parse().unwrap_or(0),
                 frame: field(&f, "frame").to_string(),
                 workspace: unescape(field(&f, "workspace")),
+                started: field(&f, "started").parse().unwrap_or(0),
             })
         }
         "text" => {

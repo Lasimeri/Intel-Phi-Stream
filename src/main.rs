@@ -714,7 +714,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
 
 fn info_line(llm: &Llm, cfg: &Config) -> String {
     format!(
-        "info model={} gpu_blocks={} n_blocks={} gpu_gib={:.2} host_gib={:.2} n_ctx={} frame={} workspace={}",
+        "info model={} gpu_blocks={} n_blocks={} gpu_gib={:.2} host_gib={:.2} n_ctx={} frame={} workspace={} started={}",
         escape(
             &std::path::Path::new(&llm.opts.model)
                 .file_stem()
@@ -726,8 +726,9 @@ fn info_line(llm: &Llm, cfg: &Config) -> String {
         split::gib(llm.split.gpu_bytes),
         split::gib(llm.split.host_bytes),
         llm.n_ctx(),
-        cfg.frame.name(),
-        escape(&cfg.workspace.display().to_string())
+        if cfg.agent { "agent" } else { cfg.frame.name() },
+        escape(&cfg.workspace.display().to_string()),
+        clock::now_us()
     )
 }
 

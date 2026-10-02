@@ -123,6 +123,10 @@ label in its top edge (the management plan's layout, 2.6):
   is never text (4.44:1). The label says `ASSESSING NOW` while the
   status says a check is in flight; the token of a check in flight is
   not sent by this service, so it is not shown.
+- The title shows the service's own time up (its `info` line carries when it
+  started; from an older service, this terminal's) and its frame (`agent`
+  for the agent frame). With DELIBERATION in the main view, the column
+  beside it shows REASONING, so both chains stay side by side.
 - **LOG** holds the checks and the engine's notes, oldest first, each with
   its time: a check's own time, a note's arrival (notes carry none),
   wrapped to the compartment, the last 500. Its messages to Claude

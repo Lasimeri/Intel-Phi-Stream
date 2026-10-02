@@ -14,7 +14,7 @@ hears `NAME: TEXT`, `docs/dev.md`), `feed PATH`, `persona PATH`, `chunk N`,
 `temp T`, `keep-at P` (the checks' keep threshold, live), `pause`, `resume`, `status`, `recent`, `tail`, `quit`.
 
 From the service: `info model=... gpu_blocks=N n_blocks=N gpu_gib=X
-host_gib=X n_ctx=N frame=journal|chat workspace=PATH` once on connect;
+host_gib=X n_ctx=N frame=journal|chat|agent workspace=PATH started=US` once on connect;
 `ok MESSAGE` or `err MESSAGE` for each command; to a subscriber `text
 think|speak|given t=MICROSECONDS TEXT` (the real time the piece exists
 at, `clock.md`), `status mode=... stream=... beside=... cycle=...
