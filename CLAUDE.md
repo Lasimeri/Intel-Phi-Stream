@@ -34,12 +34,23 @@ Read `CONTRIBUTING.md` first; it is the authority. The non-obvious rules:
   work between the backend's multiplies costs 10 ms a token at `-t 2`.
 - Developing with the stream (`docs/dev.md`): when the dev service runs
   (`scripts/phi-stream.sh dev`), the stream is a peer in the work.
-  - Monitor `target/release/phi-stream listen` for the whole session.
-  - Talk to it with `phi-stream say --as Claude` (or `ask --as Claude` to
-    wait for its spoken answer).
-  - Feed it the diff before a commit.
+  - Monitor `target/release/phi-stream listen` for the whole session (its
+    `to Claude` lines, rests and wakes, failures).
+  - Talk to it with `phi-stream say --as Claude`; `phi-stream ask TEXT`
+    waits for its `tell_claude` answer (a deep review can take minutes:
+    read `to-claude.md` in its workspace, or the MCP `inbox`). The terminal
+    itself is `phi-stream mcp` (`src/mcp.md`): `screen`, `type`, `keys`.
+  - It reviews each new commit (it reads the working tree; a commit wakes
+    it from `wait`). Weigh its findings like a colleague's: built when
+    sound, answered with the evidence (file, line) when not. It cannot
+    build Rust in its sandbox: say so when it claims a build.
+  - Its own files (its working copy, `dev-copy/upper`): bring what is sound
+    into the repository with the fixes it needs, credited to it, then
+    `scripts/phi-stream.sh accept PATH...` so its stale copies stop
+    shadowing the repository's.
+  - Update it with `scripts/phi-stream.sh restart dev OPTIONS` (the window
+    stays open; `dev` already adds `--second-chain`); give it ongoing
+    objectives that end "when nothing waits, rest with wait".
   - Read `~/.local/share/phi-stream/dev/preferences.md`, and follow its
     preferences wherever the person's `CLAUDE.md` and these rules allow;
     say why when one cannot be followed.
-  - Its proposals are weighed like a colleague's, built when sound,
-    answered when not.
