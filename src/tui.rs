@@ -231,7 +231,7 @@ enum Link {
     Gone(i64),
 }
 
-const KEEP_MINDS: usize = 400;
+const KEEP_MINDS: usize = 1024;
 const KEEP_EPISODES: usize = 64;
 const KEEP_LOG: usize = 500;
 const KEEP_DELIB_CHARS: usize = 100_000;

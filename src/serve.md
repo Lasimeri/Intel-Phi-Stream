@@ -9,8 +9,10 @@ running mind and the 40-second load happens once.
   listens on a Unix socket (`client.md`: where it is), and serves every
   connection on a thread of its own: the `info` line first, then a reply
   (`ok` or `err`) to each command line.
-- `tail` subscribes the connection: it gets the last 12k characters of
-  text as `text` lines (with the positions they had) and the last status, then every `text`, `status`,
+- `tail` subscribes the connection: it gets the readings of its mind
+  kept (1024), then the last 12k characters of
+  text as `text` lines (with the positions they had, after the readings so
+  each joins its own: `tui.md`'s lens rows) and the last status, then every `text`, `status`,
   `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
 - `ask TEXT` queues a message from Claude that waits for an answer: its

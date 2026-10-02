@@ -43,8 +43,9 @@ pub fn asks_from(path: PathBuf) {
 const KEEP_CHARS: usize = 400_000;
 /// What a new `tail` is shown first.
 const REPLAY_CHARS: usize = 12_000;
-/// Readings of its mind kept and shown to a new `tail`.
-const KEEP_MINDS: usize = 256;
+/// Readings of its mind kept and shown to a new `tail` (about the last
+/// screen of replayed text, whose lens rows they make, `tui.md`).
+const KEEP_MINDS: usize = 1024;
 /// Lines of its terminal replayed to a new tail.
 const KEEP_TERM: usize = 64;
 /// Lines of the second chain replayed to a new tail.
@@ -93,7 +94,10 @@ impl Hub {
         self.subs.retain(|s| s.send(line.to_string()).is_ok());
     }
 
-    /// The last `REPLAY_CHARS` of text as lines, then the last status.
+    /// The readings of its mind kept, then the last `REPLAY_CHARS` of text
+    /// as lines (each joins its reading by position, so the readings come
+    /// first: after a reload the replayed lines had lost their lens rows),
+    /// then the last status.
     fn replay(&self) -> Vec<String> {
         let mut n = 0;
         let mut start = self.recent.len();
@@ -101,13 +105,13 @@ impl Hub {
             start -= 1;
             n += self.recent[start].0.chars().count();
         }
-        let mut out: Vec<String> = self
-            .recent
-            .iter()
-            .skip(start)
-            .map(|(t, k, at, p)| crate::client::text_line(t, *k, *at, *p))
-            .collect();
-        out.extend(self.minds.iter().cloned());
+        let mut out: Vec<String> = self.minds.iter().cloned().collect();
+        out.extend(
+            self.recent
+                .iter()
+                .skip(start)
+                .map(|(t, k, at, p)| crate::client::text_line(t, *k, *at, *p)),
+        );
         out.extend(self.objective.iter().cloned());
         out.extend(self.term.iter().cloned());
         out.extend(self.delib.iter().cloned());
@@ -342,8 +346,8 @@ fn connection(
             "breaker" | "nudges" | "guide" | "experts" => match arg.trim() {
                 "on" | "off" => ctx.send(Command::Guard(cmd.to_string(), arg.trim() == "on")).map(|_| format!("{cmd} {}", arg.trim())).map_err(|_| "the engine is gone".to_string()),
                 // The guide's aside source (engine.md): one of three.
-                s @ ("chain" | "lens" | "placebo") if cmd == "guide" => ctx.send(Command::Guard(s.to_string(), true)).map(|_| format!("guide asides from {s}")).map_err(|_| "the engine is gone".to_string()),
-                _ if cmd == "guide" => Err("guide takes on, off, chain, lens or placebo".to_string()),
+                s @ ("chain" | "lens" | "placebo" | "ab") if cmd == "guide" => ctx.send(Command::Guard(s.to_string(), true)).map(|_| format!("guide asides from {s}")).map_err(|_| "the engine is gone".to_string()),
+                _ if cmd == "guide" => Err("guide takes on, off, chain, lens, placebo or ab".to_string()),
                 _ => Err(format!("{cmd} takes on or off")),
             },
             "temp" => match arg.parse::<f32>() {

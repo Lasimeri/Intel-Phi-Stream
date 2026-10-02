@@ -737,6 +737,11 @@ pub struct Engine {
     /// The guide's aside source now, and the next aside's.
     guide_src: GuideSrc,
     guide_next_src: GuideSrc,
+    /// `guide ab`: lens and placebo asides by turns (the next is the lens's
+    /// when `ab_lens`): both accrue at the same kind of moment whenever it
+    /// thinks (5-minute windows measured nothing while it rested).
+    guide_ab: bool,
+    ab_lens: bool,
     /// The line being written, for the lens aside: its lens words (each
     /// with its probability, one per word per block read), the readings
     /// (tokens times blocks), where it began in `history`, that it ended;
@@ -1145,6 +1150,8 @@ impl Engine {
             guide_next: None,
             guide_src: GuideSrc::Chain,
             guide_next_src: GuideSrc::Chain,
+            guide_ab: false,
+            ab_lens: true,
             lens_sums: Vec::new(),
             lens_readings: 0,
             line_from: 0,
@@ -1733,7 +1740,13 @@ impl Engine {
         if words.is_empty() || mono - self.lens_fork_mono < LENS_EVERY_US {
             return;
         }
-        let names: Vec<String> = match self.guide_src {
+        // `guide ab`: lens and placebo by turns, fork by fork.
+        let src = match (self.guide_ab, self.ab_lens) {
+            (true, true) => GuideSrc::Lens,
+            (true, false) => GuideSrc::Placebo,
+            _ => self.guide_src,
+        };
+        let names: Vec<String> = match src {
             GuideSrc::Placebo => crate::mind::said(&sums, readings, &said, words.len()),
             _ => words,
         }
@@ -1746,7 +1759,10 @@ impl Engine {
         self.lens_fork_mono = mono;
         self.lens_last = names.clone();
         self.guide_next = Some(format!("on my mind: {}", names.join(", ")));
-        self.guide_next_src = self.guide_src;
+        self.guide_next_src = src;
+        if self.guide_ab {
+            self.ab_lens = !self.ab_lens;
+        }
     }
 
     fn on_line_end(&mut self) -> Result<()> {
@@ -4779,8 +4795,15 @@ impl Engine {
                     // Where its aside comes from (`GuideSrc`): the lane
                     // forks again from the next one, and the report counts
                     // afresh, so no window mixes two sources.
-                    "chain" | "lens" | "placebo" => {
-                        self.guide_src = GuideSrc::from_name(&which).unwrap_or(GuideSrc::Chain);
+                    "chain" | "lens" | "placebo" | "ab" => {
+                        // `ab`: lens and placebo by turns (`lens_aside`).
+                        self.guide_ab = which == "ab";
+                        self.ab_lens = true;
+                        self.guide_src = GuideSrc::from_name(&which).unwrap_or(if self.guide_ab {
+                            GuideSrc::Lens
+                        } else {
+                            GuideSrc::Chain
+                        });
                         self.drop_guide();
                         self.guide_next = None;
                         self.lens_sums.clear();
@@ -4794,7 +4817,7 @@ impl Engine {
                     }
                     _ => {}
                 }
-                if GuideSrc::from_name(&which).is_none() {
+                if GuideSrc::from_name(&which).is_none() && which != "ab" {
                     self.note(format!("{which} {}", if on { "on" } else { "off" }));
                 }
             }

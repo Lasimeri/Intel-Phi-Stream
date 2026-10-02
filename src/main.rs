@@ -368,9 +368,10 @@ enum Cmd {
     /// The guide lane, live (started with --guide; src/engine.md): on or
     /// off, or where its asides come from: chain (the second chain's
     /// reflections), lens (the J-lens words a line does not say) or placebo
-    /// (as many of those the line does say)
+    /// (as many of those the line does say), or ab (lens and placebo by
+    /// turns, fork by fork)
     Guide {
-        #[arg(value_parser = ["on", "off", "chain", "lens", "placebo"])]
+        #[arg(value_parser = ["on", "off", "chain", "lens", "placebo", "ab"])]
         state: String,
     },
     /// The experts each token is routed to, captured at the mind's blocks,

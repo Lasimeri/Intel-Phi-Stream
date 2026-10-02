@@ -13,17 +13,20 @@ to be cut, and 64-byte token buffers (the static table was 270 MB).
 
 ```
 tcc -o /tmp/guide-analyze tools/guide-analyze.c -lm
-/tmp/guide-analyze START_US END_US [guide.log] [-v]
+/tmp/guide-analyze START_US END_US [guide.log] [-v] [--src NAME]
 ```
 
 The log defaults to `~/.local/share/phi-stream/dev/guide.log`; `-v` also
-lists every token in the window.
+lists every token in the window; `--src NAME` selects only lines whose
+source is NAME (`chain`, `lens`, or `placebo`). A line without `src=`
+counts as chain; another name is refused.
 
 ## Input
 
 One line per thinking token, tab-separated: the microsecond time (no
 key), then `pos=N`, `kl=K`, `flip=0|1`, `live="TOKEN"`, `guide="TOKEN"`,
-and `experts_shared=S` when the experts were captured (`experts on`).
+and `experts_shared=S` when the experts were captured (`experts on`),
+and `src=X` naming the aside's source (`chain`, `lens`, or `placebo`).
 
 ## Output
 

@@ -1,8 +1,9 @@
 /* guide-analyze: read guide.log, print statistics for a microsecond window.
- * Usage: guide-analyze START_US END_US [guide.log] [-v]
+ * Usage: guide-analyze START_US END_US [guide.log] [-v] [--src NAME]
  * The log defaults to ~/.local/share/phi-stream/dev/guide.log; -v also
  * lists every token in the window.
- * One line per thinking token: microseconds<TAB>pos=N kl=K flip=0|1 live="TOKEN" guide="TOKEN" [experts_shared=S]
+ * One line per thinking token: microseconds<TAB>pos=N kl=K flip=0|1 live="TOKEN" guide="TOKEN" [experts_shared=S] [src=X]
+ * A line without src= counts as chain. --src NAME selects only that source.
  * Output: tokens in window, mean/median KL + quartiles, flip share,
  *         top-10 live→guide changes among flips, mean experts_shared.
  * Written by the dev stream (2026-10-02); see guide-analyze.md.
@@ -25,17 +26,20 @@ typedef struct {
     char guide[MAX_TOKEN];
     double experts_shared;
     int has_experts;
+    char src[16];
 } Line;
 
 static Line lines[MAX_LINES];
 
 /* Parse one guide.log line into a Line struct.
- * Format: microseconds<TAB>pos=N\tkl=K\tflip=F\tlive="..." guide="..." [experts_shared=S]
+ * Format: microseconds<TAB>pos=N\tkl=K\tflip=F\tlive="..." guide="..." [experts_shared=S] [src=X]
  * The first field (before the first tab) is the raw timestamp in microseconds.
  * Remaining fields are TAB-separated key=value pairs.
+ * A line without src= counts as chain.
  */
 static void parse_line(char *buf, Line *out) {
     memset(out, 0, sizeof(*out));
+    strcpy(out->src, "chain");
     char *p = buf;
 
     /* First field: raw timestamp (no key= prefix). */
@@ -78,13 +82,15 @@ static void parse_line(char *buf, Line *out) {
         } else if (strcmp(key, "experts_shared") == 0) {
             out->experts_shared = atof(val);
             out->has_experts = 1;
+        } else if (strcmp(key, "src") == 0) {
+            strncpy(out->src, val, sizeof(out->src) - 1);
         }
     }
 }
 
-/* Read guide.log, filter by time window [start_us, end_us]. */
+/* Read guide.log, filter by time window [start_us, end_us] and optional src. */
 static int read_window(const char *path, long long start_us, long long end_us,
-                       Line *out, int max_out) {
+                       const char *src_filter, Line *out, int max_out) {
     FILE *f = fopen(path, "r");
     if (!f) return -1;
     char buf[4096];
@@ -98,6 +104,7 @@ static int read_window(const char *path, long long start_us, long long end_us,
         Line l;
         parse_line(buf, &l);
         if (l.t_us >= start_us && l.t_us <= end_us) {
+            if (src_filter && strcmp(l.src, src_filter) != 0) continue;
             out[count++] = l;
         }
     }
@@ -145,7 +152,7 @@ static int pair_cmp(const void *a, const void *b) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s START_US END_US [guide.log] [-v]\n", argv[0]);
+        fprintf(stderr, "Usage: %s START_US END_US [guide.log] [-v] [--src NAME]\n", argv[0]);
         return 1;
     }
     long long start_us = atoll(argv[1]);
@@ -155,12 +162,23 @@ int main(int argc, char **argv) {
     snprintf(def, sizeof def, "%s/.local/share/phi-stream/dev/guide.log", home ? home : "");
     const char *path = def;
     int verbose = 0;
+    const char *src_filter = NULL;
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) verbose = 1;
-        else path = argv[i];
+        else if (strcmp(argv[i], "--src") == 0 && i + 1 < argc) {
+            src_filter = argv[++i];
+        } else {
+            path = argv[i];
+        }
     }
 
-    int n = read_window(path, start_us, end_us, lines, MAX_LINES);
+    /* A source misspelled would select nothing, without a word. */
+    if (src_filter && strcmp(src_filter, "chain") && strcmp(src_filter, "lens") &&
+        strcmp(src_filter, "placebo")) {
+        fprintf(stderr, "--src takes chain, lens or placebo, not %s\n", src_filter);
+        return 1;
+    }
+    int n = read_window(path, start_us, end_us, src_filter, lines, MAX_LINES);
     if (n < 0) {
         fprintf(stderr, "Cannot open %s\n", path);
         return 1;

@@ -549,6 +549,10 @@ tokens a report (a note, and a line in DELIBERATION).
     line's lens words it does say (`mind::said`): any aside moves the next
     token (the reflection's frame alone moved it 7 to 14 nats), so lens
     against placebo is what says whether its J-space content does.
+  - `guide ab` (the measurement's mode): lens and placebo by turns, fork
+    by fork (`guide_ab`, `ab_lens`), so both accrue at the same kind of
+    moment whenever it thinks and drift falls on both alike; 5-minute
+    windows of one source each measured 63 tokens, the stream at rest.
   - A lens or placebo aside at most every `LENS_EVERY_US` (10 s) and never
     the same words twice running: each fork copies 62.8 MiB of recurrent
     state, and 22.7 percent of thinking lines pass the bar. A change of
