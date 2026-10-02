@@ -42,7 +42,7 @@ use anyhow::{Context as _, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::client::{default_socket, escape, parse, Client, Msg};
-use crate::engine::{compose, Command, Config, Engine, Event, Frame, Kind, Mode, DEFAULT_BASE};
+use crate::engine::{compose, Command, Config, Engine, Event, Frame, Kind, DEFAULT_BASE};
 use crate::llm::{Llm, Options, Sampling};
 
 #[derive(Parser)]
@@ -918,7 +918,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
                     ctx.send(Command::Quit).ok();
                 }
             }
-            Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st)),
+            Ok(Event::Status(st)) => eprintln!("\x1b[2m[{}]\x1b[0m", engine::status_text(&st)),
             Ok(Event::Note(n)) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
             Ok(Event::Reflect(e)) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
@@ -943,33 +943,6 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
     }
 }
 
-fn status_text(st: &engine::Status) -> String {
-    let mode = match st.mode {
-        Mode::Thinking => "thinking".to_string(),
-        Mode::Speaking => "speaking".to_string(),
-        Mode::Reading { done, total } => format!("reading {done}/{total}"),
-        Mode::CatchingUp { done, total } => format!("catching up {done}/{total}"),
-        Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
-        Mode::Paused => "paused".to_string(),
-        Mode::Resting => "resting".to_string(),
-    };
-    let checks = if st.checks > 0 || st.checking {
-        format!(
-            "; checks {} (changed {}, unparsed {}){}",
-            st.checks,
-            st.changes,
-            st.unparsed,
-            if st.checking { ", one in flight" } else { "" }
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        "{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}; notes {}; {} frame{checks}",
-        st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued, st.notes, st.frame
-    )
-}
-
 /// A one-shot command to the service: its reply on stdout.
 fn ask(socket: &Path, line: &str) -> Result<()> {
     let mut c = Client::connect(socket)?;
@@ -990,7 +963,7 @@ fn tail(socket: &Path, with_status: bool, with_mind: bool) -> Result<()> {
             Msg::Text(t, Kind::Think, _, _) => write!(out, "{t}")?,
             Msg::Status(st) => {
                 if with_status {
-                    eprintln!("\x1b[2m[{}]\x1b[0m", status_text(&st));
+                    eprintln!("\x1b[2m[{}]\x1b[0m", engine::status_text(&st));
                 }
             }
             Msg::Note(n) => eprintln!("\x1b[2m[{n}]\x1b[0m"),
@@ -1203,7 +1176,7 @@ fn main() -> Result<()> {
             c.send("status")?;
             while let Some(line) = c.line()? {
                 match parse(&line) {
-                    Msg::Status(st) => println!("{}", status_text(&st)),
+                    Msg::Status(st) => println!("{}", engine::status_text(&st)),
                     Msg::Ok(_) | Msg::Err(_) | Msg::Bye => break,
                     _ => {}
                 }
@@ -1390,7 +1363,8 @@ fn main() -> Result<()> {
             let mut imp = improve::Improver::new(improve::ImproveConfig {
                 repo: repo.canonicalize()?,
                 upper: upper.canonicalize()?,
-                root: PathBuf::from(home).join(".cache/phi-stream/improve"),
+                root: PathBuf::from(&home).join(".cache/phi-stream/improve"),
+                mirror: PathBuf::from(&home).join(".cache/phi-stream/improve/by-hand"),
             });
             let id = imp
                 .propose(&title, None)

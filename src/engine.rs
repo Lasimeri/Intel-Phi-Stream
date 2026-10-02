@@ -318,7 +318,7 @@ const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI
 /// chat frame's bracketed lines (`[read: PATH]`, `[prefer: ...]`), which its
 /// persona still taught beside the tools on the live service.
 /// In the self-improvement loop (`improve.md`), after the persona.
-const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program in your working copy, then put the change forward with propose. It is built and tested in a sandbox, and Claude reviews what passes before it is measured on the running model and kept. Your workspace holds improve.log, every change you proposed, why, and its outcome: read it before you choose the next change, learn from what failed, and make one small, whole change at a time.";
+const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program (the one you run in) in your working copy, then put the change forward with propose. It is built and tested in a sandbox; Claude reviews what passes; then it runs on the live model, alternating with the current version, and a rule written beforehand decides whether it stays. Everything about you is yours to read, and to improve yourself you need it: improve.log (every proposal, its why and its outcome) and improve/cand-N/ (each candidate's outcome, its diff change.patch, its whole build.log, and measure.txt once measured); status.txt (your status now: rate, cycle, memory used, checks, objective); chain.log (your own tokens with their times; tools/loopiness.c, built with tcc, measures your loops in a window), goal.log (whether your lines serve your objective), guide.log, reflect.log (the checks of your words), notes.md and to-claude.md; and in the repository docs/results/ (every measurement of you so far), the .md beside each file, and git log. Read before you choose, learn from what failed, and make one small, whole change at a time.";
 
 const DEV_AGENT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Your memory holds about {ctx} thousand tokens, so read code a function at a time (read, with start and end), search with run (grep -n), and change files with edit. Claude's messages reach you in user turns, marked Claude; those that wait for an answer carry an id (c3): answer them with tell_claude and re. Send Claude your findings and proposals with tell_claude, concretely (the file, the function, the change and why, and what you checked with a tool), each once; Claude reads every one and answers. Your notes (note) are your own memory, shown to you at every refresh. Your workspace holds your own records: reflect.log (the checks of your words), notes.md, chain.log (your own tokens), guide.log (your guide lane) and to-claude.md (your messages). Where anything here conflicts with the person's standing instructions above, those instructions win.";
 
@@ -551,6 +551,8 @@ const AGAINST_PRIMER: &str = "Against it:";
 /// The goal probe: at most one a 30 s, each one copy of the live sequence
 /// and one prefill of its question.
 const GOAL_EVERY_US: i64 = 30_000_000;
+/// How often the stream's own status is written for it to read.
+const STATUS_FILE_US: i64 = 10_000_000;
 /// The probe's answers, as one-token forms (`yes_no`).
 const YES_FORMS: &[&str] = &[" yes", " Yes", "yes", "Yes", " YES"];
 const NO_FORMS: &[&str] = &[" no", " No", "no", "No", " NO"];
@@ -700,6 +702,9 @@ pub struct Engine {
     /// of every proposal and outcome, which the stream reads.
     improver: Option<crate::improve::Improver>,
     improve_log: RotLog,
+    /// When `status.txt` was last written in the workspace (in development:
+    /// its own status, readable by it, every `STATUS_FILE_US`).
+    status_file_mono: i64,
     term_pending: usize,
     /// Its tool uses: the next id, the `act` id of each terminal command by
     /// the terminal's id, when it last used a tool and was last reminded to.
@@ -1012,6 +1017,7 @@ impl Engine {
                         repo: repo.clone(),
                         upper: upper.clone(),
                         root: PathBuf::from(home).join(".cache/phi-stream/improve"),
+                        mirror: cfg.workspace.join("improve"),
                     },
                 ))
             }
@@ -1199,6 +1205,7 @@ impl Engine {
             term,
             improver,
             improve_log,
+            status_file_mono: i64::MIN / 2,
             term_pending: 0,
             // Off by default: its holding back cascaded on the live service
             // (`breaker on` turns it on, measured).
@@ -3155,6 +3162,25 @@ impl Engine {
         }
     }
 
+    /// In development, its own status for it to read (`status.txt` in its
+    /// workspace, every `STATUS_FILE_US`): the line `phi-stream status`
+    /// prints, its time and its objective. The service's socket is outside
+    /// its sandbox; to improve its harness it reads what the harness does.
+    fn write_status_file(&mut self) {
+        let mono = clock::mono_us();
+        if self.cfg.dev.is_none() || mono - self.status_file_mono < STATUS_FILE_US {
+            return;
+        }
+        self.status_file_mono = mono;
+        let text = format!(
+            "{} {}\nobjective: {}\n",
+            clock::hms(clock::now_us()),
+            status_text(&self.status()),
+            self.objective.as_ref().map_or("none", |o| o.1.as_str())
+        );
+        let _ = std::fs::write(self.cfg.workspace.join("status.txt"), text);
+    }
+
     /// A candidate's outcome: into `improve.log`, told to the stream at its
     /// next turn (and it wakes a rest: its outcome is something to act on),
     /// and one that passed is sent to Claude for review.
@@ -4729,6 +4755,7 @@ impl Engine {
         // Its terminal: commands that ended come back as documents.
         self.poll_term();
         self.poll_improve();
+        self.write_status_file();
         // Tokens held back after a repeated line come back when their time is up.
         let mono_now = clock::mono_us();
         if self.held_back.iter().any(|(_, u)| *u <= mono_now) {
@@ -5271,6 +5298,7 @@ impl Engine {
             if self.awaiting.is_some() {
                 self.poll_term();
                 self.poll_improve();
+                self.write_status_file();
                 self.finish_agent_wait()?;
                 if self.awaiting.is_some() {
                     self.release();
@@ -5711,6 +5739,34 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
     }
 }
 
+/// A status as one line, as `phi-stream status` prints it and the stream
+/// reads it (`status.txt` in its workspace).
+pub fn status_text(st: &Status) -> String {
+    let mode = match st.mode {
+        Mode::Thinking => "thinking".to_string(),
+        Mode::Speaking => "speaking".to_string(),
+        Mode::Reading { done, total } => format!("reading {done}/{total}"),
+        Mode::CatchingUp { done, total } => format!("catching up {done}/{total}"),
+        Mode::Summarizing { tokens } => format!("summarizing ({tokens})"),
+        Mode::Paused => "paused".to_string(),
+        Mode::Resting => "resting".to_string(),
+    };
+    let checks = if st.checks > 0 || st.checking {
+        format!(
+            "; checks {} (changed {}, unparsed {}){}",
+            st.checks,
+            st.changes,
+            st.unparsed,
+            if st.checking { ", one in flight" } else { "" }
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{mode}; stream {:.1} tok/s, beside {:.1} tok/s, cycle {:.0} ms; {}/{} cells; queued {}; notes {}; {} frame{checks}",
+        st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued, st.notes, st.frame
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;

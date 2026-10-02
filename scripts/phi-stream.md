@@ -29,6 +29,12 @@ subcommand past them. The binary is
 `target/release/phi-stream` (`make build`), or `PHI_STREAM_BIN` (another
 build: a measurement pinned to a frozen binary while the tree is
 rebuilt); the script stops with a message when it is not built.
+`start` carries `PHI_STREAM_BIN` into its tmux session (the session takes
+the tmux server's environment, not the calling shell's; the improvement
+loop's measurement runs a candidate's binary so, `improve-measure.md`), and
+names its session exactly (`-t =phi-stream`: a prefix matched
+`phi-stream-mcp`, and `start` refused, seeing the MCP terminal's session
+as the service).
 
 `start` (and `dev`) also keeps the service's output on disk, appended to
 `~/.local/share/phi-stream/serve.log` (`PHI_STREAM_LOG`; never tmpfs):

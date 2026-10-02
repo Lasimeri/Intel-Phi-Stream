@@ -691,3 +691,8 @@ a line of `improve.log` in the workspace, a waiting line for the stream's
 next user turn (which wakes a rest: an outcome is something to act on),
 a note, and for a candidate that passed, a message to Claude
 (`to-claude.md`, `[improve]`, with the path of its `change.patch`).
+
+In development, its own status is written every 10 s to `status.txt` in
+its workspace (`write_status_file`: the line `phi-stream status` prints,
+`status_text`, with its time and objective), since the service's socket
+is outside its sandbox.

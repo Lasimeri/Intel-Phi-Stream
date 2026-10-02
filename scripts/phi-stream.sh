@@ -129,7 +129,9 @@ case "$sub" in
         # session; never tmpfs).
         log=${PHI_STREAM_LOG:-$HOME/.local/share/phi-stream/serve.log}
         mkdir -p "$(dirname "$log")"
-        cmd="$(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
+        # The binary chosen here (PHI_STREAM_BIN) goes with it: the session
+        # takes the tmux server's environment, not this shell's.
+        cmd="env PHI_STREAM_BIN=$(printf '%q' "$bin") $(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
         tmux new-session -d -s "$session" "$cmd"
         echo "started the service in tmux session $session; log: $log (and tmux attach -t $session); the terminal: $0 attach"
         # The window: on the desktop whenever the model is loaded and

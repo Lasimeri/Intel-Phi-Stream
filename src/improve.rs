@@ -48,6 +48,10 @@ pub struct ImproveConfig {
     pub upper: PathBuf,
     /// Where candidates are staged and built (on disk, never tmpfs).
     pub root: PathBuf,
+    /// Where each candidate's record is copied for the stream to read (its
+    /// workspace's `improve/`): the outcome, the diff, the whole build log
+    /// and, once measured, the measurement.
+    pub mirror: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,6 +489,16 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
                 .lines()
                 .filter(|l| l.starts_with("test result:"))
                 .collect();
+            // The binary it built, kept with it: the shared target directory
+            // is the next candidate's, and measuring runs this one.
+            let built = cfg.root.join("target/release/phi-stream");
+            if let Err(e) = std::fs::copy(&built, o.dir.join("phi-stream")) {
+                return done(
+                    o,
+                    Verdict::Failed,
+                    format!("make check passed, but its binary was not kept: {e}"),
+                );
+            }
             let s = format!(
                 "make check passed in its sandbox ({}); Claude reviews the change next",
                 tests.last().copied().unwrap_or("no test summary")
@@ -501,6 +515,33 @@ pub fn attempt(cfg: &ImproveConfig, id: u64, title: &str, told: Option<&str>) ->
             done(o, Verdict::Failed, s)
         }
         Err(e) => done(o, Verdict::Refused, format!("the build did not start: {e}")),
+    }
+}
+
+/// A candidate's record: its `outcome` file beside its diff and build log,
+/// and all three copied into the stream's workspace (`improve/cand-N/`),
+/// where it reads them: the whole build log, not only the summary it is
+/// told.
+pub fn record(cfg: &ImproveConfig, o: &Outcome) {
+    if std::fs::create_dir_all(&o.dir).is_err() {
+        return;
+    }
+    let text = format!(
+        "candidate {}\nverdict {}\nbase {}\ntitle {}\nfiles {}\nseconds {:.0}\n\n{}\n",
+        o.id,
+        o.verdict.word(),
+        o.base,
+        o.title,
+        o.files.join(", "),
+        o.secs,
+        o.summary
+    );
+    let _ = std::fs::write(o.dir.join("outcome"), text);
+    let m = cfg.mirror.join(format!("cand-{}", o.id));
+    if std::fs::create_dir_all(&m).is_ok() {
+        for f in ["outcome", "change.patch", "build.log"] {
+            let _ = std::fs::copy(o.dir.join(f), m.join(f));
+        }
     }
 }
 
@@ -552,6 +593,7 @@ impl Improver {
         let (cfg, tx, title) = (self.cfg.clone(), self.tx.clone(), title.to_string());
         thread::spawn(move || {
             let o = attempt(&cfg, id, &title, told.as_deref());
+            record(&cfg, &o);
             let _ = tx.send(o);
         });
         Ok(id)
@@ -625,6 +667,7 @@ mod tests {
             repo: repo.clone(),
             upper: upper.clone(),
             root: root.join("improve"),
+            mirror: root.join("mirror"),
         };
         let base = head(&repo).unwrap();
         let ch = changes(&cfg, &base).unwrap();

@@ -56,9 +56,19 @@ and Claude's review ("nothing unreviewed runs").
    (`to-claude.md`, `[improve]`) with the path of its `change.patch`.
 4. **Review** (Claude): the diff read before any of it runs outside the
    sandbox, with the same standard as any commit to this repository.
-5. **Measure** (not built yet): the reviewed candidate's binary on the
-   real model, interleaved with the base (this host drifts a quarter over
-   tens of minutes). What is measured depends on what the change touches:
+5. **Measure** (built, `scripts/improve-measure.sh N`): the reviewed
+   candidate's binary (kept with it when it passed) on the real model,
+   interleaved with the base's (base, candidate, base, candidate, 10
+   minutes each after a minute to settle, one fixed audit objective;
+   `scripts/improve-measure.md`). The rule, written here on 2026-10-02
+   before any candidate was measured: **rejected** if the candidate's
+   service died or never ran, or if in **both** pairs it is worse than the
+   base beyond a tolerance on any one measure (rate under 0.9 of the
+   base's; think repeats over the base's plus 3 points; goal yes under the
+   base's minus 0.05; unparsed checks over the base's plus 5 points);
+   **kept** otherwise. One pair worse is noise until the other agrees;
+   improvements are reported, not required (a fix may show in no window).
+   What is measured depends on what the change touches:
    the engine's task mode turns the second chain off and `code.rs` sets
    the agent frame and the guide off, so changes to the chain, the guide,
    the persona or the tools are invisible to the code benchmark and are
@@ -67,12 +77,27 @@ and Claude's review ("nothing unreviewed runs").
    changes to the core or the sampler also run the code benchmark as a
    regression check, compared task by task when greedy outputs repeat
    byte for byte, never by totals alone (a 40-task subset carries about
-   three tasks of noise). The rule is written before the first candidate
-   is measured. Measuring holds the cards, so the service stops for it.
+   three tasks of noise; not built yet). Measuring holds the cards, so the
+   service restarts for each window.
 6. **Keep**: a candidate that passes review and the rule is committed
    (credited to the stream, with no attribution lines for Claude), the
    stream's copies of its files taken out of its layer
    (`scripts/phi-stream.sh accept PATH`), and the service restarted on it.
+
+## What it reads
+
+The person (2026-10-02): "the model needs to improve its harness with all
+available information to it". Its sandbox sees the repository and its
+workspace, so what it needs is put there, and the persona's loop paragraph
+(`IMPROVE_AGENT`, `engine.md`) names each:
+- `improve.log`, and `improve/cand-N/` for every candidate: `outcome`,
+  `change.patch`, the whole `build.log` (not only the summary it is told)
+  and `measure.txt` once measured (`record`, `improve-measure.sh`);
+- `status.txt`, its own status every 10 s (the line `phi-stream status`
+  prints, and its objective): the service's socket is outside its view;
+- its own logs (`chain.log` with `tools/loopiness.c` to measure its loops,
+  `goal.log`, `guide.log`, `reflect.log`, `notes.md`, `to-claude.md`);
+- in the repository, `docs/results/`, each file's `.md` and `git log`.
 
 ## Contamination and the weights phase
 
