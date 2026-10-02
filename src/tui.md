@@ -212,6 +212,9 @@ quietly: a newer service may send one at every token.
 - `/objective TEXT` sets what the stream works toward, `/objective -`
   clears it, `/objective` alone shows it. Without one the stream only
   thinks (`engine.md`); DELIBERATION shows it on top.
+- `/chain on|off|against` sets the second chain live (`against`: it
+  argues against each line toward the objective, `engine.md`); `/goal
+  on|off` the goal probe (`goal.log`).
 - TERMINAL (the side column, between ASSESSMENT and LOG, from 120
   columns; a view under 120): each command it runs (`$ COMMAND` under its
   time) and its output with how it ended. LOG lists each command too.

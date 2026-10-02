@@ -375,6 +375,47 @@ a second chain (`Chain`), which reflects on each line the journal ends.
 - `chain on|off` on the socket turns it on or off live, so its cost is
   measured interleaved on one service (`docs/results`).
 
+## The dual: the second chain against the first (`chain against`)
+
+The person (2026-10-02): "dual reasoning ... synchronous together and
+reasoning against each other so they stay in a constant goal". The second
+chain already forked beside the live token at each line's end; `chain
+against` (or `--chain-against` at the start) changes what it is asked,
+not when or at what cost:
+- With an objective set, its question is the other side: the objective,
+  the line's J-space words, and "argue against that line as a step toward
+  the objective: the strongest objection to it, or where it drifts from
+  the objective", its first words `Against it:`. Without an objective
+  there is nothing to hold it to, and it reflects as `chain on` does.
+- Its objection goes back as the reflection does (the same repeat and
+  echo tests). In the agent frame it waits for the next user turn as
+  `the other side of your thinking, against your last line: ... Answer it
+  in your thinking: concede it or rebut it, and keep to the objective.`;
+  in the journal and plain chat frames as `[against the journal: ...]`
+  (its weight measured against the same frame, empty).
+- The two reason against each other: the next fork copies the live
+  sequence with the main chain's answer in it, so the next objection is to
+  the answer. Both are held to one goal: the objective is in every
+  question.
+- A change of kind (`on` to `against` or back) drops what the other kind
+  had in flight or waiting, so no window mixes the two. Asides never
+  block or wake a rest, as before.
+
+## The goal probe (`goal on|off`, `--goal-probe`)
+
+Whether the stream stays on its objective, measured the same way for
+every kind of chain: at a thinking line's end (not while speaking), with
+an objective, at most every 30 s (`GOAL_EVERY_US`) and with three
+sequences free, a copy of the live sequence is asked in a user turn
+"does your last line serve the objective? Answer yes or no", opened at
+`Answer:`, and the probability of yes against no is read from its one
+row (their one-token forms, as the check reads keep against write). One
+copy and one prefill of the question in that cycle; the live sequence is
+not touched. Each answer is a line of `goal.log` in the workspace: time,
+position, the chain's kind (`off`, `on`, `against`), `yes` (P(yes) over
+yes and no) and `mass` (how much of the row the two forms hold; a low mass
+means the question was not read as one).
+
 ## What each thing weighs on the main chain
 
 - **A reflection** that joins the journal is weighed when it does: a copy

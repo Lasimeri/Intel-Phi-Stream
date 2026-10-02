@@ -220,6 +220,15 @@ struct StreamArgs {
     /// the reflection joins the journal at a later line.
     #[arg(long)]
     second_chain: bool,
+    /// The second chain against each line instead (src/engine.md): with an
+    /// objective set, it argues against the line as a step toward it, and
+    /// the main chain is told to answer; implies --second-chain.
+    #[arg(long)]
+    chain_against: bool,
+    /// The goal probe (src/engine.md): at most every 30 s, at a thinking
+    /// line's end, whether it serves the objective, as P(yes), in goal.log.
+    #[arg(long)]
+    goal_probe: bool,
     /// The guide lane (src/engine.md): beside every thinking token, the
     /// distribution with the last reflection in mind, measured against the
     /// live one (shadow; takes a fifth sequence, --n-seq 5 is implied).
@@ -360,8 +369,16 @@ enum Cmd {
     Chunk {
         n: usize,
     },
-    /// The second chain, live (src/engine.md).
+    /// The second chain, live (src/engine.md): on (reflecting on each
+    /// line), off, or against (arguing against each line as a step toward
+    /// the objective, the main chain told to answer it).
     Chain {
+        #[arg(value_parser = ["on", "off", "against"])]
+        state: String,
+    },
+    /// The goal probe, live (src/engine.md): every 30 s at most, whether
+    /// the last thinking line serves the objective, as P(yes), to goal.log.
+    Goal {
         #[arg(value_parser = ["on", "off"])]
         state: String,
     },
@@ -716,7 +733,9 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         terminal: s.terminal,
         gate_output: !s.no_objective_gate,
         summary_on_quit: false,
-        second_chain: s.second_chain,
+        second_chain: s.second_chain || s.chain_against,
+        chain_against: s.chain_against,
+        goal_probe: s.goal_probe,
         guide: s.guide,
         agent,
     })
@@ -1170,6 +1189,7 @@ fn main() -> Result<()> {
         }
         Cmd::Chunk { n } => ask(&socket, &format!("chunk {n}")),
         Cmd::Chain { state } => ask(&socket, &format!("chain {state}")),
+        Cmd::Goal { state } => ask(&socket, &format!("goal {state}")),
         Cmd::Guide { state } => ask(&socket, &format!("guide {state}")),
         Cmd::Experts { state } => ask(&socket, &format!("experts {state}")),
         Cmd::Breaker { state } => ask(&socket, &format!("breaker {state}")),

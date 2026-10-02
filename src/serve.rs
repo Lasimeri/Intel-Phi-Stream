@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 
 use crate::client::{escape, status_line};
-use crate::engine::{Command, Event, Kind};
+use crate::engine::{ChainSet, Command, Event, Kind};
 
 /// The id of the next message from Claude that waits for an answer
 /// (`ask`: c1, c2, ...), and the file it is kept in (`asks_from`).
@@ -399,9 +399,14 @@ fn connection(
                 Ok("tailing".to_string())
             }
             "chain" => match arg.trim() {
-                "on" => ctx.send(Command::Chain(true)).map(|_| "the second chain on".to_string()).map_err(|_| "the engine is gone".to_string()),
-                "off" => ctx.send(Command::Chain(false)).map(|_| "the second chain off".to_string()).map_err(|_| "the engine is gone".to_string()),
-                _ => Err("chain takes on or off".to_string()),
+                "on" => ctx.send(Command::Chain(ChainSet::On)).map(|_| "the second chain on".to_string()).map_err(|_| "the engine is gone".to_string()),
+                "off" => ctx.send(Command::Chain(ChainSet::Off)).map(|_| "the second chain off".to_string()).map_err(|_| "the engine is gone".to_string()),
+                "against" => ctx.send(Command::Chain(ChainSet::Against)).map(|_| "the second chain against".to_string()).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("chain takes on, off or against".to_string()),
+            },
+            "goal" => match arg.trim() {
+                s @ ("on" | "off") => ctx.send(Command::Goal(s == "on")).map(|_| format!("the goal probe {s}")).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("goal takes on or off".to_string()),
             },
             "objective" => ctx
                 .send(Command::Objective(arg.to_string()))

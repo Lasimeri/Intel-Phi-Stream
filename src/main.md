@@ -84,7 +84,10 @@ binary is used when there is one, else the GPU and the host alone.
 
 `--min-p` and `--dry-multiplier` (with `--dry-base`, `--dry-allowed-length`,
 `--dry-last-n`) are global sampling options (`llm.md`). `serve` (and `start`, `dev`) take `--second-chain` (the reflection beside
-the live token, `engine.md`; `chain on|off` on the socket while it runs),
+the live token, `engine.md`; `chain on|off|against` on the socket while it runs),
+`--chain-against` (the second chain argues against each line toward the
+objective; implies `--second-chain`), `--goal-probe` (P(yes) that a line serves
+the objective, in `goal.log`; `goal on|off` live),
 `--terminal` (the stream's sandboxed
 terminal, `term.md`) and `--no-objective-gate` (its output not held until
 it has an objective, `engine.md`); `objective TEXT` (`-` clears) sets the

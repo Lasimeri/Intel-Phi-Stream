@@ -128,6 +128,16 @@ pub enum Event {
     Stopped,
 }
 
+/// What `chain` sets: the second chain off, reflecting on each line, or
+/// against it (the dual: each line argued against as a step toward the
+/// objective, the main chain told to answer the objection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainSet {
+    Off,
+    On,
+    Against,
+}
+
 pub enum Command {
     /// Something said to the stream, and when it was heard (microseconds).
     Say(String, i64),
@@ -153,8 +163,13 @@ pub enum Command {
     /// What it works toward (empty: none, and its output is idle until one
     /// is given).
     Objective(String),
-    /// The second chain on or off, live (an A/B of its cost).
-    Chain(bool),
+    /// The second chain off, on (reflecting) or against (opposing the line
+    /// it forked from, toward the objective), live (an A/B of its cost).
+    Chain(ChainSet),
+    /// The goal probe on or off, live: at a thinking line's end, at most
+    /// every `GOAL_EVERY_US`, a copy is asked whether the line serves the
+    /// objective, and the answer's probability goes to `goal.log`.
+    Goal(bool),
     /// A sampling setting, live: temp, top-k, top-p, min-p, dry (DRY's
     /// multiplier), repeat-penalty. The sampler is rebuilt with its history.
     Set(String, f32),
@@ -246,6 +261,11 @@ pub struct Config {
     /// The second chain (`Chain`): a reflection beside the live token at
     /// each line's end.
     pub second_chain: bool,
+    /// The second chain against the line instead of reflecting on it (with
+    /// an objective set; without one it reflects).
+    pub chain_against: bool,
+    /// The goal probe (`Command::Goal`) on from the start.
+    pub goal_probe: bool,
     /// The agent frame (`agent.md`): the chat template with the model's own
     /// tool calls, results returned before its next turn.
     pub agent: bool,
@@ -407,6 +427,8 @@ struct AgentWait {
 /// reflection joins the journal at a later line's end.
 struct Chain {
     seq: i32,
+    /// Opposing the line (`chain against`), not reflecting on it.
+    against: bool,
     /// Its opening (the marker with the line's J-space words), fed first.
     prompt: Vec<i32>,
     fed: usize,
@@ -517,6 +539,14 @@ enum Summary {
 /// journal's structure, echoing the marker or a « line, on the live
 /// service.
 const CHAIN_PRIMER: &str = "On reflection,";
+/// The opposing chain's first words (`chain against`).
+const AGAINST_PRIMER: &str = "Against it:";
+/// The goal probe: at most one a 30 s, each one copy of the live sequence
+/// and one prefill of its question.
+const GOAL_EVERY_US: i64 = 30_000_000;
+/// The probe's answers, as one-token forms (`yes_no`).
+const YES_FORMS: &[&str] = &[" yes", " Yes", "yes", "Yes", " YES"];
+const NO_FORMS: &[&str] = &[" no", " No", "no", "No", " NO"];
 /// The second chain's sampling temperature, and how many of its last
 /// reflections a new one must not repeat.
 const CHAIN_TEMP: f32 = 0.8;
@@ -769,6 +799,16 @@ pub struct Engine {
     chain_fork_mono: i64,
     line_ended: bool,
     reflection: Option<String>,
+    /// The second chain opposes (`chain against`); the waiting reflection
+    /// came from an opposing chain.
+    chain_against: bool,
+    reflection_against: bool,
+    /// The goal probe: on, when it last asked, its answers' forms (yes,
+    /// no) and its log (`goal.log`).
+    goal_on: bool,
+    goal_mono: i64,
+    yes_no: Option<(Vec<i32>, Vec<i32>)>,
+    goal_log: RotLog,
     /// The second chain's random state, and its last reflections (their
     /// openings, lowercased), which a new one must not repeat.
     chain_rng: u64,
@@ -1023,6 +1063,24 @@ impl Engine {
         let log = RotLog::open(cfg.workspace.join("stream.log"));
         let chain = RotLog::open(cfg.workspace.join("chain.log"));
         let guide_log = RotLog::open(cfg.workspace.join("guide.log"));
+        let goal_log = RotLog::open(cfg.workspace.join("goal.log"));
+        let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
+        // The goal probe's answers: their one-token forms, none shared.
+        let yes_no = {
+            let forms = |words: &[&str]| -> Result<Vec<i32>> {
+                let mut v = Vec::new();
+                for w in words {
+                    if let [t] = llm.tokenize(w, false)?.as_slice() {
+                        if !v.contains(t) {
+                            v.push(*t);
+                        }
+                    }
+                }
+                Ok(v)
+            };
+            let (y, n) = (forms(YES_FORMS)?, forms(NO_FORMS)?);
+            (!y.is_empty() && !n.is_empty() && !y.iter().any(|t| n.contains(t))).then_some((y, n))
+        };
         let tx = Playout::start(cfg.horizon_us, tx);
         let reflector = cfg.reflect.clone().map(Reflector::new);
         let choice = match &cfg.reflect {
@@ -1171,6 +1229,12 @@ impl Engine {
             chain_fork_mono: i64::MIN / 2,
             line_ended: false,
             reflection: None,
+            chain_against,
+            reflection_against: false,
+            goal_on: goal_probe && yes_no.is_some(),
+            goal_mono: i64::MIN / 2,
+            yes_no,
+            goal_log,
             chain_rng: (clock::now_us() as u64) | 1,
             recent_reflections: VecDeque::new(),
             read_failures_quiet: 0,
@@ -1781,10 +1845,14 @@ impl Engine {
             if let Some(text) = self.reflection.take() {
                 // Beside the waiting lines: a reflection neither stops a rest nor
                 // wakes one (each turn left one waiting, and every rest was refused).
-                self.asides.push(format!(
-                    "[{}] your second look, beside your turn: {text}",
-                    clock::hms(clock::now_us())
-                ));
+                let at = clock::hms(clock::now_us());
+                // The opposing chain's objection asks for an answer: the
+                // two reason against each other, toward the one objective.
+                self.asides.push(if self.reflection_against {
+                    format!("[{at}] the other side of your thinking, against your last line: {text} Answer it in your thinking: concede it or rebut it, and keep to the objective.")
+                } else {
+                    format!("[{at}] your second look, beside your turn: {text}")
+                });
                 // The last two, at most: older ones are about turns long gone.
                 while self.asides.len() > 2 {
                     self.asides.remove(0);
@@ -1803,9 +1871,10 @@ impl Engine {
         }
         if let Some(text) = self.reflection.take() {
             let at = clock::hms(clock::now_us());
+            let side = if self.reflection_against { "against" } else { "beside" };
             let line = match self.cfg.frame {
-                Frame::Journal => format!("\n« [{at}] [beside the journal: {text}]\n"),
-                Frame::Chat => format!("\n[at {at}, beside your thoughts: {text}]\n"),
+                Frame::Journal => format!("\n« [{at}] [{side} the journal: {text}]\n"),
+                Frame::Chat => format!("\n[at {at}, {side} your thoughts: {text}]\n"),
             };
             // Its weight on the main chain: the next-token distribution with
             // it, against a copy's with the same frame and nothing in it
@@ -1813,8 +1882,8 @@ impl Engine {
             // (the frame alone moved the next token, at first measured as
             // 7 to 14 nats).
             let empty = match self.cfg.frame {
-                Frame::Journal => format!("\n« [{at}] [beside the journal: ]\n"),
-                Frame::Chat => format!("\n[at {at}, beside your thoughts: ]\n"),
+                Frame::Journal => format!("\n« [{at}] [{side} the journal: ]\n"),
+                Frame::Chat => format!("\n[at {at}, {side} your thoughts: ]\n"),
             };
             let placebo = self.tok(&empty, false)?;
             let without = self.logits_without(&placebo)?;
@@ -1836,6 +1905,7 @@ impl Engine {
                 }));
             }
         }
+        self.goal_probe()?;
         let mono = clock::mono_us();
         let words = std::mem::take(&mut self.line_words);
         if self.reflecting.is_some()
@@ -1849,21 +1919,29 @@ impl Engine {
         let mut words: Vec<(String, f32)> = words.into_iter().collect();
         words.sort_by(|a, b| b.1.total_cmp(&a.1));
         let shown: Vec<String> = words.into_iter().take(6).map(|w| w.0).collect();
-        let marker = match self.cfg.frame {
-            // The agent frame: asked in a user turn on a copy, as the check
-            // is (inside its turn a bracketed line is read as noise).
-            Frame::Chat if self.cfg.agent => format!(
-                "<|im_end|>\n<|im_start|>user\n[A second look at your thinking, beside it: on your mind in its last line: {}. In a sentence or two: what are you missing, getting wrong, or not checking with a tool?]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{CHAIN_PRIMER}",
+        // Against the line, toward the objective (`chain against`): the
+        // dual of the reflection, both chains held to the one goal. With no
+        // objective there is nothing to hold it to, and it reflects.
+        let goal = self
+            .objective
+            .as_ref()
+            .filter(|_| self.chain_against)
+            .map(|o| o.1.replace(['[', ']'], ""));
+        let against = goal.is_some();
+        let marker = match (&goal, self.cfg.frame) {
+            (Some(g), Frame::Chat) if self.cfg.agent => format!(
+                "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. On your mind in its last line: {}. Argue against that line as a step toward the objective: in a sentence or two, the strongest objection to it, or where it drifts from the objective.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
                 shown.join(", ")
             ),
-            Frame::Journal => format!(
-                "\n« [beside the journal; on its mind in the line above: {}]\n{CHAIN_PRIMER}",
+            (Some(g), Frame::Journal) => format!(
+                "\n« [against the journal, toward its objective ({g}); on its mind in the line above: {}]\n{AGAINST_PRIMER}",
                 shown.join(", ")
             ),
-            Frame::Chat => format!(
-                "\n[beside your thoughts; on your mind in the line above: {}]\n{CHAIN_PRIMER}",
+            (Some(g), Frame::Chat) => format!(
+                "\n[against your thoughts, toward your objective ({g}); on your mind in the line above: {}]\n{AGAINST_PRIMER}",
                 shown.join(", ")
             ),
+            (None, _) => self.reflect_marker(&shown),
         };
         let prompt = self.tok(&marker, self.cfg.agent)?;
         if prompt.is_empty() || prompt.len() >= self.llm.batch_cap() {
@@ -1878,16 +1956,103 @@ impl Engine {
             kind: crate::client::DelibKind::Start,
             t_us: clock::now_us(),
             pos,
-            text: format!("on its mind in the line before {pos}: {}", shown.join(", ")),
+            text: format!(
+                "{} the line before {pos}: {}",
+                if against { "against" } else { "on its mind in" },
+                shown.join(", ")
+            ),
         }));
         self.reflecting = Some(Chain {
             seq,
+            against,
             prompt,
             fed: 0,
             out: Vec::new(),
             pos,
         });
         Ok(())
+    }
+
+    /// The goal probe (`goal on`): at a thinking line's end, with an
+    /// objective, at most every `GOAL_EVERY_US`, a copy of the live sequence
+    /// is asked whether the line serves the objective, and the answer read
+    /// as the probability of yes against no (their one-token forms, not a
+    /// sample), as the check reads keep against write. One copy and one
+    /// prefill of the question, in the cycle; the live sequence untouched.
+    /// Each answer is a line of `goal.log`, with the chain's kind, so the
+    /// arms of an interleaved run are told apart.
+    fn goal_probe(&mut self) -> Result<()> {
+        let mono = clock::mono_us();
+        if !self.goal_on
+            || self.speaking
+            || mono - self.goal_mono < GOAL_EVERY_US
+            || self.free_seqs.len() < 3
+        {
+            return Ok(());
+        }
+        let Some(g) = self.objective.as_ref().map(|o| o.1.replace(['[', ']'], "")) else {
+            return Ok(());
+        };
+        let q = match self.cfg.frame {
+            Frame::Chat if self.cfg.agent => format!(
+                "<|im_end|>\n<|im_start|>user\n[A question beside your work: does your last line serve the objective ({g})? Answer yes or no.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer:"
+            ),
+            Frame::Journal => format!(
+                "\n« [a question beside the journal: does the line above serve its objective ({g})? yes or no]\nAnswer:"
+            ),
+            Frame::Chat => format!(
+                "\n[a question beside your thoughts: does the line above serve your objective ({g})? yes or no]\nAnswer:"
+            ),
+        };
+        let tokens = self.tok(&q, self.cfg.agent)?;
+        if tokens.is_empty() || tokens.len() + 1 >= self.llm.batch_cap() {
+            return Ok(());
+        }
+        self.goal_mono = mono;
+        let Some(l) = self.logits_without(&tokens)? else {
+            return Ok(());
+        };
+        let Some((y, n)) = self.yes_no.as_ref() else {
+            return Ok(());
+        };
+        let m = l.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let z = l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>();
+        let mass = |ts: &[i32]| ts.iter().map(|&t| (l[t as usize] as f64 - m).exp()).sum::<f64>() / z;
+        let (py, pn) = (mass(y), mass(n));
+        let kind = match (self.chain_on, self.chain_against) {
+            (false, _) => "off",
+            (true, false) => "on",
+            (true, true) => "against",
+        };
+        self.goal_log.line(&format!(
+            "{}\tpos={}\tchain={kind}\tyes={:.4}\tmass={:.4}",
+            clock::now_us(),
+            self.history.len(),
+            if py + pn > 0.0 { py / (py + pn) } else { 0.5 },
+            py + pn
+        ));
+        Ok(())
+    }
+
+    /// The reflecting chain's opening: its question with the line's J-space
+    /// words, then its first words.
+    fn reflect_marker(&self, shown: &[String]) -> String {
+        match self.cfg.frame {
+            // The agent frame: asked in a user turn on a copy, as the check
+            // is (inside its turn a bracketed line is read as noise).
+            Frame::Chat if self.cfg.agent => format!(
+                "<|im_end|>\n<|im_start|>user\n[A second look at your thinking, beside it: on your mind in its last line: {}. In a sentence or two: what are you missing, getting wrong, or not checking with a tool?]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{CHAIN_PRIMER}",
+                shown.join(", ")
+            ),
+            Frame::Journal => format!(
+                "\n« [beside the journal; on its mind in the line above: {}]\n{CHAIN_PRIMER}",
+                shown.join(", ")
+            ),
+            Frame::Chat => format!(
+                "\n[beside your thoughts; on your mind in the line above: {}]\n{CHAIN_PRIMER}",
+                shown.join(", ")
+            ),
+        }
     }
 
     /// The second chain's next token: the likeliest one that is not banned
@@ -1944,12 +2109,15 @@ impl Engine {
         self.llm.seq_rm(c.seq, -1, -1);
         self.free_seqs.push(c.seq);
         let said = self.llm.text(&c.out).trim().to_string();
-        let text = format!("{CHAIN_PRIMER} {said}");
+        let primer = if c.against { AGAINST_PRIMER } else { CHAIN_PRIMER };
+        let text = format!("{primer} {said}");
         // What only repeats the journal's frame is no reflection.
         let echo = said.is_empty()
             || said.contains("beside the journal")
             || said.contains("on its mind in the line")
-            || said.contains("second look at your thinking");
+            || said.contains("second look at your thinking")
+            || said.contains("against the journal")
+            || said.contains("other side of your thinking");
         let opening = word_set(&said);
         let repeat = self
             .recent_reflections
@@ -1967,6 +2135,7 @@ impl Engine {
                 self.guide_next_src = GuideSrc::Chain;
             }
             self.reflection = Some(text);
+            self.reflection_against = c.against;
             if self.cfg.agent {
                 "kept for its next turn"
             } else {
@@ -4842,16 +5011,31 @@ impl Engine {
                 let _ = self.tx.send(Event::Status(self.status()));
             }
             Command::Objective(text) => self.set_objective(text.trim()),
-            Command::Chain(on) => {
-                self.chain_on = on && !self.cfg.task;
-                if !self.chain_on {
+            Command::Chain(set) => {
+                let against = set == ChainSet::Against;
+                // A change of kind drops what the other kind had in flight
+                // or waiting, so no window mixes the two.
+                if set == ChainSet::Off || against != self.chain_against {
                     self.end_chain(false);
                     self.line_words.clear();
                     self.reflection = None;
                 }
+                self.chain_on = set != ChainSet::Off && !self.cfg.task;
+                self.chain_against = against;
                 self.note(format!(
                     "the second chain {}",
-                    if self.chain_on { "on" } else { "off" }
+                    match (self.chain_on, against) {
+                        (false, _) => "off",
+                        (true, false) => "on",
+                        (true, true) => "against",
+                    }
+                ));
+            }
+            Command::Goal(on) => {
+                self.goal_on = on && self.yes_no.is_some();
+                self.note(format!(
+                    "the goal probe {}",
+                    if self.goal_on { "on" } else { "off" }
                 ));
             }
             Command::Quit => {
