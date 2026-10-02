@@ -700,3 +700,9 @@ With the loop on, `build`, `diff`, `revert` and `report` too
 (`agent_build`, `agent_diff`, `agent_revert`, `agent_report`;
 `improve.md`); a trial's outcome (number 0) is told and logged as
 `trial`, never sent to Claude.
+
+Grounding (`verify.md`): each thinking line that names code is checked
+against the repository at its end (`ground_line`, from `lens_aside`,
+which takes every line's text), and each message to Claude in
+`send_claude`; findings go beside its next turn as an aside, into
+`ground.log`, and beside the message for Claude.

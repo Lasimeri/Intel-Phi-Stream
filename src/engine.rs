@@ -551,6 +551,10 @@ const AGAINST_PRIMER: &str = "Against it:";
 /// The goal probe: at most one a 30 s, each one copy of the live sequence
 /// and one prefill of its question.
 const GOAL_EVERY_US: i64 = 30_000_000;
+/// Grounding: the repository read again after 30 s; a missing name told
+/// again after 10 minutes at most.
+const GROUND_REPO_US: i64 = 30_000_000;
+const GROUND_AGAIN_US: i64 = 600_000_000;
 /// How often the stream's own status is written for it to read.
 const STATUS_FILE_US: i64 = 10_000_000;
 /// The probe's answers, as one-token forms (`yes_no`).
@@ -795,6 +799,12 @@ pub struct Engine {
     lens_sums: Vec<(String, f32)>,
     lens_readings: usize,
     line_from: usize,
+    /// Grounding (`verify.md`): the repository as the working copy sees it,
+    /// read again when older than `GROUND_REPO_US`; when each missing name or
+    /// bad reference was last told (told once in `GROUND_AGAIN_US`); its log.
+    ground_repo: Option<(i64, verify::Repo)>,
+    grounded: HashMap<String, i64>,
+    ground_log: RotLog,
     lens_line_ended: bool,
     lens_fork_mono: i64,
     lens_last: Vec<String>,
@@ -1100,6 +1110,7 @@ impl Engine {
         let chain = RotLog::open(cfg.workspace.join("chain.log"));
         let guide_log = RotLog::open(cfg.workspace.join("guide.log"));
         let goal_log = RotLog::open(cfg.workspace.join("goal.log"));
+        let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
         // The goal probe's answers: their one-token forms, none shared.
         let yes_no = {
@@ -1252,6 +1263,9 @@ impl Engine {
             lens_sums: Vec::new(),
             lens_readings: 0,
             line_from: 0,
+            ground_repo: None,
+            grounded: HashMap::new(),
+            ground_log,
             lens_line_ended: false,
             lens_fork_mono: 0,
             lens_last: Vec::new(),
@@ -1833,6 +1847,7 @@ impl Engine {
         let from = self.line_from.min(self.history.len());
         let said = self.llm.text(&self.history[from..]);
         self.line_from = self.history.len();
+        self.ground_line(&said);
         let sums = std::mem::take(&mut self.lens_sums);
         let readings = std::mem::take(&mut self.lens_readings);
         if !self.guide_on || self.guide_src == GuideSrc::Chain || self.speaking || self.in_code {
@@ -3469,22 +3484,134 @@ impl Engine {
         let t = clock::now_us();
         let re = re.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
         let act = self.act("tell_claude", text);
+        // What it tells Claude about the code is checked against the code
+        // too (`verify.md`): a message cited strings and lines that were not
+        // there (m27). The check goes beside the message, for Claude and back
+        // to it.
+        let checked = if self.cfg.dev.is_some() {
+            self.ground_repo()
+                .map(|r| r.check(text))
+                .filter(|f| !f.clean())
+                .map(|f| Self::ground_words(&f).join("; "))
+        } else {
+            None
+        };
+        let full = match &checked {
+            Some(c) => format!("{text}\n\n[checked against the code: {c}]"),
+            None => text.to_string(),
+        };
         let path = self.cfg.workspace.join("to-claude.md");
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
             let answers = re
                 .as_ref()
                 .map_or(String::new(), |r| format!(", answering {r}"));
-            let _ = writeln!(f, "## m{id} at {}{answers}\n\n{text}\n", clock::datetime(t));
+            let _ = writeln!(f, "## m{id} at {}{answers}\n\n{full}\n", clock::datetime(t));
         }
         let _ = self.tx.send(Event::ToClaude(crate::client::ToClaude {
             id,
             t_us: t,
             re,
-            text: text.to_string(),
+            text: full.clone(),
         }));
-        let said = format!("sent to Claude as m{id}; Claude answers in a later turn{warn}");
+        let said = match &checked {
+            Some(c) => format!("sent to Claude as m{id}, with a check against the code beside it: {c}. Claude answers in a later turn{warn}"),
+            None => format!("sent to Claude as m{id}; Claude answers in a later turn{warn}"),
+        };
         self.act_end(act, true, said.clone());
         said
+    }
+
+    /// What a check found, as the stream is told it: each missing name, each
+    /// bad reference, and each line it named quoted.
+    fn ground_words(f: &verify::Findings) -> Vec<String> {
+        let mut said = Vec::new();
+        if !f.missing.is_empty() {
+            said.push(format!(
+                "{} {} nowhere in the repository",
+                f.missing.join(", "),
+                if f.missing.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        said.extend(f.bad_refs.iter().cloned());
+        for (p, n, l) in &f.lines {
+            said.push(format!("line {n} of {p} is: {l}"));
+        }
+        said
+    }
+
+    /// The repository as the working copy sees it, read again when older
+    /// than `GROUND_REPO_US` (the stream's own edits and Claude's commits
+    /// move it).
+    fn ground_repo(&mut self) -> Option<&verify::Repo> {
+        let mono = clock::mono_us();
+        let stale = self
+            .ground_repo
+            .as_ref()
+            .is_none_or(|(t, _)| mono - t > GROUND_REPO_US);
+        if stale {
+            let r = self.repo_view()?;
+            self.ground_repo = Some((mono, r));
+        }
+        self.ground_repo.as_ref().map(|(_, r)| r)
+    }
+
+    /// A thinking line checked against the code (development, agent frame;
+    /// `verify.md`): a code name no file holds, a file that does not exist,
+    /// a line past a file's end, each told to it once in `GROUND_AGAIN_US`
+    /// beside its next turn, as asides are (they neither block nor wake a
+    /// rest), and kept in `ground.log`. What it thinks about the code is
+    /// held to the code: its notes were checked, but a confabulated name in
+    /// its thinking went on unchallenged into its messages.
+    fn ground_line(&mut self, line: &str) {
+        if !self.cfg.agent || self.cfg.dev.is_none() || self.speaking || self.in_code {
+            return;
+        }
+        // Most lines name no code: no repository read for them.
+        if verify::code_names(line).is_empty() && verify::file_refs(line).is_empty() {
+            return;
+        }
+        let Some(f) = self.ground_repo().map(|r| r.check(line)) else {
+            return;
+        };
+        if f.clean() {
+            return;
+        }
+        let mono = clock::mono_us();
+        let mut fresh = verify::Findings::default();
+        for m in &f.missing {
+            if self
+                .grounded
+                .get(m)
+                .is_none_or(|t| mono - t > GROUND_AGAIN_US)
+            {
+                self.grounded.insert(m.clone(), mono);
+                fresh.missing.push(m.clone());
+            }
+        }
+        for b in &f.bad_refs {
+            if self
+                .grounded
+                .get(b)
+                .is_none_or(|t| mono - t > GROUND_AGAIN_US)
+            {
+                self.grounded.insert(b.clone(), mono);
+                fresh.bad_refs.push(b.clone());
+            }
+        }
+        if fresh.clean() {
+            return;
+        }
+        let said = Self::ground_words(&fresh).join("; ");
+        let at = clock::hms(clock::now_us());
+        self.ground_log
+            .line(&format!("{at}\tthinking\t{said}\t{}", line.trim()));
+        self.note(format!("ground truth beside its thinking: {said}"));
+        self.asides.push(format!(
+            "[{at}] ground truth, beside your thinking (checked against the repository and your working copy): {said}. If you mean to add it, it is not there yet; if you meant something that is, read the code before you go on."
+        ));
+        while self.asides.len() > 2 {
+            self.asides.remove(0);
+        }
     }
 
     /// The working copy's view of the repository, for the checks of its
@@ -3510,18 +3637,7 @@ impl Engine {
         let mut checked = String::new();
         if let Some(repo) = self.repo_view() {
             let f = repo.check(body);
-            let mut said = Vec::new();
-            if !f.missing.is_empty() {
-                said.push(format!(
-                    "{} {} nowhere in the repository",
-                    f.missing.join(", "),
-                    if f.missing.len() == 1 { "is" } else { "are" }
-                ));
-            }
-            said.extend(f.bad_refs.iter().cloned());
-            for (p, n, l) in &f.lines {
-                said.push(format!("line {n} of {p} is: {l}"));
-            }
+            let said = Self::ground_words(&f);
             if !f.clean() {
                 kept = format!(
                     "{body} [unverified: {}]",

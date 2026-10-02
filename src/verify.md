@@ -46,6 +46,25 @@ and a line `[checked against the code: ...]` follows it when it names
 what the repository does not hold. In the dev session its summary
 carried "two gates" and a "mirror gate" through a rollover.
 
+**Its thinking and its messages too** (2026-10-02; the person: "make sure
+what's on the model's mind is not hallucinated and always based in reality
+and ground truth"):
+- **Each thinking line** that names code (`ground_line`, at the line's
+  end; agent frame, in development, not while speaking or in a code
+  block) is checked against the repository as its working copy sees it
+  (read again after 30 s). A missing name, a file that does not exist or
+  a line past a file's end is told to it beside its next turn as an
+  aside ("ground truth, beside your thinking ... if you mean to add it,
+  it is not there yet"), once in ten minutes per finding, and kept in
+  `ground.log`. Its notes were checked, but a confabulated name in its
+  thinking went on unchallenged into its messages.
+- **Each message to Claude** (`send_claude`) is checked the same way: the
+  check goes beside the message in `to-claude.md` (`[checked against the
+  code: ...]`) and back to it in the tool's result. A message had cited
+  strings and lines that were not there (m27).
+- What the terminal shows as "on its mind" is the lens's reading of its
+  residual stream (`mind.md`), a measurement, not its words.
+
 **In the engine** (`add_note`):
 - **A note with a missing name or a bad reference is kept**, marked
   `[unverified: ...]`, and the stream is told (a system line through the
