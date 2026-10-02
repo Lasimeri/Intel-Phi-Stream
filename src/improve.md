@@ -108,7 +108,11 @@ the loop on it has, beside `propose`:
   or deletion mark taken out of the layer; a relative path inside the
   layer only), which it cannot do itself inside the overlay;
 - `report`: its status, objective, the goal probe over the last ten
-  minutes, what is building and the last entries of `improve.log`.
+  minutes, what is building, the last entries of `improve.log` and the
+  last lessons of Claude's reviews (`lessons.md` in its workspace: a line
+  per rejected or corrected candidate, written with each review, so the
+  mistake is in front of it when it chooses the next; the persona names
+  it too).
 One build at a time, trial or candidate.
 
 ## A trap: the working copy's lower layer is the live tree

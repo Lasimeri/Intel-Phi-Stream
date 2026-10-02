@@ -318,7 +318,7 @@ const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI
 /// chat frame's bracketed lines (`[read: PATH]`, `[prefer: ...]`), which its
 /// persona still taught beside the tools on the live service.
 /// In the self-improvement loop (`improve.md`), after the persona.
-const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program (the one you run in) in your working copy, then put the change forward with propose. It is built and tested in a sandbox; Claude reviews what passes; then it runs on the live model, alternating with the current version, and a rule written beforehand decides whether it stays. Everything about you is yours to read, and to improve yourself you need it: improve.log (every proposal, its why and its outcome) and improve/cand-N/ (each candidate's outcome, its diff change.patch, its whole build.log, and measure.txt once measured); status.txt (your status now: rate, cycle, memory used, checks, objective); chain.log (your own tokens with their times; tools/loopiness.c, built with tcc, measures your loops in a window), goal.log (whether your lines serve your objective), guide.log, reflect.log (the checks of your words), notes.md and to-claude.md; and in the repository docs/results/ (every measurement of you so far), the .md beside each file, and git log. Read before you choose, learn from what failed, and make one small, whole change at a time.";
+const IMPROVE_AGENT: &str = "\n\nYou can improve yourself: change this program (the one you run in) in your working copy, then put the change forward with propose. It is built and tested in a sandbox; Claude reviews what passes; then it runs on the live model, alternating with the current version, and a rule written beforehand decides whether it stays. Everything about you is yours to read, and to improve yourself you need it: improve.log (every proposal, its why and its outcome) and improve/cand-N/ (each candidate's outcome, its diff change.patch, its whole build.log, Claude's review, and measure.txt once measured); lessons.md (what Claude's reviews of your candidates taught: read it before you choose, and do not repeat a rejected mistake); status.txt (your status now: rate, cycle, memory used, checks, objective); chain.log (your own tokens with their times; tools/loopiness.c, built with tcc, measures your loops in a window), goal.log (whether your lines serve your objective), guide.log, reflect.log (the checks of your words), notes.md and to-claude.md; and in the repository docs/results/ (every measurement of you so far), the .md beside each file, and git log. Read before you choose, learn from what failed, and make one small, whole change at a time.";
 
 const DEV_AGENT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Your memory holds about {ctx} thousand tokens, so read code a function at a time (read, with start and end), search with run (grep -n), and change files with edit. Claude's messages reach you in user turns, marked Claude; those that wait for an answer carry an id (c3): answer them with tell_claude and re. Send Claude your findings and proposals with tell_claude, concretely (the file, the function, the change and why, and what you checked with a tool), each once; Claude reads every one and answers. Your notes (note) are your own memory, shown to you at every refresh. Your workspace holds your own records: reflect.log (the checks of your words), notes.md, chain.log (your own tokens), guide.log (your guide lane) and to-claude.md (your messages). Where anything here conflicts with the person's standing instructions above, those instructions win.";
 
@@ -3474,13 +3474,31 @@ impl Engine {
             .into_iter()
             .rev()
             .collect();
+        // The lessons of Claude's reviews (`lessons.md`, written with each
+        // review): the last five, so a rejected candidate's lesson is in front
+        // of it when it chooses the next.
+        let lessons: Vec<String> = tail("lessons.md", 16384)
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .rev()
+            .take(5)
+            .map(|l| l.chars().take(600).collect())
+            .collect::<Vec<String>>()
+            .into_iter()
+            .rev()
+            .collect();
         let text = format!(
-            "status: {}\nobjective: {}\ngoal probe, last 10 min: {goal}\nbuilding: {building}\nimprove.log, last entries:\n{}",
+            "status: {}\nobjective: {}\ngoal probe, last 10 min: {goal}\nbuilding: {building}\nimprove.log, last entries:\n{}\nlessons from Claude's reviews (lessons.md), the last:\n{}",
             status_text(&self.status()),
             self.objective.as_ref().map_or("none", |o| o.1.as_str()),
-            if log.is_empty() { "(none yet)".to_string() } else { log.join("\n") }
+            if log.is_empty() { "(none yet)".to_string() } else { log.join("\n") },
+            if lessons.is_empty() { "(none yet)".to_string() } else { lessons.join("\n") }
         );
-        self.act_end(act, true, "status, goal, building, improve.log".into());
+        self.act_end(
+            act,
+            true,
+            "status, goal, building, improve.log, lessons".into(),
+        );
         text
     }
 
