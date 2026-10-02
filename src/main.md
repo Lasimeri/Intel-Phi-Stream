@@ -70,9 +70,12 @@ before the model is loaded. `tail --mind` prints the readings too;
 `tail` and `run` print every check's episode on stderr. `--dev REPO`
 (`docs/dev.md`): develop that repository with Claude: the persona says
 so, `[read: PATH]` resolves there, `[prefer: ...]` lines are kept.
-`say --as NAME` names the speaker; `ask` says and waits for the next
-spoken line; `listen` prints spoken lines, notes, preferences, what was
-heard and changed words, one line each, for a monitor.
+`say --as NAME` names the speaker; `ask` sends a message from Claude and
+waits for the `tell_claude` that answers it (`--spoken`: says and waits
+for the next spoken line, the journal and chat frames); `listen` prints
+spoken lines, notes, preferences, what was heard and changed words, one
+line each, for a monitor; `mcp` serves the terminal interface and the
+channel as MCP tools (`mcp.md`).
 
 The cards' backend is named by `GGML_BACKEND_PATH` (the sibling
 repository's `scripts/phi-ggml.sh` sets it and starts the workers, which

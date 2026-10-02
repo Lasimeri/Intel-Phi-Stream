@@ -16,6 +16,7 @@ mod format;
 mod gate;
 mod lens;
 mod llm;
+mod mcp;
 mod mind;
 mod playout;
 mod probe;
@@ -299,11 +300,16 @@ enum Cmd {
         who: Option<String>,
         text: Vec<String>,
     },
-    /// Say something and wait for what the stream says aloud next (its
-    /// spoken line), printed on stdout (docs/dev.md).
+    /// A message from Claude that waits for its answer: the stream's
+    /// `tell_claude` that answers it, printed on stdout (the agent frame;
+    /// docs/dev.md). With `--spoken`, said as anyone (`--as`) and answered
+    /// by its next spoken line instead (the journal and chat frames).
     Ask {
         #[arg(long = "as", value_name = "NAME")]
         who: Option<String>,
+        /// Wait for its next spoken line rather than a `tell_claude`.
+        #[arg(long)]
+        spoken: bool,
         /// Give up after this many seconds.
         #[arg(long, default_value_t = 180)]
         timeout: u64,
@@ -312,6 +318,10 @@ enum Cmd {
         thoughts: bool,
         text: Vec<String>,
     },
+    /// The management interface as an MCP server on stdin and stdout (an
+    /// agent reads and types into the real terminal interface, in tmux;
+    /// src/mcp.md).
+    Mcp,
     /// What it says aloud, notes, prefers, and the checks that changed a
     /// word, one line each as it happens (for a monitor; docs/dev.md).
     Listen,
@@ -823,6 +833,7 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Mind(r)) => eprintln!("\x1b[2mmind {}\x1b[0m", mind::line(&r)),
             Ok(Event::Reflect(e)) => eprintln!("\x1b[2mreflect {}\x1b[0m", reflect::line(&e)),
             Ok(Event::Objective(_, t)) => eprintln!("\x1b[2mobjective: {t}\x1b[0m"),
+            Ok(Event::ToClaude(m)) => eprintln!("\x1b[2mto Claude m{}: {}\x1b[0m", m.id, m.text),
             Ok(Event::TermStart(_, _, c)) => eprintln!("\x1b[2m$ {c}\x1b[0m"),
             Ok(Event::TermEnd(_, r)) => eprintln!("\x1b[2m{}\x1b[0m", r.out),
             Ok(Event::Act(a)) => eprintln!(
@@ -931,6 +942,25 @@ fn lines_of(mut c: Client) -> mpsc::Receiver<String> {
     rx
 }
 
+/// `ask`: a message from Claude, and the stream's answer to it
+/// (`client::ask_claude`) on stdout; its ids and the wait on stderr.
+fn ask_claude(socket: &Path, text: &str, timeout: u64) -> Result<()> {
+    let t0 = std::time::Instant::now();
+    let (id, answer) = client::ask_claude(socket, text, std::time::Duration::from_secs(timeout))?;
+    match answer {
+        Some(m) => {
+            eprintln!(
+                "{id} answered by m{} in {:.1} s",
+                m.id,
+                t0.elapsed().as_secs_f32()
+            );
+            println!("{}", m.text);
+            Ok(())
+        }
+        None => anyhow::bail!("no answer to {id} within {timeout} s (it waits for its next turn)"),
+    }
+}
+
 /// `ask`: say `text`, then print the next line the stream says aloud
 /// (what it placed after the message was heard, its spoken pieces up to
 /// the end of their line). Its thoughts meanwhile go to stderr when asked.
@@ -1021,6 +1051,16 @@ fn listen(socket: &Path) -> Result<()> {
                 heard.clear();
             }
             Msg::Note(n) => writeln!(out, "{} {n}", clock::hms(clock::now_us()))?,
+            // What it sent Claude, whole (one line, newlines shown as \n).
+            Msg::ToClaude(m) if m.t_us >= t0 => writeln!(
+                out,
+                "{} to Claude m{}{}: {}",
+                clock::hms(m.t_us),
+                m.id,
+                m.re.map(|r| format!(" (answering {r})"))
+                    .unwrap_or_default(),
+                m.text.replace('\n', "\\n")
+            )?,
             Msg::Reflect(e) if e.outcome == reflect::Outcome::Changed => writeln!(
                 out,
                 "{} changed {:?} to {:?} at position {} ({})",
@@ -1047,11 +1087,14 @@ fn main() -> Result<()> {
         Cmd::Say { who, text } => ask(&socket, &say_line(who.as_deref(), &text.join(" "))),
         Cmd::Ask {
             who,
+            spoken,
             timeout,
             thoughts,
             text,
-        } => converse(&socket, who.as_deref(), &text.join(" "), timeout, thoughts),
+        } if spoken => converse(&socket, who.as_deref(), &text.join(" "), timeout, thoughts),
+        Cmd::Ask { timeout, text, .. } => ask_claude(&socket, &text.join(" "), timeout),
         Cmd::Listen => listen(&socket),
+        Cmd::Mcp => mcp::run(&socket),
         Cmd::Feed { path } => ask(&socket, &format!("feed {}", expand_home(&path))),
         Cmd::KeepAt { p } => ask(&socket, &format!("keep-at {p}")),
         Cmd::Objective { text } => {

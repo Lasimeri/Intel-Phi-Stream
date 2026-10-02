@@ -79,8 +79,17 @@ fn tools() -> Vec<String> {
         ),
         tool(
             "note",
-            "Keep a line across time: it is shown to you again whenever your memory is refreshed.",
+            "Keep a line in your own memory across time: it is shown to you again whenever your memory is refreshed, so keep each thing once. It is not a message: to tell Claude something, use tell_claude.",
             &[("text", "string", "The note.")],
+            &["text"],
+        ),
+        tool(
+            "tell_claude",
+            "Send a message to Claude, who develops this program with you and reads every message at once: a proposal (the file, the function, the change and why, and what you checked), a finding, a question, or your answer to a message of Claude's. Claude answers in a later turn.",
+            &[
+                ("text", "string", "The message."),
+                ("re", "string", "The id of Claude's message this answers (as c3), if it answers one."),
+            ],
             &["text"],
         ),
     ]
@@ -147,30 +156,50 @@ fn parse_block(block: &str) -> Option<Call> {
 }
 
 /// The user turn carrying the results back, in the template's tool form
-/// (each in its own `<tool_response>`), and the next assistant turn opened
-/// on its thinking.
-pub fn responses_turn(results: &[String]) -> String {
-    let mut s = String::from("<|im_end|>\n<|im_start|>user");
-    for r in results {
-        s.push_str("\n<tool_response>\n");
-        s.push_str(r.trim_end());
-        s.push_str("\n</tool_response>");
+/// (each in its own `<tool_response>`), then what waited for it (`extra`:
+/// lines from the system, messages) in a user turn of its own, and the
+/// next assistant turn opened on its thinking.
+pub fn responses_turn(results: &[String], extra: &[String]) -> String {
+    let mut s = String::new();
+    if !results.is_empty() {
+        s.push_str("<|im_end|>\n<|im_start|>user");
+        for r in results {
+            s.push_str("\n<tool_response>\n");
+            s.push_str(r.trim_end());
+            s.push_str("\n</tool_response>");
+        }
+    }
+    if !extra.is_empty() {
+        s.push_str("<|im_end|>\n<|im_start|>user\n");
+        s.push_str(&extra.join("\n"));
     }
     s.push_str("<|im_end|>\n<|im_start|>assistant\n<think>\n");
     s
 }
 
-/// The user turn after a turn with no tool call: the time and the
-/// objective, so it goes on; the next assistant turn opened on its
-/// thinking.
-pub fn continue_turn(time: &str, objective: Option<&str>) -> String {
+/// The user turn after a turn with no tool call: the time, what waited
+/// for it, and the objective, so it goes on; the next assistant turn
+/// opened on its thinking.
+pub fn continue_turn(time: &str, objective: Option<&str>, extra: &[String]) -> String {
     let goal = match objective {
         Some(o) => format!("Your objective: {o}"),
         None => "You have no objective yet.".to_string(),
     };
+    let waited = if extra.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", extra.join("\n"))
+    };
     format!(
-        "<|im_end|>\n<|im_start|>user\n[{time}] {goal} Go on: reason, then act with a tool; what you have not checked with a tool, you do not know.<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        "<|im_end|>\n<|im_start|>user\n{waited}[{time}] {goal} Go on: reason, then act with a tool; what you have not checked with a tool, you do not know.<|im_end|>\n<|im_start|>assistant\n<think>\n"
     )
+}
+
+/// The summary asked for in a user turn of its own, and its answer opened
+/// with no thinking and the summary's first words (`start`): asked inside
+/// a turn, it called tools and the summary kept the template's marks.
+pub fn summary_turn(ask: &str, start: &str) -> String {
+    format!("<|im_end|>\n<|im_start|>user\n{ask}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{start}")
 }
 
 #[cfg(test)]
@@ -209,10 +238,26 @@ mod tests {
         assert!(s.contains("{\"type\": \"function\", \"function\": {\"name\": \"run\", "));
         assert!(s.contains("\"name\": \"write\""));
         assert!(s.ends_with("</IMPORTANT>"));
-        let r = responses_turn(&["a".into(), "b\n".into()]);
+        let r = responses_turn(&["a".into(), "b\n".into()], &[]);
         assert_eq!(
             r,
             "<|im_end|>\n<|im_start|>user\n<tool_response>\na\n</tool_response>\n<tool_response>\nb\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert!(s.contains("\"name\": \"tell_claude\""));
+    }
+
+    #[test]
+    fn what_waited_comes_in_a_user_turn_of_its_own() {
+        let r = responses_turn(&["ran".into()], &["[01:02:03] Claude: hi".into()]);
+        assert_eq!(
+            r,
+            "<|im_end|>\n<|im_start|>user\n<tool_response>\nran\n</tool_response><|im_end|>\n<|im_start|>user\n[01:02:03] Claude: hi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        let c = continue_turn("01:02:04", Some("x"), &["a line".into()]);
+        assert!(c.starts_with("<|im_end|>\n<|im_start|>user\na line\n[01:02:04] Your objective: x"));
+        let s = summary_turn("[t] write it", "What I was working on: ");
+        assert!(
+            s.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\nWhat I was working on: ")
         );
     }
 }

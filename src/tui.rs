@@ -1609,6 +1609,11 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                         v.act_push(&a);
                         dirty = true;
                     }
+                    Ok(Msg::ToClaude(m)) => {
+                        let re = m.re.map(|r| format!(", answering {r}")).unwrap_or_default();
+                        v.log_push(m.t_us, format!("to Claude (m{}{re}): {}", m.id, m.text));
+                        dirty = true;
+                    }
                     Ok(Msg::Term(t)) => {
                         if !t.end {
                             v.log_push(t.t_us, format!("ran: {}", t.text));

@@ -30,7 +30,12 @@ check (its question, each piece of its reasoning, its outcome; `Delib`,
 `delib_line`), and `objective t=US TEXT`: what the stream is working
 toward, when it changes. Both are additive: a terminal from before them
 notes each kind once and drops it. `act start t=US id=N kind=K TEXT` and `act end t=US id=N ok=0|1 TEXT`
-carry each tool use and its result (`ActLine`, `act_line`). `term start t=US id=N COMMAND` and `term end
+carry each tool use and its result (`ActLine`, `act_line`). `claude t=US
+id=mN re=cM|- TEXT` is a message the stream sent Claude (`tell_claude`;
+`ToClaude`, `to_claude_line`). `ask_claude` sends a message from Claude
+(`ask`) and waits, with a deadline, for the `claude` line that answers
+it: the first naming its id (as `c3`, `3` or `message c3`), or the first
+after it naming none. `term start t=US id=N COMMAND` and `term end
 t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT` carry its terminal
 (`term_end_line`, `TermLine`). `leaks` in the status counts the lines
 beginning with `«` that the mind wrote itself (the journal frame's one

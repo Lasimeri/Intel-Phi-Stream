@@ -100,6 +100,8 @@ pub enum Msg {
     Term(TermLine),
     /// A tool it used, or that use's result.
     Act(ActLine),
+    /// A message it sent Claude (`tell_claude`).
+    ToClaude(ToClaude),
     Ok(String),
     Err(String),
     Bye,
@@ -243,6 +245,11 @@ pub fn parse(line: &str) -> Msg {
         // term start t=US id=N COMMAND, or term end t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT
         "term" => match parse_term(rest) {
             Some(t) => Msg::Term(t),
+            None => Msg::Other(line.to_string()),
+        },
+        // claude t=US id=mN re=cM|- TEXT
+        "claude" => match parse_to_claude(rest) {
+            Some(m) => Msg::ToClaude(m),
             None => Msg::Other(line.to_string()),
         },
         // objective t=US TEXT
@@ -478,6 +485,89 @@ impl Client {
             }
         }
     }
+}
+
+/// A message the stream sent Claude (`tell_claude`): its id (`m3`), when,
+/// the id of Claude's message it answers (`c2`), if any, and its text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToClaude {
+    pub id: u64,
+    pub t_us: i64,
+    pub re: Option<String>,
+    pub text: String,
+}
+
+/// A `claude` line as the service sends it.
+pub fn to_claude_line(m: &ToClaude) -> String {
+    format!(
+        "claude t={} id=m{} re={} {}",
+        m.t_us,
+        m.id,
+        m.re.as_deref().unwrap_or("-"),
+        escape(&m.text)
+    )
+}
+
+/// A message from Claude that waits for its answer (`ask`), sent; then
+/// the stream's `tell_claude` that answers it: the first that names its
+/// id (`re`), or else the first after it that names none. The message's
+/// id and the answer, `None` when none came within `timeout`.
+pub fn ask_claude(
+    socket: &Path,
+    text: &str,
+    timeout: std::time::Duration,
+) -> Result<(String, Option<ToClaude>)> {
+    let mut c = Client::connect(socket)?;
+    let reply = c.ask(&format!("ask {}", escape(text)))?;
+    // "asked c3 t=US"
+    let mut words = reply.split_whitespace().skip(1);
+    let id = words.next().unwrap_or("").to_string();
+    let t0: i64 = words
+        .next()
+        .and_then(|w| w.strip_prefix("t="))
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0);
+    c.send("tail")?;
+    // Its lines in a thread of their own, so the wait has a deadline.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(Some(l)) = c.line() {
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = match rx.recv_timeout(left) {
+            Ok(l) => l,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok((id, None)),
+            Err(_) => bail!("the service closed the connection"),
+        };
+        // Its id as it wrote it: c3, 3, message c3.
+        let digits = |s: &str| s.chars().filter(char::is_ascii_digit).collect::<String>();
+        match parse(&line) {
+            Msg::ToClaude(m)
+                if m.t_us >= t0 && m.re.as_deref().is_none_or(|r| digits(r) == digits(&id)) =>
+            {
+                return Ok((id, Some(m)));
+            }
+            Msg::Bye => bail!("the service stopped"),
+            _ => {}
+        }
+    }
+}
+
+fn parse_to_claude(rest: &str) -> Option<ToClaude> {
+    let f: Vec<&str> = rest.splitn(4, ' ').collect();
+    let get = |k: &str| f.iter().take(3).find_map(|x| x.strip_prefix(k));
+    Some(ToClaude {
+        t_us: get("t=")?.parse().ok()?,
+        id: get("id=m")?.parse().ok()?,
+        re: get("re=").filter(|r| *r != "-").map(str::to_string),
+        text: unescape(f.get(3).copied().unwrap_or("")),
+    })
 }
 
 #[cfg(test)]

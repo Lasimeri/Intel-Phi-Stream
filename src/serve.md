@@ -13,6 +13,11 @@ running mind and the 40-second load happens once.
   text as `text` lines and the last status, then every `text`, `status`,
   `note`, `mind` and `reflect` line as it happens, written by a thread per subscriber, until the
   client goes away or the engine stops (`bye`).
+- `ask TEXT` queues a message from Claude that waits for an answer: its
+  id (`c1`, `c2`, ... for the life of the service) and time come back as
+  `ok asked c3 t=US`, and the stream answers with `tell_claude` naming
+  it; `claude` lines (its messages to Claude) are kept with the terminal's
+  lines for a new `tail`.
 - `say TEXT`, `say-as NAME TEXT` (the speaker named, `docs/dev.md`) and
   `feed PATH` queue what is said or handed over (the file
   is read here, in the service's own file system); `persona PATH` reads

@@ -79,6 +79,22 @@ impl Repo {
         Self { files }
     }
 
+    /// The repository as the stream's working copy sees it: `root` with the
+    /// files of `upper` (the overlay's upper layer: what it wrote, by the
+    /// same relative paths) over it.
+    pub fn load_over(root: &Path, upper: Option<&Path>) -> Self {
+        let mut repo = Self::load(root);
+        if let Some(u) = upper.filter(|u| u.is_dir()) {
+            for (rel, text) in Self::load(u).files {
+                match repo.files.iter_mut().find(|(p, _)| *p == rel) {
+                    Some(f) => f.1 = text,
+                    None => repo.files.push((rel, text)),
+                }
+            }
+        }
+        repo
+    }
+
     fn holds(&self, name: &str) -> bool {
         self.files.iter().any(|(_, t)| has_word(t, name))
     }

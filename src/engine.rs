@@ -110,6 +110,8 @@ pub enum Event {
     Delib(crate::client::Delib),
     /// A tool it used, or that use's result (`act` lines).
     Act(crate::client::ActLine),
+    /// A message it sent Claude (`tell_claude`).
+    ToClaude(crate::client::ToClaude),
     Stopped,
 }
 
@@ -121,6 +123,9 @@ pub enum Command {
     SayAs(String, String, i64),
     /// A document handed over, with its label and when it was handed over.
     Feed(String, String, i64),
+    /// A message from Claude that waits for an answer: its id (the n of
+    /// `cn`), its text, when it was sent (`phi-stream ask`).
+    Ask(u64, String, i64),
     Pause,
     Resume,
     /// Tokens a cycle reads beside the live token; 0 adapts to the amount.
@@ -550,6 +555,15 @@ pub struct Engine {
     awaiting: Option<AgentWait>,
     im_end: i32,
     copy_upper: Option<PathBuf>,
+    /// The agent frame: what waits for its next user turn (lines from the
+    /// system, what was said or handed over), never put inside a turn (put
+    /// mid-turn, they cut its tool calls in two and it took to writing such
+    /// lines itself); when its current turn opened; a summary waiting for
+    /// the turn's end; the id of its next message to Claude.
+    waiting: Vec<String>,
+    turn_open_mono: i64,
+    summary_due: Option<Summary>,
+    to_claude_next: u64,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -610,6 +624,11 @@ pub struct Engine {
 const MAX_READ_BYTES: u64 = 1 << 20;
 /// The longest a quit waits for its summary (microseconds).
 const QUIT_WAIT_US: i64 = 120_000_000;
+/// The agent frame: how long a turn may run while something waits for
+/// it (its turns took about 14 s on the live service), and while a quit
+/// waits for the summary.
+const AGENT_TURN_MAX_US: i64 = 90_000_000;
+const AGENT_QUIT_GRACE_US: i64 = 15_000_000;
 /// Commands that may wait for its terminal at once, and its time limit.
 const MAX_TERM_PENDING: usize = 4;
 /// How long without a tool before it is reminded to check something real.
@@ -762,18 +781,29 @@ impl Engine {
                 cpu: std::thread::available_parallelism().map_or(0, |n| n.get() - 1),
             })
         });
+        // Its messages to Claude are numbered on from those it sent before.
+        let to_claude_next =
+            fs::read_to_string(cfg.workspace.join("to-claude.md")).map_or(0, |s| {
+                s.lines().filter(|l| l.starts_with("## m")).count() as u64
+            }) + 1;
         let notes = read_notes(&cfg.workspace.join("notes.md"));
         let prefs = read_notes(&cfg.workspace.join("preferences.md"));
         // In development, notes already kept are checked against the code too
         // (`verify.md`): a false one carries its mark rather than being believed.
+        // A mark kept from an earlier check is checked again (the code moves
+        // on, and a mark made against the repository alone was false for its
+        // working copy's files); a note kept twice is kept once.
+        let mut notes: Vec<String> = notes.iter().map(|n| unmarked(n).to_string()).collect();
+        let mut seen = std::collections::HashSet::new();
+        notes.retain(|n| seen.insert(n.trim().to_string()));
         let notes = match &cfg.dev {
             Some(root) => {
-                let repo = verify::Repo::load(root);
+                let repo = verify::Repo::load_over(root, copy_upper.as_deref());
                 notes
                     .into_iter()
                     .map(|n| {
                         let f = repo.check(&n);
-                        if f.clean() || n.contains("[unverified:") {
+                        if f.clean() {
                             n
                         } else {
                             let mut why = Vec::new();
@@ -888,6 +918,10 @@ impl Engine {
             awaiting: None,
             im_end,
             copy_upper,
+            waiting: Vec::new(),
+            turn_open_mono: clock::mono_us(),
+            summary_due: None,
+            to_claude_next,
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -1240,11 +1274,19 @@ impl Engine {
     }
 
     fn summary_ask(&self, why: Summary) -> String {
-        // The ask, its real reason (a restart was once announced as "your
-        // memory is nearly full" at 3 thousand of 205), then the summary's
-        // first words in its own voice: in the dev session it restated the
-        // instruction one word a line and ended it with --- after 34 tokens,
-        // losing its thread at the rollover.
+        // The ask, then the summary's first words in its own voice: in the
+        // dev session it restated the instruction one word a line and ended
+        // it with --- after 34 tokens, losing its thread at the rollover.
+        format!(
+            "{}{}",
+            self.framed_system(&self.summary_request(why)),
+            SUMMARY_START
+        )
+    }
+
+    /// The summary asked for, with its real reason (a restart was once
+    /// announced as "your memory is nearly full" at 3 thousand of 205).
+    fn summary_request(&self, why: Summary) -> String {
         let reason = match why {
             Summary::Full => format!(
                 "your memory is nearly full ({} of its {} tokens)",
@@ -1254,11 +1296,12 @@ impl Engine {
             Summary::Restart => "the program you run in restarts now (an update or a change), and you resume after it".to_string(),
             Summary::Persona => "your persona changes now, and you resume under the new one".to_string(),
         };
-        format!(
-            "{}{}",
-            self.framed_system(&format!("{reason}. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone. End the summary with a line that is only ---")),
-            SUMMARY_START
-        )
+        let tools = if self.cfg.agent {
+            " Write it as your answer now, with no tool call."
+        } else {
+            ""
+        };
+        format!("{reason}. Write a compact summary of your threads, what matters, what you learned, and what you meant to do next, so that you can resume from it alone.{tools} End the summary with a line that is only ---")
     }
 
     /// Its notes and its preferences, as it is shown them again (a
@@ -1285,10 +1328,10 @@ impl Engine {
     /// against the code (`verify.md`): a line naming what the repository
     /// does not hold, empty when it names nothing false.
     fn checked_line(&self, text: &str) -> String {
-        let Some(root) = &self.cfg.dev else {
+        let Some(repo) = self.repo_view() else {
             return String::new();
         };
-        let f = verify::Repo::load(root).check(text);
+        let f = repo.check(text);
         if f.clean() {
             return String::new();
         }
@@ -1629,8 +1672,7 @@ impl Engine {
             Some((_, t)) => format!("your objective is now: {t}"),
             None => "you have no objective now: you think, and your tool lines and » lines do nothing until you are given one".to_string(),
         };
-        let msg = self.framed_system(&said);
-        let _ = self.put(msg);
+        let _ = self.tell(&said);
         let _ = self.tx.send(Event::Objective(now, text.to_string()));
         self.note(format!(
             "objective: {}",
@@ -1703,16 +1745,31 @@ impl Engine {
             .map_or("", |(_, c)| c)
             .to_string();
         let (calls, bad) = crate::agent::parse_calls(&content);
+        // A summary due comes first; the turn's calls are not run.
+        if let Some(why) = self.summary_due.take() {
+            if !calls.is_empty() {
+                self.note(format!(
+                    "{} calls not run: the summary comes first",
+                    calls.len()
+                ));
+            }
+            return self.open_summary(why);
+        }
         if calls.is_empty() {
+            let extra = self.take_waiting();
             let turn = if bad > 0 {
                 self.note(format!("{bad} tool calls did not parse"));
-                crate::agent::responses_turn(&[format!(
-                    "{bad} tool call(s) did not parse: write <tool_call>, then <function=NAME>, then each <parameter=KEY>, its value and </parameter>, then </function> and </tool_call>"
-                )])
+                crate::agent::responses_turn(
+                    &[format!(
+                        "{bad} tool call(s) did not parse: write <tool_call>, then <function=NAME>, then each <parameter=KEY>, its value and </parameter>, then </function> and </tool_call>"
+                    )],
+                    &extra,
+                )
             } else {
                 crate::agent::continue_turn(
                     &clock::hms(clock::now_us()),
                     self.objective.as_ref().map(|o| o.1.as_str()),
+                    &extra,
                 )
             };
             return self.agent_open(turn);
@@ -1746,8 +1803,12 @@ impl Engine {
                     }
                     _ => "note needs a text".to_string(),
                 }),
+                "tell_claude" => Some(match c.param("text") {
+                    Some(t) if !t.trim().is_empty() => self.send_claude(t.trim(), c.param("re")),
+                    _ => "tell_claude needs a text".to_string(),
+                }),
                 other => Some(format!(
-                    "there is no function {other:?}: the functions are run, read, write and note"
+                    "there is no function {other:?}: the functions are run, read, write, note and tell_claude"
                 )),
             };
             wait.results[i] = result;
@@ -1772,7 +1833,97 @@ impl Engine {
         }
         let w = self.awaiting.take().unwrap();
         let results: Vec<String> = w.results.into_iter().flatten().collect();
-        self.agent_open(crate::agent::responses_turn(&results))
+        if let Some(why) = self.summary_due.take() {
+            return self.open_summary(why);
+        }
+        let extra = self.take_waiting();
+        self.agent_open(crate::agent::responses_turn(&results, &extra))
+    }
+
+    /// The agent frame, between turns' ends: a turn that has run past
+    /// `AGENT_TURN_MAX_US` (`AGENT_QUIT_GRACE_US` when quitting) while
+    /// something waits for it (a summary, a line, a message) is closed, its
+    /// unfinished calls not run, and the waiting comes in; circling words
+    /// are told at the next turn.
+    fn agent_stalled(&mut self) -> Result<()> {
+        let mono = clock::mono_us();
+        if self.nudges_on
+            && !self.in_code
+            && mono - self.last_nudge_mono >= self.cfg.nudge_every_us
+            && self.circling()
+        {
+            self.last_nudge_mono = mono;
+            self.tell(
+                "your thoughts have been circling the same words; move on to something else, concretely",
+            )?;
+            self.note("the thoughts were circling; told at the next turn".into());
+        }
+        if self.awaiting.is_some()
+            || self.summary.is_some()
+            || self.reading.is_some()
+            || self.chase.is_some()
+            || self.check.is_some()
+        {
+            return Ok(());
+        }
+        let due = self.summary_due.is_some() || !self.waiting.is_empty() || !self.queue.is_empty();
+        let limit = if self.quit_deadline.is_some() {
+            AGENT_QUIT_GRACE_US
+        } else {
+            AGENT_TURN_MAX_US
+        };
+        if !due || mono - self.turn_open_mono < limit {
+            return Ok(());
+        }
+        self.note(format!(
+            "its turn ran {} s with something waiting for it: closed",
+            (mono - self.turn_open_mono) / 1_000_000
+        ));
+        // A thought cut off is closed first, so the turn reads as one.
+        let close = if self.speaking { "" } else { "\n</think>\n\n" };
+        let turn = match self.summary_due.take() {
+            Some(why) => {
+                let ask = format!(
+                    "[{}] {}",
+                    clock::hms(clock::now_us()),
+                    self.summary_request(why)
+                );
+                format!("{close}{}", crate::agent::summary_turn(&ask, SUMMARY_START))
+            }
+            None => {
+                let extra = self.take_waiting();
+                format!(
+                    "{close}{}",
+                    crate::agent::continue_turn(
+                        &clock::hms(clock::now_us()),
+                        self.objective.as_ref().map(|o| o.1.as_str()),
+                        &extra,
+                    )
+                )
+            }
+        };
+        let summary = turn.ends_with(SUMMARY_START);
+        self.agent_open(turn)?;
+        if summary {
+            self.summary = Some(vec![self.next]);
+            self.speaking = true;
+        }
+        Ok(())
+    }
+
+    /// The agent frame: the summary asked in a user turn of its own, its
+    /// answer opened with the summary's first words and no thinking; the
+    /// summary is collected from its first token (`after`).
+    fn open_summary(&mut self, why: Summary) -> Result<()> {
+        let ask = format!(
+            "[{}] {}",
+            clock::hms(clock::now_us()),
+            self.summary_request(why)
+        );
+        self.agent_open(crate::agent::summary_turn(&ask, SUMMARY_START))?;
+        self.summary = Some(vec![self.next]);
+        self.speaking = true;
+        Ok(())
     }
 
     /// The next turn opened: `turn` (which begins by ending the last one)
@@ -1789,6 +1940,7 @@ impl Engine {
         self.speaking = false;
         self.say(turn, Kind::Given);
         self.turn_start = self.history.len();
+        self.turn_open_mono = clock::mono_us();
         Ok(())
     }
 
@@ -2049,13 +2201,56 @@ impl Engine {
         }
     }
 
+    /// `tell_claude`: a message to Claude, kept in `to-claude.md` and sent
+    /// to the terminals as a `claude` line (`phi-stream ask` waits for one,
+    /// the MCP server's `inbox` reads them).
+    fn send_claude(&mut self, text: &str, re: Option<&str>) -> String {
+        let id = self.to_claude_next;
+        self.to_claude_next += 1;
+        let t = clock::now_us();
+        let re = re.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+        let act = self.act("tell_claude", text);
+        let path = self.cfg.workspace.join("to-claude.md");
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+            let answers = re
+                .as_ref()
+                .map_or(String::new(), |r| format!(", answering {r}"));
+            let _ = writeln!(f, "## m{id} at {}{answers}\n\n{text}\n", clock::datetime(t));
+        }
+        let _ = self.tx.send(Event::ToClaude(crate::client::ToClaude {
+            id,
+            t_us: t,
+            re,
+            text: text.to_string(),
+        }));
+        let said = format!("sent to Claude as m{id}; Claude answers in a later turn");
+        self.act_end(act, true, said.clone());
+        said
+    }
+
+    /// The working copy's view of the repository, for the checks of its
+    /// notes (`verify.md`): the repository with what it wrote over it (the
+    /// overlay's upper layer); checked against the repository alone, its own
+    /// new files were "nowhere", and it noted the same proposal 131 times.
+    fn repo_view(&self) -> Option<verify::Repo> {
+        let root = self.cfg.dev.as_ref()?;
+        Some(verify::Repo::load_over(root, self.copy_upper.as_deref()))
+    }
+
     fn add_note(&mut self, body: &str) -> String {
+        // A note already kept is not kept again: shown at every refresh, a
+        // copy adds nothing (the live service kept one 131 times).
+        if self.notes.iter().any(|n| unmarked(n).trim() == body.trim()) {
+            self.note("a note already kept was not kept again".into());
+            return "already kept in notes.md (it is shown to you at every refresh); each thing is kept once. To tell Claude something, use tell_claude".to_string();
+        }
         // In development a note's code is checked against the code
         // (`verify.md`): a name that is not there is marked on the note, and
         // the stream is told what is.
         let mut kept = body.to_string();
-        if let Some(root) = self.cfg.dev.clone() {
-            let f = verify::Repo::load(&root).check(body);
+        let mut checked = String::new();
+        if let Some(repo) = self.repo_view() {
+            let f = repo.check(body);
             let mut said = Vec::new();
             if !f.missing.is_empty() {
                 said.push(format!(
@@ -2074,7 +2269,11 @@ impl Engine {
                     said[..said.len() - f.lines.len()].join("; ")
                 );
             }
-            if !said.is_empty() {
+            // The agent frame has the check in the tool's result; a line
+            // after it said the same again.
+            if !said.is_empty() && self.cfg.agent {
+                checked = said.join("; ");
+            } else if !said.is_empty() {
                 let msg = self.framed_system(&format!(
                     "your note checked against the code: {}{}",
                     said.join("; "),
@@ -2093,13 +2292,12 @@ impl Engine {
             let _ = writeln!(f, "- {kept}");
         }
         self.note(format!("noted: {kept}"));
-        if kept == body {
-            "kept in notes.md".to_string()
-        } else {
-            format!(
-                "kept in notes.md, marked unverified: {}",
-                kept[body.len()..].trim()
-            )
+        match (kept == body, checked.is_empty()) {
+            (true, true) => "kept in notes.md".to_string(),
+            (true, false) => format!("kept in notes.md; checked against the code: {checked}"),
+            (false, _) => format!(
+                "kept in notes.md, marked unverified (checked against your working copy of the repository: {checked})"
+            ),
         }
     }
 
@@ -2284,6 +2482,41 @@ impl Engine {
         self.direct(&tokens)?;
         self.say(framed, Kind::Given);
         Ok(())
+    }
+
+    /// A line from the system to it: in the agent frame it waits for its
+    /// next user turn (`take_waiting`); otherwise it is put in now.
+    fn tell(&mut self, text: &str) -> Result<()> {
+        if self.cfg.agent {
+            self.waiting
+                .push(format!("[{}] {text}", clock::hms(clock::now_us())));
+            return Ok(());
+        }
+        let msg = self.framed_system(text);
+        self.put(msg)
+    }
+
+    /// The agent frame: what waits for its next user turn, taken: the lines
+    /// from the system, then what was said or handed over, within the room
+    /// its context has (`read_room`); one that does not fit is refused with
+    /// its size (its own proposal: a feed past the room filled the context).
+    fn take_waiting(&mut self) -> Vec<String> {
+        let mut out = std::mem::take(&mut self.waiting);
+        let mut room = self.read_room();
+        while let Some((text, label)) = self.queue.pop_front() {
+            let n = self.tok(&text, false).map_or(0, |t| t.len());
+            if n > room {
+                self.note(format!("refused {label}: {n} tokens, room {room}"));
+                out.push(format!(
+                    "[{}] {label} was not brought in: {n} tokens, more than the {room} there is room for now",
+                    clock::hms(clock::now_us())
+                ));
+            } else {
+                room -= n;
+                out.push(text.trim().to_string());
+            }
+        }
+        out
     }
 
     fn chunk_for(&self, remaining: usize) -> usize {
@@ -3240,11 +3473,11 @@ impl Engine {
                 Some(root) => p.strip_prefix(root).unwrap_or(&p).display().to_string(),
                 None => path.to_string(),
             };
-            let msg = self.framed_system(&format!(
+            let msg = format!(
                 "{} is {n} tokens in {lines} lines and there is room for about {room} now: read it by lines, [read: {short}:{first}-{}]",
                 p.display(),
                 first + fit - 1
-            ));
+            );
             self.note(format!(
                 "{} is too big to read now ({n} tokens, room {room})",
                 p.display()
@@ -3254,7 +3487,7 @@ impl Engine {
                 false,
                 format!("too big to read now: {n} tokens, room {room}; read it by lines"),
             );
-            return self.put(msg);
+            return self.tell(&msg);
         }
         self.queue
             .push_back((framed, format!("read {}", p.display())));
@@ -3283,8 +3516,7 @@ impl Engine {
         }
         self.failed_reads.insert(key.clone(), mono);
         self.last_read_failure_mono = mono;
-        let msg = self.framed_system(&format!("{key} could not be read: {e}"));
-        self.put(msg)
+        self.tell(&format!("{key} could not be read: {e}"))
     }
 
     /// After a cycle: the summary's end, the turn's end, the mind's own
@@ -3420,10 +3652,26 @@ impl Engine {
             } else {
                 Summary::Full
             };
+            // The agent frame: the summary is asked in its own user turn, at
+            // the end of the turn it is in (`open_summary`); asked inside a
+            // turn, it called tools and the summary kept the template's marks.
+            if self.cfg.agent {
+                if self.summary_due.is_none() {
+                    self.summary_due = Some(why);
+                    self.note("a summary is due at the end of its turn".into());
+                }
+                return self.agent_stalled();
+            }
             let ask = self.summary_ask(why);
             self.put(ask)?;
             self.summary = Some(Vec::new());
             return Ok(());
+        }
+
+        // The agent frame: nothing is put inside its turns; what waits for
+        // it comes in its next user turn, and a turn too long is closed.
+        if self.cfg.agent {
+            return self.agent_stalled();
         }
 
         // The clock: after a stretch with nothing from outside, the time is
@@ -3490,6 +3738,20 @@ impl Engine {
         if idle {
             if let Some((text, label)) = self.queue.pop_front() {
                 let tokens = self.tok(&text, false)?;
+                // Within the room the context has, whatever brought it (the
+                // stream's own proposal: a feed past `direct_max` went to a
+                // reading with no check, and a big one could fill the context).
+                let room = self.read_room();
+                if tokens.len() > room {
+                    self.note(format!(
+                        "refused {label}: {} tokens, room {room}",
+                        tokens.len()
+                    ));
+                    return self.tell(&format!(
+                        "{label} was not brought in: {} tokens, more than the {room} there is room for now",
+                        tokens.len()
+                    ));
+                }
                 if tokens.len() <= self.cfg.direct_max {
                     self.direct(&tokens)?;
                     self.say(text, Kind::Given);
@@ -3543,6 +3805,20 @@ impl Engine {
                 self.last_outside_mono = clock::mono_us();
                 let text = self.framed_doc(&s, &format!("{label} is handed over"), t);
                 self.queue.push_back((text, format!("read {label}")));
+            }
+            Command::Ask(id, s, t) => {
+                self.last_outside_mono = clock::mono_us();
+                let text = if self.cfg.agent {
+                    format!(
+                        "[{}] Claude (message c{id}): {}\n(Answer it with tell_claude, re c{id}.)",
+                        clock::hms(t),
+                        s.trim()
+                    )
+                } else {
+                    self.framed_say(&format!("{} (message c{id})", s.trim()), t, Some("Claude"))
+                };
+                self.queue
+                    .push_back((text, format!("Claude's message c{id}")));
             }
             Command::Pause => self.paused = true,
             Command::Resume => self.paused = false,
@@ -3742,6 +4018,14 @@ impl Engine {
     }
 }
 
+/// A note without the mark of a check (` [unverified: ...]`, at its end).
+fn unmarked(note: &str) -> &str {
+    match note.find(" [unverified:") {
+        Some(i) if note.trim_end().ends_with(']') => &note[..i],
+        _ => note,
+    }
+}
+
 /// Why a text is degenerate, if it is (`summary` refused): the person's
 /// response delimiters in it, lines repeating earlier ones (a third or
 /// more of six or more), or its word 4-grams repeating (two fifths or more
@@ -3749,6 +4033,14 @@ impl Engine {
 fn degenerate(text: &str) -> Option<&'static str> {
     if text.contains('•') {
         return Some("delimiter fragments");
+    }
+    // The chat template's own marks: the agent frame's summary asked inside
+    // a turn came back as `<|im_start|>user` and two tool calls.
+    if ["<|im_start|>", "<|im_end|>", "<tool_call>", "<think>"]
+        .iter()
+        .any(|m| text.contains(m))
+    {
+        return Some("the chat template's marks");
     }
     let lines: Vec<&str> = text
         .lines()

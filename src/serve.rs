@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +21,10 @@ use anyhow::{Context as _, Result};
 
 use crate::client::{escape, kind_name, status_line};
 use crate::engine::{Command, Event, Kind};
+
+/// The id of the next message from Claude that waits for an answer
+/// (`ask`: c1, c2, ...).
+static ASKS: AtomicU64 = AtomicU64::new(1);
 
 const KEEP_CHARS: usize = 400_000;
 /// What a new `tail` is shown first.
@@ -185,6 +189,11 @@ pub fn serve(
                         h.push_term(line.clone());
                         h.broadcast(&line);
                     }
+                    Event::ToClaude(m) => {
+                        let line = crate::client::to_claude_line(&m);
+                        h.push_term(line.clone());
+                        h.broadcast(&line);
+                    }
                     Event::Delib(d) => {
                         let line = crate::client::delib_line(&d);
                         h.push_delib(line.clone());
@@ -272,6 +281,19 @@ fn connection(
                     .map_err(|_| "the engine is gone".to_string()),
                 _ => Err("say-as NAME TEXT".to_string()),
             },
+            // A message from Claude that waits for an answer: its id back,
+            // which the answer names (`tell_claude` with re).
+            "ask" => {
+                if arg.is_empty() {
+                    Err("ask what?".to_string())
+                } else {
+                    let id = ASKS.fetch_add(1, Ordering::SeqCst);
+                    let t = crate::clock::now_us();
+                    ctx.send(Command::Ask(id, crate::client::unescape(arg), t))
+                        .map(|_| format!("asked c{id} t={t}"))
+                        .map_err(|_| "the engine is gone".to_string())
+                }
+            }
             "feed" => match read_file(arg) {
                 Ok((text, label)) => ctx
                     .send(Command::Feed(text, label.clone(), crate::clock::now_us()))
@@ -363,7 +385,7 @@ fn connection(
                 ctx.send(Command::Quit).ok();
                 Ok("stopping".to_string())
             }
-            _ => Err(format!("unknown command {cmd}; say, feed, persona, objective, chain, chunk, temp, pause, resume, status, recent, tail, quit")),
+            _ => Err(format!("unknown command {cmd}; say, say-as, ask, feed, persona, objective, chain, chunk, set, temp, pause, resume, status, recent, tail, quit")),
         };
         match reply {
             Ok(m) => writeln!(w, "ok {m}")?,

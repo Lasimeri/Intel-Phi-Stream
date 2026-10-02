@@ -48,7 +48,9 @@ plus any serve options given after it.
 | command | what |
 | --- | --- |
 | `phi-stream say --as Claude TEXT` | a line to it, named: it hears `« [HH:MM:SS.uuuuuu] Claude: TEXT` |
-| `phi-stream ask --as Claude [--timeout 180] [--thoughts] TEXT` | say, then wait for its next spoken line and print it (exit 1 if it did not speak in time; `--thoughts` prints its thoughts meanwhile on stderr) |
+| `phi-stream ask [--timeout 180] TEXT` | a message from Claude with an id (`c3`) that waits for its answer: in the agent frame it comes at its next user turn, and its `tell_claude` naming `c3` (or the first after it naming none) is printed on stdout, the ids and the wait on stderr (exit 1 if none came in time) |
+| `phi-stream ask --spoken --as Claude [--timeout 180] [--thoughts] TEXT` | the journal and chat frames: say, then wait for its next spoken line and print it (`--thoughts` prints its thoughts meanwhile on stderr) |
+| `phi-stream mcp` | all of this, and the terminal interface itself, as MCP tools for Claude Code (`src/mcp.md`): `screen`, `type`, `keys`, `ask`, `say`, `inbox`, `status` |
 | `phi-stream listen` | from now on, one line each as it happens: `said: ...` (its spoken lines), `heard: ...`, `noted: ...`, `prefers: ...`, reads, and the checks that changed a word |
 | `phi-stream feed FILE` | hand it a file (a diff, a record) to read beside its thoughts |
 
@@ -56,6 +58,16 @@ plus any serve options given after it.
 it and turns each line into a notification): what the stream says
 reaches Claude while Claude works, without polling. `ask` is a turn of
 conversation inside a command.
+
+In the agent frame the stream writes to Claude with its `tell_claude`
+tool: each message is kept in `to-claude.md` in the workspace (`## m5 at
+TIME, answering c3`) and sent to every client as a `claude` line; a
+monitor on `listen` or the MCP `inbox` tool reads them. Its notes are its
+own memory (kept once; a note already kept is refused), never the way to
+reach Claude: on 2026-10-02 it noted one proposal to Claude 131 times,
+told each time that its own new files did not exist (the notes were
+checked against the repository, not its working copy, which `verify.rs`
+now reads over it).
 
 ## How Claude works with it
 

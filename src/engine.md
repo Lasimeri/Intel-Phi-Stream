@@ -462,3 +462,36 @@ delimiters), and the breaker's holding back cascaded. Now:
   VALUE` changes temp, top-k, top-p, min-p, dry or repeat-penalty live
   (the sampler rebuilt with its history), so a change is measured on one
   service without a restart.
+
+## The agent frame between turns, and the channel to Claude (2026-10-02)
+
+On the live service the agent frame looped: the stream noted one proposal
+to Claude 131 times in 45 minutes. Each note was checked against the
+repository, which did not hold the files it had just written to its working
+copy, so each was marked unverified and the same was put inside its next
+turn's thinking; a clock line put mid-turn cut a tool call in two; and its
+thinking came to hold only imitations of those lines, with times it made up.
+The quit's summary, asked inside a turn, came back as the template's marks
+and two tool calls. Now:
+- nothing is put inside an agent turn: `tell` holds a line from the system
+  for the next user turn, and the queue (what was said, handed over, or
+  asked by Claude) is taken there too (`take_waiting`), each within the
+  room the context has (`read_room`; one too big is refused with its size);
+  the clock and the tool reminder are not put in at all (every user turn
+  carries the time and the objective);
+- a turn that runs past `AGENT_TURN_MAX_US` (90 s; 15 s when quitting)
+  while something waits for it is closed, its unfinished calls not run
+  (`agent_stalled`);
+- a summary is due at the end of the turn it is in (`summary_due`), and
+  asked in a user turn of its own with the thinking closed
+  (`open_summary`, `agent::summary_turn`); a summary holding the chat
+  template's marks is refused (`degenerate`);
+- a note already kept is not kept again, notes are checked against the
+  working copy (`repo_view`, `verify::Repo::load_over`), and in the agent
+  frame the check comes back in the tool's result only;
+- the queue's pop checks the room for whatever brought the text (the
+  stream's own proposal: a feed past `direct_max` went to a reading with no
+  check);
+- `tell_claude` (`send_claude`) writes `to-claude.md` and sends a `claude`
+  line; `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
+  message from Claude with an id, which it answers with `re`.

@@ -17,7 +17,11 @@ it read a file of the real lines.
 **The check:**
 - **Load.** `Repo::load` reads the repository's text files (`src/`,
   `scripts/`, `docs/`, `tools/` and the top level; `.rs .md .sh .c .h
-  .toml .S`; never `target/` or `.git/`).
+  .toml .S`; never `target/` or `.git/`). In development the stream's
+  working copy is read over it (`Repo::load_over`: the overlay's upper
+  layer, what it wrote, by the same relative paths): checked against the
+  repository alone, its own new files were "nowhere", and on 2026-10-02 it
+  noted one proposal 131 times.
 - **Names.** `code_names` takes the code names a note uses:
   - what is inside backticks;
   - every identifier with an underscore;
@@ -48,7 +52,8 @@ carried "two gates" and a "mirror gate" through a rollover.
   queue) what the repository holds.
 - **Every `file:line` it names** is quoted back to it.
 - **Notes already kept are checked at load**, so a false one carries its
-  mark into the opening.
+  mark into the opening; an old mark is taken off and the note checked
+  again (the code moves on), and a note kept twice is kept once.
 - **`[unnote: TEXT]`** removes its notes containing TEXT, from memory and
   from `notes.md`.
 
