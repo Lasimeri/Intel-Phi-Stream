@@ -67,3 +67,17 @@ end (`src/engine.md`) before it ends the session.
   xterm. `PHI_STREAM_WINDOW=0` opens none (a host with no desktop).
 - Over SSH, the same terminal without a window:
   `ssh -t HOST '"$HOME/Intel Phi Stream/scripts/phi-stream.sh" attach --follow'`.
+
+## Instances
+
+`PHI_STREAM_INSTANCE=NAME` runs a service beside the first: its own tmux
+session (`phi-stream-NAME`), socket (`phi-stream-NAME.sock`, exported as
+`PHI_STREAM_SOCKET`, so the clients in the same shell reach it), workspace
+(`dev-NAME`) and window; `PHI_STREAM_CARD=N` gives it one card
+(`PHI_GGML_CARDS`), `PHI_STREAM_CARDS=0` none. Measured 2026-10-01: a
+second instance on card 1 next to one on card 0 did not come up, and the
+first's backend then reported "could not clear card 0: no answer within
+30s"; the backend frees the cards when it opens (one backend process at a
+time, Intel-Phi-AVX512), so two instances each with a card are not
+supported yet. A second instance with `PHI_STREAM_CARDS=0` and `--cpu`, or
+on the GPU, does not touch the cards.

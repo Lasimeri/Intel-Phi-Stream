@@ -24,7 +24,18 @@ root=$(cd "$here/.." && pwd)
 # PHI_STREAM_BIN names another build (a measurement pinned to a frozen
 # binary while the tree is rebuilt).
 bin="${PHI_STREAM_BIN:-$root/target/release/phi-stream}"
-session=${PHI_STREAM_SESSION:-phi-stream}
+# PHI_STREAM_INSTANCE=NAME: a second (third...) service beside the first,
+# with its own session, socket, workspace and window; PHI_STREAM_CARD=N
+# gives it one Phi card (each instance its own: one process per card).
+inst=${PHI_STREAM_INSTANCE:-}
+suffix=${inst:+-$inst}
+session=${PHI_STREAM_SESSION:-phi-stream$suffix}
+if [ -n "$inst" ]; then
+    export PHI_STREAM_SOCKET="${PHI_STREAM_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/phi-stream$suffix.sock}"
+fi
+if [ -n "${PHI_STREAM_CARD:-}" ]; then
+    export PHI_GGML_CARDS="$PHI_STREAM_CARD"
+fi
 [ -x "$bin" ] || { echo "$0: $bin not built; run make build" >&2; exit 1; }
 . "$here/avx512.sh"
 
@@ -44,8 +55,8 @@ launch() {
 # --follow`. Its pid is kept, so one is open at a time; the keeper's pid
 # too, so one keeper runs at a time.
 rt=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-winpid="$rt/phi-stream-window.pid"
-keeppid="$rt/phi-stream-window-keeper.pid"
+winpid="$rt/phi-stream$suffix-window.pid"
+keeppid="$rt/phi-stream$suffix-window-keeper.pid"
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2> /dev/null; }
 # Loaded and running: `status` prints a line (while it loads, none).
 running() { [ -n "$("$bin" status 2> /dev/null || true)" ]; }
@@ -195,7 +206,7 @@ case "$sub" in
             rest+=("$a")
         done
         exec "$0" start --dev "$root" --mind --reflect --terminal --rollover-tokens 150000 \
-            --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev}" "${rest[@]}"
+            --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev$suffix}" "${rest[@]}"
         ;;
     attach)
         follow=0
