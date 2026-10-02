@@ -494,7 +494,10 @@ and two tool calls. Now:
   stream's own proposal: a feed past `direct_max` went to a reading with no
   check);
 - `tell_claude` (`send_claude`) writes `to-claude.md` and sends a `claude`
-  line; `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
+  line (a message whose words are 60 percent or more in its last one, and
+  that answers nothing, is not sent: each review was followed by a
+  "final" one restating it, at 0.64 and 0.71, while new messages held 0.09
+  to 0.29 of the last one's words); `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
   message from Claude with an id, which it answers with `re`.
 
 ## The guide lane (`--guide`, shadow, 2026-10-02)

@@ -434,6 +434,10 @@ const CHAIN_TEMP: f32 = 0.8;
 const CHAIN_RECENT: usize = 8;
 /// Word overlap (Jaccard) at which a reflection repeats a recent one.
 const CHAIN_SAME: f64 = 0.5;
+/// The share of a message's words in its last one at which it repeats it
+/// (the restatements on the live service: 0.64 and 0.71; new messages: 0.09
+/// and 0.29).
+const TO_CLAUDE_SAME: f64 = 0.6;
 
 struct Check {
     why: Why,
@@ -594,6 +598,8 @@ pub struct Engine {
     turn_open_mono: i64,
     summary_due: Option<Summary>,
     to_claude_next: u64,
+    /// Its last message to Claude: its id and its words (a repeat is not sent).
+    last_to_claude: Option<(u64, Vec<String>)>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -972,6 +978,7 @@ impl Engine {
             turn_open_mono: clock::mono_us(),
             summary_due: None,
             to_claude_next,
+            last_to_claude: None,
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -2453,6 +2460,21 @@ impl Engine {
     /// to the terminals as a `claude` line (`phi-stream ask` waits for one,
     /// the MCP server's `inbox` reads them).
     fn send_claude(&mut self, text: &str, re: Option<&str>) -> String {
+        // A message that says again what its last one said is not sent: on
+        // the live service each review was followed a turn later by a
+        // "final" one restating it (m4 after m3, m6 after m5).
+        let words = word_set(text);
+        if let Some((last, prev)) = &self.last_to_claude {
+            if re.is_none() && contained(&words, prev) >= TO_CLAUDE_SAME {
+                self.note(format!(
+                    "a message to Claude repeating m{last} was not sent"
+                ));
+                return format!(
+                    "not sent: it repeats m{last}, which Claude has; send only what is new"
+                );
+            }
+        }
+        self.last_to_claude = Some((self.to_claude_next, words));
         let id = self.to_claude_next;
         self.to_claude_next += 1;
         let t = clock::now_us();
@@ -4450,6 +4472,14 @@ fn word_set(s: &str) -> Vec<String> {
     w
 }
 
+/// The share of `a`'s words that `b` holds too (both word sets, sorted).
+fn contained(a: &[String], b: &[String]) -> f64 {
+    if a.is_empty() {
+        return 1.0;
+    }
+    a.iter().filter(|w| b.binary_search(w).is_ok()).count() as f64 / a.len() as f64
+}
+
 /// The overlap of two word sets: shared over all.
 fn jaccard(a: &[String], b: &[String]) -> f64 {
     let shared = a.iter().filter(|w| b.binary_search(w).is_ok()).count();
@@ -4722,6 +4752,17 @@ mod tests {
         let want = (2.0 / 6.0 + 1.0) / 2.0;
         assert!((experts_shared(&a, &b) - want).abs() < 1e-12);
         assert_eq!(experts_shared(&a, &[]), 0.0);
+    }
+
+    #[test]
+    fn a_restatement_is_contained_in_the_message_before() {
+        let first = word_set("Reviewed c79ab72: guide_take, guide_fed and kl_and_tops are correct; no defects found in the lane indexing.");
+        let again = word_set(
+            "Final review of c79ab72: guide_take and guide_fed correct, no defects found.",
+        );
+        let new = word_set("The summary turn drops the calls of the turn it closes: engine.rs agent_stalled, line 2101.");
+        assert!(contained(&again, &first) >= TO_CLAUDE_SAME);
+        assert!(contained(&new, &first) < TO_CLAUDE_SAME);
     }
 
     #[test]
