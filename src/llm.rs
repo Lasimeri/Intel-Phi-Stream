@@ -492,6 +492,46 @@ impl Llm {
         unsafe { sys::llama_sampler_sample(self.sampler, self.ctx.as_ptr(), row) }
     }
 
+    /// The next token from logits given here (one per vocabulary entry)
+    /// through the same chain as `sample` (its bans, penalties, DRY, its
+    /// random state), accepted once: what `llama_sampler_sample` does with a
+    /// row of the context (llama-sampling.cpp), for a row the engine made
+    /// (the guide's mix).
+    pub fn sample_logits(&mut self, logits: &[f32]) -> i32 {
+        let mut data: Vec<sys::llama_token_data> = logits
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| sys::llama_token_data {
+                id: i as i32,
+                logit: l,
+                p: 0.0,
+            })
+            .collect();
+        let mut arr = sys::llama_token_data_array {
+            data: data.as_mut_ptr(),
+            size: data.len(),
+            selected: -1,
+            sorted: false,
+        };
+        // SAFETY: the array points at `data`, alive for the call; the chain
+        // works in place within its size and sets `selected` within it.
+        unsafe {
+            sys::llama_sampler_apply(self.sampler, &mut arr);
+            let t = if arr.selected >= 0 && (arr.selected as usize) < arr.size {
+                (*arr.data.add(arr.selected as usize)).id
+            } else {
+                // No selection (a chain without a final pick): the likeliest.
+                logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map_or(0, |(i, _)| i as i32)
+            };
+            sys::llama_sampler_accept(self.sampler, t);
+            t
+        }
+    }
+
     /// Replace the chain (new temperature or seed).
     pub fn set_sampling(&mut self, s: &Sampling) {
         // SAFETY: the old chain is freed once, the new one made once.

@@ -317,8 +317,8 @@ fn connection(
                 Err(_) => Err("chunk takes a number (0 adapts)".to_string()),
             },
             "set" => match arg.split_once(' ').map(|(k, v)| (k.trim(), v.trim().parse::<f32>())) {
-                Some((k, Ok(v))) if ["temp", "top-k", "top-p", "min-p", "dry", "repeat-penalty"].contains(&k) => ctx.send(Command::Set(k.to_string(), v)).map(|_| format!("{k} {v}")).map_err(|_| "the engine is gone".to_string()),
-                _ => Err("set takes temp, top-k, top-p, min-p, dry or repeat-penalty and a number".to_string()),
+                Some((k, Ok(v))) if ["temp", "top-k", "top-p", "min-p", "dry", "repeat-penalty", "guide-mix"].contains(&k) => ctx.send(Command::Set(k.to_string(), v)).map(|_| format!("{k} {v}")).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("set takes temp, top-k, top-p, min-p, dry, repeat-penalty or guide-mix and a number".to_string()),
             },
             "breaker" | "nudges" | "guide" | "experts" => match arg.trim() {
                 "on" | "off" => ctx.send(Command::Guard(cmd.to_string(), arg.trim() == "on")).map(|_| format!("{cmd} {}", arg.trim())).map_err(|_| "the engine is gone".to_string()),

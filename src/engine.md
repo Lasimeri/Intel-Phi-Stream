@@ -512,10 +512,14 @@ distribution from the live one, in nats, and whether the likeliest token
 differs. One line each in `guide.log` in the workspace; every 128 thinking
 tokens a report (a note, and a line in DELIBERATION).
 
-- Shadow: nothing is chosen from it yet, and the live text never holds
-  the aside (nothing is put inside a turn). Mixing the two rows into the
-  choice is the next step, behind its own knob, once the measures show the
-  reflection moves something.
+- Shadow by default: nothing is chosen from it, and the live text never
+  holds the aside (nothing is put inside a turn). `set guide-mix G` (live,
+  0 to 2, 0 by default) mixes it into the choice of each thinking token:
+  the live logits moved toward the guided ones by G (`l + G(g - l)`; at 1,
+  as if the aside had been written in), sampled through the same chain
+  (`Llm::sample_logits`: its bans, penalties and random state, accepted
+  once). Top-down on every token: the reflection weighs on each choice
+  while the text stays the stream's own. Measured before it stays on.
 - Its own sequence, the last of five (`--guide` implies `--n-seq 5`; 62.8
   MiB of recurrent state), so checks, the chain and readings keep theirs.
 - A new reflection forks it again from the live sequence (a hybrid

@@ -22,7 +22,10 @@ One model split three ways and one context over llama.cpp's C API.
   a batch into equal-share micro-batches by itself. `logits`, `sample`
   (the chain: top-k, top-p, temperature and the seeded draw, or greedy at
   temperature 0; the model's header recommends 20, 0.95 and 1) and
-  `greedy` read a row of the last decode. With `ban_dashes` (the
+  `greedy` read a row of the last decode; `sample_logits` puts logits the
+  engine made (the guide's mix) through the same chain, accepted once, as
+  `llama_sampler_sample` does with a row; `n_seq` is the context's count
+  of sequences. With `ban_dashes` (the
   default) the chain starts with a logit bias of minus infinity on every
   vocabulary token whose text carries an em or en dash, found by one
   scan of the vocabulary at load, so the no-dash rule holds in the

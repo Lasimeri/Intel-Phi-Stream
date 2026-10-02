@@ -635,6 +635,10 @@ pub struct Engine {
     /// tokens that had both (`experts on`), and how many had.
     guide_shared: f64,
     guide_shared_n: u32,
+    /// The guide's weight in the choice of each thinking token (`set
+    /// guide-mix G`; 0: shadow), and the row it made for the next choice.
+    guide_mix: f32,
+    mixed: Option<Vec<f32>>,
     guide_log: RotLog,
     reflecting: Option<Chain>,
     line_words: HashMap<String, f32>,
@@ -999,6 +1003,8 @@ impl Engine {
             guide_flips: 0,
             guide_shared: 0.0,
             guide_shared_n: 0,
+            guide_mix: 0.0,
+            mixed: None,
             guide_log,
             reflecting: None,
             line_words: HashMap::new(),
@@ -1849,6 +1855,14 @@ impl Engine {
         let ll = self.llm.logits(live)?;
         let (kl, ag, al) = kl_and_tops(&lg, ll);
         let flip = ag != al;
+        // Mixed into the choice (`set guide-mix G`, off by default): the live
+        // logits moved toward the guided ones by G, so the reflection weighs
+        // on every thinking token without its text in the stream (G = 1: as
+        // if it had been written in).
+        if self.guide_mix > 0.0 {
+            let m = self.guide_mix;
+            self.mixed = Some(ll.iter().zip(&lg).map(|(&l, &g)| l + m * (g - l)).collect());
+        }
         self.guide_n += 1;
         self.guide_kl += kl;
         self.guide_flips += flip as u32;
@@ -1884,8 +1898,13 @@ impl Engine {
             } else {
                 String::new()
             };
+            let mode = if self.guide_mix > 0.0 {
+                format!("mixed at {}", self.guide_mix)
+            } else {
+                "shadow".to_string()
+            };
             let said = format!(
-                "guide (shadow), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%{experts}",
+                "guide ({mode}), {} thinking tokens: the reflection would move each by {:.3} nats on average and change the likeliest token at {:.1}%{experts}",
                 self.guide_n,
                 self.guide_kl / self.guide_n as f64,
                 100.0 * self.guide_flips as f64 / self.guide_n as f64
@@ -3163,12 +3182,15 @@ impl Engine {
         }
         self.history.push(self.next);
         let forced = self.forced.pop_front();
-        let mut t = match forced {
-            Some(f) => {
+        // The guide's mixed row, made this cycle for this choice (`guide_measure`).
+        let mixed = self.mixed.take();
+        let mut t = match (forced, mixed) {
+            (Some(f), _) => {
                 self.llm.accept(f);
                 f
             }
-            None => self.llm.sample(row),
+            (None, Some(m)) => self.llm.sample_logits(&m),
+            (None, None) => self.llm.sample(row),
         };
         if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
             // The journal has no end: a newline stands in for it.
@@ -4159,6 +4181,12 @@ impl Engine {
                         1.0 - p
                     ));
                 }
+            }
+            Command::Set(key, v) if key == "guide-mix" => {
+                // The guide's weight in the choice of each thinking token (0:
+                // shadow, measured only).
+                self.guide_mix = v.clamp(0.0, 2.0);
+                self.note(format!("guide mix {}", self.guide_mix));
             }
             Command::Set(key, v) => {
                 let s = &mut self.cfg.sampling;
