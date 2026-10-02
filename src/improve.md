@@ -56,6 +56,13 @@ and Claude's review ("nothing unreviewed runs").
    (`to-claude.md`, `[improve]`) with the path of its `change.patch`.
 4. **Review** (Claude): the diff read before any of it runs outside the
    sandbox, with the same standard as any commit to this repository.
+   The verdict is written as `review` in the candidate's directory and
+   its workspace mirror, a `reviewed` line of `improve.log` and a message
+   to the stream; a candidate accepted in review gets the `reviewed` mark
+   that `improve-measure.sh` requires. The first, candidate 3 (a reset of
+   the guide's tracking in `drop_guide`), was rejected: `drop_guide` runs at
+   every new aside, so the resets would have removed the lens forks'
+   spacing and zeroed the guide report's counts at each one.
 5. **Measure** (built, `scripts/improve-measure.sh N`): the reviewed
    candidate's binary (kept with it when it passed) on the real model,
    interleaved with the base's (base, candidate, base, candidate, 10
