@@ -556,8 +556,9 @@ tokens a report (a note, and a line in DELIBERATION).
   - A lens or placebo aside at most every `LENS_EVERY_US` (10 s) and never
     the same words twice running: each fork copies 62.8 MiB of recurrent
     state, and 22.7 percent of thinking lines pass the bar. A change of
-    source drops the lane and starts the report's counts afresh, so no
-    window mixes two; each `guide.log` line and `guide` line names its
+    source drops the lane (and its spacing: the first aside of the new
+    source is not held back, the dev stream's review, m29) and starts the
+    report's counts afresh, so no window mixes two; each `guide.log` line and `guide` line names its
     source (`src=`), the report too.
   - Decided before measuring: over interleaved windows of its active work,
     1500 thinking tokens or more measured per arm, lens against placebo.

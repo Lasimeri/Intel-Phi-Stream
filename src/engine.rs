@@ -4809,6 +4809,9 @@ impl Engine {
                         self.lens_sums.clear();
                         self.lens_readings = 0;
                         self.lens_last.clear();
+                        // The first aside of the new source is not held back by
+                        // the last one's spacing (the dev stream's review, m29).
+                        self.lens_fork_mono = 0;
                         self.line_from = self.history.len();
                         self.guide_n = 0;
                         self.guide_kl = 0.0;
