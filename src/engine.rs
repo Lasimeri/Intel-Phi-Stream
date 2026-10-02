@@ -620,6 +620,8 @@ pub struct Engine {
     last_to_claude: Option<(u64, Vec<String>)>,
     /// The ids of the messages Claude sent that wait for an answer (`ask`).
     asked: std::collections::HashSet<u64>,
+    /// Which of its messages answered each of them (an id is answered once).
+    answered: HashMap<u64, u64>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -1004,6 +1006,7 @@ impl Engine {
             to_claude_next,
             last_to_claude: None,
             asked: std::collections::HashSet::new(),
+            answered: HashMap::new(),
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -2592,7 +2595,9 @@ impl Engine {
         // An answer names a message Claude sent (`c3`); an id Claude never
         // sent is no answer (on the live service it named c3 while none had
         // been asked, which also passed the repeat check below).
-        let mut unknown = None;
+        // And each is answered once: an id answered already is no answer
+        // either (it kept naming c1 after m13 had answered it).
+        let mut warn = String::new();
         let re = re.and_then(|r| {
             let n: Option<u64> = r
                 .chars()
@@ -2600,18 +2605,21 @@ impl Engine {
                 .collect::<String>()
                 .parse()
                 .ok();
-            match n {
-                Some(n) if self.asked.contains(&n) => Some(format!("c{n}")),
+            match n.map(|n| (n, self.answered.get(&n))) {
+                Some((n, None)) if self.asked.contains(&n) => Some(n),
+                Some((n, Some(m))) => {
+                    warn = format!(" (c{n} was answered already, by m{m}, so it went as a message of your own: re is for a first answer)");
+                    None
+                }
                 _ => {
-                    unknown = Some(r.trim().to_string());
+                    warn = format!(" ({} is no message of Claude's, so it went as a message of your own)", r.trim());
                     None
                 }
             }
         });
+        let re_id = re;
+        let re = re.map(|n| format!("c{n}"));
         let re = re.as_deref();
-        let warn = unknown.map_or(String::new(), |u| {
-            format!(" ({u} is no message of Claude's, so it went as a message of your own)")
-        });
         // A message that says again what its last one said is not sent: on
         // the live service each review was followed a turn later by a
         // "final" one restating it (m4 after m3, m6 after m5).
@@ -2629,6 +2637,9 @@ impl Engine {
         self.last_to_claude = Some((self.to_claude_next, words));
         let id = self.to_claude_next;
         self.to_claude_next += 1;
+        if let Some(n) = re_id {
+            self.answered.insert(n, id);
+        }
         let t = clock::now_us();
         let re = re.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
         let act = self.act("tell_claude", text);

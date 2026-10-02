@@ -500,7 +500,8 @@ and two tool calls. Now:
   to 0.29 of the last one's words); an answer's `re` must name a message Claude sent
   (`asked`): an id Claude never sent goes as a message of its own, under
   the repeat check, and it is told so (it named c3 while none had been
-  asked, which also passed the check); `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
+  asked, which also passed the check); and each is answered once (`answered`: it
+  kept naming c1 after m13 had answered it, in messages of its own); `Command::Ask` (from `phi-stream ask` or the MCP `ask` tool) is a
   message from Claude with an id, which it answers with `re`.
 
 ## The guide lane (`--guide`, shadow, 2026-10-02)
