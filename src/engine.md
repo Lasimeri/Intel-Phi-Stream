@@ -553,5 +553,8 @@ for it (a message, a line from the system, an objective), a new commit in
 the repository (`repo_head`, read from `.git` every 2 s), a quit (straight
 to the summary), or the minutes it gave (15 by default, 60 at most). Its
 next turn opens with the rested turn's results and what woke it. The
-status says `resting`. The continue line and the circling nudge name
+status says `resting`. The second chain's reflections wait apart (`asides`, the last
+two): they ride with the next turn but neither stop a rest nor wake one (at
+first each turn left one waiting, and every rest was refused); a rest
+refused because something came says so. The continue line and the circling nudge name
 `wait` as the way to stop when the objective is met.

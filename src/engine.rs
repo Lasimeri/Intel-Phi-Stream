@@ -639,6 +639,9 @@ pub struct Engine {
     /// lines itself); when its current turn opened; a summary waiting for
     /// the turn's end; the id of its next message to Claude.
     waiting: Vec<String>,
+    /// The second chain's reflections for the next turn: they ride with it
+    /// but never stop a rest or wake one.
+    asides: Vec<String>,
     turn_open_mono: i64,
     summary_due: Option<Summary>,
     to_claude_next: u64,
@@ -1030,6 +1033,7 @@ impl Engine {
             im_end,
             copy_upper,
             waiting: Vec::new(),
+            asides: Vec::new(),
             turn_open_mono: clock::mono_us(),
             summary_due: None,
             to_claude_next,
@@ -1618,7 +1622,16 @@ impl Engine {
         // thinking.
         if self.cfg.agent {
             if let Some(text) = self.reflection.take() {
-                self.tell(&format!("your second look, beside your turn: {text}"))?;
+                // Beside the waiting lines: a reflection neither stops a rest nor
+                // wakes one (each turn left one waiting, and every rest was refused).
+                self.asides.push(format!(
+                    "[{}] your second look, beside your turn: {text}",
+                    clock::hms(clock::now_us())
+                ));
+                // The last two, at most: older ones are about turns long gone.
+                while self.asides.len() > 2 {
+                    self.asides.remove(0);
+                }
                 let _ = self.tx.send(Event::Delib(crate::client::Delib {
                     kind: crate::client::DelibKind::End,
                     t_us: clock::now_us(),
@@ -2231,6 +2244,15 @@ impl Engine {
                 let _ = self.tx.send(Event::Status(self.status()));
                 return Ok(());
             }
+            // Something came while it asked: it is told so, not left to think
+            // it rested.
+            self.waiting.insert(
+                0,
+                format!(
+                    "[{}] not rested: something came for you, below",
+                    clock::hms(clock::now_us())
+                ),
+            );
         }
         let extra = self.take_waiting();
         self.agent_open(crate::agent::responses_turn(&results, &extra))
@@ -3077,6 +3099,7 @@ impl Engine {
     /// its size (its own proposal: a feed past the room filled the context).
     fn take_waiting(&mut self) -> Vec<String> {
         let mut out = std::mem::take(&mut self.waiting);
+        out.append(&mut self.asides);
         let mut room = self.read_room();
         while let Some((text, label)) = self.queue.pop_front() {
             let n = self.tok(&text, false).map_or(0, |t| t.len());
