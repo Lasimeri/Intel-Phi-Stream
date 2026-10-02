@@ -88,7 +88,7 @@ for a in "$@"; do
         continue
     fi
     case "$a" in
-        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|-t|--threads|--n-seq|--temp|--top-k|--top-p|--seed|--repeat-penalty|--repeat-last-n|--socket) skip=1 ;;
+        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|-t|--threads|--n-seq|--temp|--top-k|--top-p|--min-p|--dry-multiplier|--dry-base|--dry-allowed-length|--dry-last-n|--seed|--repeat-penalty|--repeat-last-n|--socket) skip=1 ;;
         -*) ;;
         *) sub=$a; break ;;
     esac

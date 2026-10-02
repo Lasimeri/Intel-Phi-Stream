@@ -98,6 +98,8 @@ pub enum Msg {
     Objective(i64, String),
     /// Its terminal: a command began, or ended with its output.
     Term(TermLine),
+    /// A tool it used, or that use's result.
+    Act(ActLine),
     Ok(String),
     Err(String),
     Bye,
@@ -233,6 +235,11 @@ pub fn parse(line: &str) -> Msg {
                 text: unescape(f.get(2).copied().unwrap_or("")),
             })
         }
+        // act start t=US id=N kind=K TEXT, or act end t=US id=N ok=0|1 TEXT
+        "act" => match parse_act(rest) {
+            Some(a) => Msg::Act(a),
+            None => Msg::Other(line.to_string()),
+        },
         // term start t=US id=N COMMAND, or term end t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT
         "term" => match parse_term(rest) {
             Some(t) => Msg::Term(t),
@@ -248,6 +255,59 @@ pub fn parse(line: &str) -> Msg {
         "bye" => Msg::Bye,
         _ => Msg::Other(line.to_string()),
     }
+}
+
+/// One `act` line: a tool it used (`end` false: its kind and what it was
+/// given), or what that use came to (`end`: whether it went through, and
+/// what it returned, in short).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActLine {
+    pub id: u64,
+    pub t_us: i64,
+    pub end: bool,
+    pub ok: bool,
+    pub kind: String,
+    pub text: String,
+}
+
+/// An `act` line as the service sends it.
+pub fn act_line(a: &ActLine) -> String {
+    if a.end {
+        format!(
+            "act end t={} id={} ok={} {}",
+            a.t_us,
+            a.id,
+            a.ok as u8,
+            escape(&a.text)
+        )
+    } else {
+        format!(
+            "act start t={} id={} kind={} {}",
+            a.t_us,
+            a.id,
+            a.kind,
+            escape(&a.text)
+        )
+    }
+}
+
+fn parse_act(rest: &str) -> Option<ActLine> {
+    let (kind, rest) = rest.split_once(' ')?;
+    let end = match kind {
+        "start" => false,
+        "end" => true,
+        _ => return None,
+    };
+    let f: Vec<&str> = rest.splitn(4, ' ').collect();
+    let get = |k: &str| f.iter().take(3).find_map(|x| x.strip_prefix(k));
+    Some(ActLine {
+        id: get("id=")?.parse().ok()?,
+        t_us: get("t=")?.parse().ok()?,
+        end,
+        ok: get("ok=") != Some("0"),
+        kind: get("kind=").unwrap_or("").to_string(),
+        text: unescape(f.get(3).copied().unwrap_or("")),
+    })
 }
 
 /// One `term` line: a command began (`end` false), or ended.

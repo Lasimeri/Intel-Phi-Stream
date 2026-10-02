@@ -407,3 +407,22 @@ reflection's weight is measured against a placebo: a copy given the same
 frame with nothing in it, so the weight is what the reflection says, not
 that a line came (the frame alone moved the next token, measured at first
 as 7 to 14 nats).
+
+## Tools first (2026-10-01)
+
+- Its tools work with or without an objective: their results are real, so
+  they ground it. Without an objective only speech waits (the `»` tokens
+  stay banned). With every tool gated it only reasoned, and invented what
+  it had done (a file it said it wrote; a file it said did not exist,
+  after reading a URL-style path).
+- Every tool use goes to the terminals as an `act` line (`act start`: the
+  tool and what it was given; `act end`: whether it went through and what
+  it came to, in short: lines and tokens read, a command's exit and first
+  line, a note kept or marked unverified). OUTPUT shows them.
+- No tool for 90 s: at a line's end, with nothing in flight, it is told
+  to check one real thing with a tool and read what it returns (at most
+  once per 90 s).
+- The self-model says it works with its tools, not in its head: what a
+  file says it reads, whether something works it runs, what it has done a
+  tool's output shows, and what it has not checked it does not claim.
+- `%XX` in a read's path is decoded (`Intel%20Phi%20Stream`).

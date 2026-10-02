@@ -167,6 +167,8 @@ quietly: a newer service may send one at every token.
 
 ## The harness: objective and terminal
 
+- OUTPUT shows every tool use (`act` lines: run, read, note, prefer, and
+  what each came to) and its speech, each under its time.
 - `/objective TEXT` sets what the stream works toward, `/objective -`
   clears it, `/objective` alone shows it. Without one the stream only
   thinks (`engine.md`); DELIBERATION shows it on top.

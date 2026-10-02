@@ -40,3 +40,10 @@ What llama.cpp's own CPU backend computes with `threads` is small (the
 token embedding lookups): the experts in host memory are multiplied by
 `libggml_phi.so` with its own pool (`PHI_GGML_HOST_THREADS`, 12) and the
 cards. llama.cpp is used as a library and never changed.
+
+Sampling also takes `min_p` (tokens under that share of the likeliest
+one's probability dropped; 0 off) and DRY, llama.cpp's sampler against
+repeated sequences (`dry_multiplier`, 0 off; `dry_base`,
+`dry_allowed_length`, `dry_last_n`; breakers newline, colon, quote,
+asterisk), in llama.cpp's order: penalties, DRY, top-k, top-p, min-p,
+temperature.

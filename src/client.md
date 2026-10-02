@@ -29,7 +29,8 @@ start|piece|end t=US pos=P TEXT`: the deliberation's own text for one
 check (its question, each piece of its reasoning, its outcome; `Delib`,
 `delib_line`), and `objective t=US TEXT`: what the stream is working
 toward, when it changes. Both are additive: a terminal from before them
-notes each kind once and drops it. `term start t=US id=N COMMAND` and `term end
+notes each kind once and drops it. `act start t=US id=N kind=K TEXT` and `act end t=US id=N ok=0|1 TEXT`
+carry each tool use and its result (`ActLine`, `act_line`). `term start t=US id=N COMMAND` and `term end
 t=US id=N code=C ms=M cut=0|1 timeout=0|1 OUTPUT` carry its terminal
 (`term_end_line`, `TermLine`). `leaks` in the status counts the lines
 beginning with `«` that the mind wrote itself (the journal frame's one

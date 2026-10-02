@@ -180,6 +180,11 @@ pub fn serve(
                         h.push_term(line.clone());
                         h.broadcast(&line);
                     }
+                    Event::Act(a) => {
+                        let line = crate::client::act_line(&a);
+                        h.push_term(line.clone());
+                        h.broadcast(&line);
+                    }
                     Event::Delib(d) => {
                         let line = crate::client::delib_line(&d);
                         h.push_delib(line.clone());

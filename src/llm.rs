@@ -80,6 +80,16 @@ pub struct Sampling {
     pub temp: f32,
     pub top_k: i32,
     pub top_p: f32,
+    /// Tokens under this share of the likeliest one's probability dropped
+    /// (0: off).
+    pub min_p: f32,
+    /// DRY (llama.cpp's sampler against repeated sequences): its multiplier
+    /// (0: off), base, the length repeated freely, and how far back it
+    /// looks (-1: the whole context).
+    pub dry_multiplier: f32,
+    pub dry_base: f32,
+    pub dry_allowed_length: i32,
+    pub dry_last_n: i32,
     pub seed: u32,
     /// Tokens seen again in the last `repeat_last_n` are divided by this
     /// (1: off).
@@ -109,6 +119,8 @@ pub struct Llm {
     sampler: *mut sys::llama_sampler,
     /// Tokens whose text carries an em or en dash.
     dash_tokens: Vec<i32>,
+    /// The context length the model was trained on (DRY's reach).
+    n_ctx_train: i32,
     /// Tokens the engine asked never to sample (a frame's control tokens).
     banned: Vec<i32>,
     // Kept alive for the model, which keeps the pointers.
@@ -231,7 +243,8 @@ impl Llm {
                 .filter(|&t| sys::llama_vocab_is_eog(vocab, t))
                 .collect();
             let dash_tokens = dash_tokens(vocab, n_vocab);
-            let sampler = make_sampler(sampling, &dash_tokens, &[]);
+            let n_ctx_train = sys::llama_model_n_ctx_train(m.as_ptr());
+            let sampler = make_sampler(sampling, &dash_tokens, &[], vocab, n_ctx_train);
             Ok(Self {
                 model: m,
                 ctx: c,
@@ -241,6 +254,7 @@ impl Llm {
                 batch_cap,
                 sampler,
                 dash_tokens,
+                n_ctx_train,
                 banned: Vec::new(),
                 _devices: devices,
                 _pattern: pattern,
@@ -466,7 +480,13 @@ impl Llm {
         // SAFETY: the old chain is freed once, the new one made once.
         unsafe {
             sys::llama_sampler_free(self.sampler);
-            self.sampler = make_sampler(s, &self.dash_tokens, &self.banned);
+            self.sampler = make_sampler(
+                s,
+                &self.dash_tokens,
+                &self.banned,
+                self.vocab,
+                self.n_ctx_train,
+            );
         }
     }
 
@@ -561,7 +581,13 @@ fn dash_tokens(vocab: *const sys::llama_vocab, n_vocab: usize) -> Vec<i32> {
     out
 }
 
-unsafe fn make_sampler(s: &Sampling, dashes: &[i32], banned: &[i32]) -> *mut sys::llama_sampler {
+unsafe fn make_sampler(
+    s: &Sampling,
+    dashes: &[i32],
+    banned: &[i32],
+    vocab: *const sys::llama_vocab,
+    n_ctx_train: i32,
+) -> *mut sys::llama_sampler {
     let chain = sys::llama_sampler_chain_init(sys::llama_sampler_chain_default_params());
     let mut never: Vec<i32> = banned.to_vec();
     if s.ban_dashes {
@@ -586,11 +612,36 @@ unsafe fn make_sampler(s: &Sampling, dashes: &[i32], banned: &[i32]) -> *mut sys
             sys::llama_sampler_init_penalties(s.repeat_last_n, s.repeat_penalty, 0.0, 0.0),
         );
     }
+    // Repeated sequences penalized (llama.cpp's order: after the
+    // penalties, before top-k), with its usual breakers.
+    if s.dry_multiplier > 0.0 {
+        let breakers: Vec<std::ffi::CString> = ["\n", ":", "\"", "*"]
+            .iter()
+            .map(|b| std::ffi::CString::new(*b).unwrap())
+            .collect();
+        let ptrs: Vec<*const c_char> = breakers.iter().map(|b| b.as_ptr()).collect();
+        sys::llama_sampler_chain_add(
+            chain,
+            sys::llama_sampler_init_dry(
+                vocab,
+                n_ctx_train,
+                s.dry_multiplier,
+                s.dry_base,
+                s.dry_allowed_length,
+                s.dry_last_n,
+                ptrs.as_ptr() as *mut *const c_char,
+                ptrs.len(),
+            ),
+        );
+    }
     if s.top_k > 0 {
         sys::llama_sampler_chain_add(chain, sys::llama_sampler_init_top_k(s.top_k));
     }
     if s.top_p < 1.0 {
         sys::llama_sampler_chain_add(chain, sys::llama_sampler_init_top_p(s.top_p, 1));
+    }
+    if s.min_p > 0.0 {
+        sys::llama_sampler_chain_add(chain, sys::llama_sampler_init_min_p(s.min_p, 1));
     }
     if s.temp > 0.0 {
         sys::llama_sampler_chain_add(chain, sys::llama_sampler_init_temp(s.temp));

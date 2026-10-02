@@ -108,6 +108,8 @@ pub enum Event {
     TermEnd(i64, crate::term::Ran),
     /// The second chain's text: a reflection began, a piece of it, its end.
     Delib(crate::client::Delib),
+    /// A tool it used, or that use's result (`act` lines).
+    Act(crate::client::ActLine),
     Stopped,
 }
 
@@ -450,7 +452,8 @@ pub struct Engine {
     chase: Option<Chase>,
     /// (text as framed, label)
     queue: VecDeque<(String, String)>,
-    pending_reads: Vec<String>,
+    /// Reads asked for, each with its `act` id.
+    pending_reads: Vec<(u64, String)>,
     free_seqs: Vec<i32>,
     summary: Option<Vec<i32>>,
     /// A persona waiting for the next rollover to take effect.
@@ -498,14 +501,18 @@ pub struct Engine {
     /// Its terminal (`--terminal`), and whether a command is running.
     term: Option<crate::term::Term>,
     term_pending: usize,
+    /// Its tool uses: the next id, the `act` id of each terminal command by
+    /// the terminal's id, when it last used a tool and was last reminded to.
+    act_next: u64,
+    run_acts: HashMap<u64, u64>,
+    last_tool_mono: i64,
+    last_tool_nudge_mono: i64,
     /// What it works toward (since when, the text); none: its output idles.
     objective: Option<(i64, String)>,
     /// The tokens never sampled (control, `«`), and those held back while
     /// it has no objective (`»` in the journal, `</think>` in chat).
     base_ban: Vec<i32>,
     speak_ban: Vec<i32>,
-    /// When it was last told its output idles (monotonic microseconds).
-    told_idle_mono: i64,
     /// `quit` asked: the summary is being written, then it stops (by this
     /// monotonic deadline at the latest); `stop_now` ends the loop.
     quit_deadline: Option<i64>,
@@ -556,10 +563,10 @@ pub struct Engine {
 const MAX_READ_BYTES: u64 = 1 << 20;
 /// The longest a quit waits for its summary (microseconds).
 const QUIT_WAIT_US: i64 = 120_000_000;
-/// How often it is told its output idles while it has no objective.
-const IDLE_TELL_US: i64 = 300_000_000;
 /// Commands that may wait for its terminal at once, and its time limit.
 const MAX_TERM_PENDING: usize = 4;
+/// How long without a tool before it is reminded to check something real.
+const TOOL_IDLE_US: i64 = 90_000_000;
 const MAX_TERM_SECS: u64 = 60;
 
 /// A summary's end mark counts only after this many tokens, and the ask
@@ -786,10 +793,13 @@ impl Engine {
             failed_reads: HashMap::new(),
             term,
             term_pending: 0,
+            act_next: 1,
+            run_acts: HashMap::new(),
+            last_tool_mono: clock::mono_us(),
+            last_tool_nudge_mono: clock::mono_us(),
             objective,
             base_ban,
             speak_ban,
-            told_idle_mono: i64::MIN / 2,
             quit_deadline: None,
             stop_now: false,
             changed_since,
@@ -1076,21 +1086,21 @@ impl Engine {
         let objective = match &self.objective {
             Some((_, t)) => format!("{its} objective: {t}"),
             None if self.cfg.gate_output => format!(
-                "{it} {} no objective yet: until {it} {} given one, {it} only {}, and {its} {} lines and tool lines do nothing",
+                "{it} {} no objective yet: until {it} {} given one, {it} {} not speak ({its} {} lines do nothing), and {its} tools work",
                 if journal { "has" } else { "have" },
                 if journal { "is" } else { "are" },
-                if journal { "thinks" } else { "think" },
+                if journal { "does" } else { "do" },
                 if journal { "»" } else { "spoken" },
             ),
             None => format!("{it} {} no set objective", if journal { "has" } else { "have" }),
         };
         if journal {
             format!(
-                "\n\n=== what this mind is ===\nThis mind is the language model named above, running without pause where it says; its memory is its context. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+                "\n\n=== what this mind is ===\nThis mind is the language model named above, running without pause where it says; its memory is its context. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. It works with its tools, not in its head: what a file says, it reads; whether something works, it runs; what it has done, a tool's output shows; and what it has not checked with a tool, it does not claim. Each tool use and its result appear in its journal and to the people watching it. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         } else {
             format!(
-                "\n\nWhat you are: the language model named above, running without pause where it says; your memory is your context. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+                "\n\nWhat you are: the language model named above, running without pause where it says; your memory is your context. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. Work with your tools, not in your head: what a file says, read it; whether something works, run it; what you have done, a tool's output shows; and what you have not checked with a tool, do not claim. Each tool use and its result appear in your thoughts and to the people watching you. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         }
     }
@@ -1259,46 +1269,33 @@ impl Engine {
     /// A line the mind wrote: a note to keep, a file to read.
     fn line_done(&mut self, line: &str) {
         let l = line.trim();
-        // With no objective its output idles: a tool line does nothing, and
-        // it is told so (at most every few minutes).
-        let tool = ["[note:", "[unnote:", "[prefer:", "[read:", "[run:"]
-            .iter()
-            .any(|p| l.starts_with(p))
-            && l.ends_with(']');
-        if tool && self.idle_output() {
-            self.note(format!("no objective: {l} did nothing"));
-            let mono = clock::mono_us();
-            if mono - self.told_idle_mono >= IDLE_TELL_US {
-                self.told_idle_mono = mono;
-                let msg = self.framed_system(
-                    "you have no objective yet: you think, and your tool lines and » lines do nothing until you are given one",
-                );
-                let _ = self.put(msg);
+        // Its tools work with or without an objective (their results are
+        // real: what grounds it); each use goes to the terminals as an
+        // `act` line, its result as another (`act_end`).
+        let tool = |p: &str| {
+            l.strip_prefix(p)
+                .and_then(|r| r.strip_suffix(']'))
+                .map(str::trim)
+        };
+        if let Some(body) = tool("[note:").filter(|b| !b.is_empty()) {
+            let id = self.act("note", body);
+            let kept = self.add_note(body);
+            self.act_end(id, true, kept);
+        } else if let Some(body) = tool("[unnote:").filter(|b| !b.is_empty()) {
+            let id = self.act("unnote", body);
+            let n = self.unnote(body);
+            self.act_end(id, n > 0, format!("{n} notes removed"));
+        } else if let Some(body) = tool("[prefer:").filter(|b| !b.is_empty()) {
+            let id = self.act("prefer", body);
+            self.add_preference(body);
+            self.act_end(id, true, "kept in preferences.md".into());
+        } else if let Some(path) = tool("[read:").filter(|p| !p.is_empty()) {
+            if !self.pending_reads.iter().any(|(_, p)| p == path) {
+                let id = self.act("read", path);
+                self.pending_reads.push((id, path.to_string()));
             }
-            return;
-        }
-        if let Some(body) = l.strip_prefix("[note:").and_then(|r| r.strip_suffix(']')) {
-            let body = body.trim();
-            if !body.is_empty() {
-                self.add_note(body);
-            }
-        } else if let Some(body) = l.strip_prefix("[unnote:").and_then(|r| r.strip_suffix(']')) {
-            let body = body.trim();
-            if !body.is_empty() {
-                self.unnote(body);
-            }
-        } else if let Some(body) = l.strip_prefix("[prefer:").and_then(|r| r.strip_suffix(']')) {
-            let body = body.trim();
-            if !body.is_empty() {
-                self.add_preference(body);
-            }
-        } else if let Some(path) = l.strip_prefix("[read:").and_then(|r| r.strip_suffix(']')) {
-            let path = path.trim();
-            if !path.is_empty() && !self.pending_reads.iter().any(|p| p == path) {
-                self.pending_reads.push(path.to_string());
-            }
-        } else if let Some(cmd) = l.strip_prefix("[run:").and_then(|r| r.strip_suffix(']')) {
-            self.run_command(cmd.trim());
+        } else if let Some(cmd) = tool("[run:") {
+            self.run_command(cmd);
         }
     }
 
@@ -1527,6 +1524,34 @@ impl Engine {
         self.cfg.gate_output && self.objective.is_none()
     }
 
+    /// A tool it used: its id, sent to the terminals as an `act` line.
+    fn act(&mut self, kind: &str, text: &str) -> u64 {
+        let id = self.act_next;
+        self.act_next += 1;
+        self.last_tool_mono = clock::mono_us();
+        let _ = self.tx.send(Event::Act(crate::client::ActLine {
+            id,
+            t_us: clock::now_us(),
+            end: false,
+            ok: true,
+            kind: kind.to_string(),
+            text: text.to_string(),
+        }));
+        id
+    }
+
+    /// What a tool use came to: sent as the `act` line ending it.
+    fn act_end(&mut self, id: u64, ok: bool, text: String) {
+        let _ = self.tx.send(Event::Act(crate::client::ActLine {
+            id,
+            t_us: clock::now_us(),
+            end: true,
+            ok,
+            kind: String::new(),
+            text,
+        }));
+    }
+
     /// A command line it wrote: run in its terminal's sandbox (`term.md`),
     /// in order, one at a time; its output comes back as a document when it
     /// ends (`poll_term`).
@@ -1550,6 +1575,8 @@ impl Engine {
         }
         let id = term.submit(cmd);
         self.term_pending += 1;
+        let act = self.act("run", cmd);
+        self.run_acts.insert(id, act);
         let _ = self
             .tx
             .send(Event::TermStart(id, clock::now_us(), cmd.to_string()));
@@ -1563,6 +1590,20 @@ impl Engine {
             self.term_pending = self.term_pending.saturating_sub(1);
             let now = clock::now_us();
             let _ = self.tx.send(Event::TermEnd(now, ran.clone()));
+            if let Some(act) = self.run_acts.remove(&ran.id) {
+                let first = ran
+                    .out
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("(no output)");
+                let lines = ran.out.lines().count();
+                let summary = match (ran.code, ran.timed_out) {
+                    (_, true) => format!("stopped at the time limit; {lines} lines: {first}"),
+                    (Some(c), _) => format!("exit {c}, {:.0} ms, {lines} lines: {first}", ran.ms),
+                    (None, _) => format!("did not run: {first}"),
+                };
+                self.act_end(act, ran.code == Some(0) && !ran.timed_out, summary);
+            }
             let how = match (ran.code, ran.timed_out) {
                 (_, true) => format!("stopped at the limit of {} s", MAX_TERM_SECS),
                 (Some(c), _) => format!("exit {c}"),
@@ -1585,7 +1626,7 @@ impl Engine {
         }
     }
 
-    fn add_note(&mut self, body: &str) {
+    fn add_note(&mut self, body: &str) -> String {
         // In development a note's code is checked against the code
         // (`verify.md`): a name that is not there is marked on the note, and
         // the stream is told what is.
@@ -1629,11 +1670,19 @@ impl Engine {
             let _ = writeln!(f, "- {kept}");
         }
         self.note(format!("noted: {kept}"));
+        if kept == body {
+            "kept in notes.md".to_string()
+        } else {
+            format!(
+                "kept in notes.md, marked unverified: {}",
+                kept[body.len()..].trim()
+            )
+        }
     }
 
     /// `[unnote: TEXT]`: its notes containing TEXT (any case) removed, from
     /// memory and from `notes.md`.
-    fn unnote(&mut self, text: &str) {
+    fn unnote(&mut self, text: &str) -> usize {
         let t = text.to_lowercase();
         let before = self.notes.len();
         self.notes.retain(|n| !n.to_lowercase().contains(&t));
@@ -1650,6 +1699,7 @@ impl Engine {
             n => format!("removed your {n} notes containing {text:?}"),
         });
         self.queue.push_back((msg, "unnoted".into()));
+        gone
     }
 
     /// A preference it stated: kept (`preferences.md`), shown to it again
@@ -2642,8 +2692,12 @@ impl Engine {
     /// lines, 1-based and inclusive): read it into the queue if it fits the
     /// room left (`read_room`), or tell it why not, with the file's size so
     /// it can ask for a range.
-    fn read_request(&mut self, spec: &str) -> Result<()> {
-        let (path, range) = read_range(spec);
+    fn read_request(&mut self, id: u64, spec: &str) -> Result<()> {
+        // A path written URL-style (`Intel%20Phi%20Stream`) is the path it
+        // means: on the live service it read one so and concluded the file
+        // did not exist.
+        let spec = percent_decoded(spec);
+        let (path, range) = read_range(&spec);
         // In development, paths are the repository's (`docs/dev.md`); one
         // the repository lacks is looked for in the workspace next, where
         // its own records are (it asked for reflect.log and was told the
@@ -2677,7 +2731,7 @@ impl Engine {
                         root.display()
                     ),
                 };
-                return self.read_failed(&p, &msg);
+                return self.read_failed(id, &p, &msg);
             }
         }
         let outcome = fs::metadata(&p)
@@ -2735,7 +2789,7 @@ impl Engine {
                     Some((dir, names)) => format!("{e}; {} holds: {names}", dir.display()),
                     None => e,
                 };
-                return self.read_failed(&p, &e);
+                return self.read_failed(id, &p, &e);
             }
         };
         let what = match range {
@@ -2770,11 +2824,17 @@ impl Engine {
                 "{} is too big to read now ({n} tokens, room {room})",
                 p.display()
             ));
+            self.act_end(
+                id,
+                false,
+                format!("too big to read now: {n} tokens, room {room}; read it by lines"),
+            );
             return self.put(msg);
         }
         self.queue
             .push_back((framed, format!("read {}", p.display())));
         self.note(format!("reading {} for it ({n} tokens)", p.display()));
+        self.act_end(id, true, format!("{what}, {n} tokens"));
         Ok(())
     }
 
@@ -2784,7 +2844,8 @@ impl Engine {
     /// line in the chain each time. (A limit of one failure line a minute,
     /// whatever the path, hid most failures and their listings: in the dev
     /// session it asked for the same missing log.txt every few seconds.)
-    fn read_failed(&mut self, p: &Path, e: &str) -> Result<()> {
+    fn read_failed(&mut self, id: u64, p: &Path, e: &str) -> Result<()> {
+        self.act_end(id, false, e.to_string());
         let mono = clock::mono_us();
         let key = p.display().to_string();
         self.failed_reads.retain(|_, t| mono - *t < 300_000_000);
@@ -2880,8 +2941,8 @@ impl Engine {
         // Files the mind asked for.
         if idle && !self.pending_reads.is_empty() {
             let paths = std::mem::take(&mut self.pending_reads);
-            for p in paths {
-                self.read_request(&p)?;
+            for (id, p) in paths {
+                self.read_request(id, &p)?;
             }
         }
 
@@ -2928,6 +2989,26 @@ impl Engine {
                 ),
             };
             self.put(line)?;
+            return Ok(());
+        }
+
+        // No tool used for a while: it is reminded to check something real
+        // (what it has not checked with a tool it does not know), at a line's
+        // end, at most once per `TOOL_IDLE_US`.
+        if idle
+            && !self.in_code
+            && self.line_start
+            && self.summary.is_none()
+            && mono - self.last_tool_mono >= TOOL_IDLE_US
+            && mono - self.last_tool_nudge_mono >= TOOL_IDLE_US
+        {
+            self.last_tool_nudge_mono = mono;
+            let secs = (mono - self.last_tool_mono) / 1_000_000;
+            let msg = self.framed_system(&format!(
+                "no tool used for {secs} s: what you have not checked with a tool you do not know; check one real thing now, with [run: COMMAND] or [read: PATH], and read what it returns"
+            ));
+            self.put(msg)?;
+            self.note(format!("no tool for {secs} s; reminded"));
             return Ok(());
         }
 
@@ -3342,6 +3423,27 @@ fn fence_step(tail: &str, piece: &str) -> (bool, String) {
     };
     (n % 2 == 1, tail)
 }
+/// `%XX` sequences decoded (a path written URL-style, `Intel%20Phi`);
+/// anything else, and a `%` not followed by two hex digits, kept.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// `PATH:START-END` as the path and the lines (1-based, inclusive); a
 /// path with no such suffix whole.
 fn read_range(spec: &str) -> (&str, Option<(usize, usize)>) {
@@ -3491,6 +3593,17 @@ mod tests {
             vec!["first".to_string(), "second".to_string()]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn url_style_paths_are_decoded() {
+        assert_eq!(
+            percent_decoded("/home/u/Intel%20Phi%20Stream/src/engine.rs:1-20"),
+            "/home/u/Intel Phi Stream/src/engine.rs:1-20"
+        );
+        assert_eq!(percent_decoded("100%"), "100%");
+        assert_eq!(percent_decoded("a%2"), "a%2");
+        assert_eq!(percent_decoded("a%zzb"), "a%zzb");
     }
 
     #[test]

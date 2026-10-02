@@ -20,7 +20,7 @@ use crossterm::event::{self, Event as TEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{Color, ResetColor};
 use crossterm::{cursor, execute, queue, terminal};
 
-use crate::client::{escape, parse, unescape, Client, Delib, DelibKind, Msg, TermLine};
+use crate::client::{escape, parse, unescape, ActLine, Client, Delib, DelibKind, Msg, TermLine};
 use crate::engine::{Kind, Mode, Status};
 use crate::format::{self, Class};
 use crate::mind::Reading;
@@ -355,6 +355,29 @@ impl View {
         while self.term_chars > KEEP_DELIB_CHARS && self.term.len() > 1 {
             let p = self.term.remove(0);
             self.term_chars -= p.text.chars().count();
+        }
+    }
+
+    /// A tool use into the output: its kind and what it was given under its
+    /// time, then what it came to.
+    fn act_push(&mut self, a: &ActLine) {
+        self.speaking = false;
+        let p = if a.end {
+            Piece {
+                text: format!("  {} {}\n", if a.ok { "->" } else { "x>" }, a.text),
+                kind: Kind::Given,
+            }
+        } else {
+            Piece {
+                text: format!("\n[{}] {}: {}\n", crate::clock::hms(a.t_us), a.kind, a.text),
+                kind: Kind::Speak,
+            }
+        };
+        self.output_chars += p.text.chars().count();
+        self.output.push(p);
+        while self.output_chars > KEEP_DELIB_CHARS && self.output.len() > 1 {
+            let p = self.output.remove(0);
+            self.output_chars -= p.text.chars().count();
         }
     }
 
@@ -999,7 +1022,7 @@ fn draw_term(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
 /// has said nothing yet.
 fn draw_output(s: &mut Screen, inner: Rect, v: &View, scroll: usize) {
     if v.output.is_empty() {
-        let why = "nothing said aloud since this terminal connected";
+        let why = "no tool use or speech since this terminal connected";
         s.put_to(
             inner.top,
             inner.left + 1,
@@ -1575,6 +1598,13 @@ pub fn run(socket: &Path, follow: bool) -> Result<()> {
                     Ok(Msg::Ok(_)) => {}
                     Ok(Msg::Delib(d)) => {
                         v.delib_push(d);
+                        dirty = true;
+                    }
+                    Ok(Msg::Act(a)) => {
+                        if !a.end {
+                            v.log_push(a.t_us, format!("{}: {}", a.kind, a.text));
+                        }
+                        v.act_push(&a);
                         dirty = true;
                     }
                     Ok(Msg::Term(t)) => {

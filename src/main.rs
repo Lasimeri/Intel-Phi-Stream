@@ -103,6 +103,19 @@ struct ModelArgs {
     top_k: i32,
     #[arg(global = true, long, default_value_t = 0.95)]
     top_p: f32,
+    /// Tokens under this share of the likeliest one's probability dropped (0: off).
+    #[arg(global = true, long, default_value_t = 0.0)]
+    min_p: f32,
+    /// DRY against repeated sequences (llama.cpp's sampler): its multiplier (0: off).
+    #[arg(global = true, long, default_value_t = 0.0)]
+    dry_multiplier: f32,
+    #[arg(global = true, long, default_value_t = 1.75)]
+    dry_base: f32,
+    #[arg(global = true, long, default_value_t = 2)]
+    dry_allowed_length: i32,
+    /// How far back DRY looks (-1: the whole context).
+    #[arg(global = true, long, default_value_t = -1)]
+    dry_last_n: i32,
     /// The sampler's seed (default: from the clock, so each start is its own).
     #[arg(global = true, long)]
     seed: Option<u32>,
@@ -505,6 +518,11 @@ fn sampling(m: &ModelArgs) -> Sampling {
         temp: m.temp,
         top_k: m.top_k,
         top_p: m.top_p,
+        min_p: m.min_p,
+        dry_multiplier: m.dry_multiplier,
+        dry_base: m.dry_base,
+        dry_allowed_length: m.dry_allowed_length,
+        dry_last_n: m.dry_last_n,
         seed: m.seed.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -789,6 +807,11 @@ fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
             Ok(Event::Objective(_, t)) => eprintln!("\x1b[2mobjective: {t}\x1b[0m"),
             Ok(Event::TermStart(_, _, c)) => eprintln!("\x1b[2m$ {c}\x1b[0m"),
             Ok(Event::TermEnd(_, r)) => eprintln!("\x1b[2m{}\x1b[0m", r.out),
+            Ok(Event::Act(a)) => eprintln!(
+                "\x1b[2m{} {}\x1b[0m",
+                if a.end { "  ->" } else { a.kind.as_str() },
+                a.text
+            ),
             Ok(Event::Delib(d)) => eprintln!("\x1b[2mbeside: {}\x1b[0m", d.text),
             Ok(Event::Done { .. }) => {}
             Ok(Event::Stopped) | Err(_) => break,

@@ -79,7 +79,8 @@ repository's `scripts/phi-ggml.sh` sets it and starts the workers, which
 `scripts/phi-stream.sh` arranges); unset, a `libggml_phi.so` beside the
 binary is used when there is one, else the GPU and the host alone.
 
-`serve` (and `start`, `dev`) take `--second-chain` (the reflection beside
+`--min-p` and `--dry-multiplier` (with `--dry-base`, `--dry-allowed-length`,
+`--dry-last-n`) are global sampling options (`llm.md`). `serve` (and `start`, `dev`) take `--second-chain` (the reflection beside
 the live token, `engine.md`; `chain on|off` on the socket while it runs),
 `--terminal` (the stream's sandboxed
 terminal, `term.md`) and `--no-objective-gate` (its output not held until
