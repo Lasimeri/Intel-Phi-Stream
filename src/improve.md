@@ -104,6 +104,19 @@ the loop on it has, beside `propose`:
   minutes, what is building and the last entries of `improve.log`.
 One build at a time, trial or candidate.
 
+## A trap: the working copy's lower layer is the live tree
+
+The stream's overlay lays its writes over the repository's working tree,
+not over `HEAD`: a file it edits is copied up whole, with whatever is
+uncommitted in the tree at that moment. Its first trial (2026-10-02,
+`trial/`) carried Claude's grounding code, uncommitted then, beside its
+own one-line change. The staleness refusal catches it once those edits
+are committed (the file changed after `head_told`), but the rule for
+Claude is plain: commit before the stream edits, or work in another
+worktree while the loop runs.
+
+A format failure is told with its fix (rustfmt is in its terminal).
+
 ## What it reads
 
 The person (2026-10-02): "the model needs to improve its harness with all

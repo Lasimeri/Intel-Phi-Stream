@@ -385,6 +385,10 @@ pub fn summarize(log: &str) -> String {
         s.truncate(cut);
         s.push_str("\n...");
     }
+    // rustfmt's complaint has its fix: the stream's own terminal has rustfmt.
+    if log.contains("Diff in ") {
+        s.push_str("\nformat failed: run rustfmt --edition 2021 on the files named (with run, in your working copy), then build again");
+    }
     let tail: Vec<&str> = lines.iter().rev().take(6).rev().copied().collect();
     format!("{s}\nthe build's last lines:\n{}", tail.join("\n"))
 }
