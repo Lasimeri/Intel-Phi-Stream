@@ -551,6 +551,10 @@ const AGAINST_PRIMER: &str = "Against it:";
 /// The goal probe: at most one a 30 s, each one copy of the live sequence
 /// and one prefill of its question.
 const GOAL_EVERY_US: i64 = 30_000_000;
+/// The longest opening a fork is given (the chain's question, the goal
+/// probe's): fed in pieces of a batch, so an objective of any sensible length
+/// fits; past this something is wrong with it.
+const MAX_OPENING: usize = 2048;
 /// Grounding: the repository read again after 30 s; a missing name told
 /// again after 10 minutes at most.
 const GROUND_REPO_US: i64 = 30_000_000;
@@ -2002,7 +2006,7 @@ impl Engine {
             (None, _) => self.reflect_marker(&shown),
         };
         let prompt = self.tok(&marker, self.cfg.agent)?;
-        if prompt.is_empty() || prompt.len() >= self.llm.batch_cap() {
+        if prompt.is_empty() || prompt.len() > MAX_OPENING {
             return Ok(());
         }
         let seq = self.free_seqs.pop().unwrap();
@@ -2063,7 +2067,7 @@ impl Engine {
             ),
         };
         let tokens = self.tok(&q, self.cfg.agent)?;
-        if tokens.is_empty() || tokens.len() + 1 >= self.llm.batch_cap() {
+        if tokens.is_empty() || tokens.len() > MAX_OPENING {
             return Ok(());
         }
         self.goal_mono = mono;
@@ -3845,17 +3849,36 @@ impl Engine {
         self.llm.seq_cp(self.live, w, -1, -1);
         let mut tokens = vec![self.next];
         tokens.extend_from_slice(placebo);
-        let rows = self.llm.decode(&[Lane {
-            seq: w,
-            tokens: &tokens,
-            pos0: self.pos(),
-            logits: true,
-        }])?;
-        // Not the live row: nobody reads the capture.
-        if let Some(cap) = self.llm.capture() {
-            cap.take();
+        // In pieces of a batch, the row read after the last: the goal probe's
+        // question holds the objective, and a long one ran past the batch
+        // (the probe was skipped while the objective was long).
+        let cap = self.llm.batch_cap().max(2) - 1;
+        let mut pos = self.pos();
+        let mut row = None;
+        let n = tokens.len();
+        for (i, piece) in tokens.chunks(cap).enumerate() {
+            let last = (i + 1) * cap >= n;
+            let rows = self.llm.decode(&[Lane {
+                seq: w,
+                tokens: piece,
+                pos0: pos,
+                logits: last,
+            }])?;
+            // Not the live row: nobody reads the capture.
+            if let Some(cap) = self.llm.capture() {
+                cap.take();
+            }
+            pos += piece.len() as i32;
+            if last {
+                row = rows.first().copied();
+            }
         }
-        let out = self.llm.logits(rows[0])?.to_vec();
+        let Some(row) = row else {
+            self.llm.seq_rm(w, -1, -1);
+            self.free_seqs.push(w);
+            return Ok(None);
+        };
+        let out = self.llm.logits(row)?.to_vec();
         self.llm.seq_rm(w, -1, -1);
         self.free_seqs.push(w);
         Ok(Some(out))
@@ -4204,10 +4227,16 @@ impl Engine {
                 self.finish_cycle(t0, 1, false);
                 return Ok(());
             }
-            let lane: Vec<i32> = if c.fed < c.prompt.len() {
-                c.prompt[c.fed..].to_vec()
+            // A long opening goes in pieces of half a batch, its row read only
+            // after the last: one holding the objective ran past the batch, and
+            // the chain never forked (nothing argued against the stream while
+            // its objective was long).
+            let piece_cap = (self.llm.batch_cap() / 2).max(1);
+            let (lane, last_piece): (Vec<i32>, bool) = if c.fed < c.prompt.len() {
+                let end = (c.fed + piece_cap).min(c.prompt.len());
+                (c.prompt[c.fed..end].to_vec(), end == c.prompt.len())
             } else {
-                vec![*c.out.last().unwrap()]
+                (vec![*c.out.last().unwrap()], true)
             };
             // The guide lane in the same batch, in the room left.
             let room = self.llm.batch_cap().saturating_sub(1 + lane.len());
@@ -4225,7 +4254,7 @@ impl Engine {
                     seq: c.seq,
                     tokens: &lane,
                     pos0: c.pos,
-                    logits: true,
+                    logits: last_piece,
                 },
             ];
             if let Some((gl, gpos, aligned)) = &g {
@@ -4238,10 +4267,24 @@ impl Engine {
             }
             let rows = self.llm.decode(&lanes)?;
             drop(lanes);
+            // Rows come for the lanes that asked, in order: the chain's only
+            // after its last piece.
+            let guide_row = if last_piece { 2 } else { 1 };
             if let Some((gl, _, aligned)) = &g {
-                self.guide_fed(gl.len(), *aligned, aligned.then(|| (rows[0], rows[2])))?;
+                self.guide_fed(
+                    gl.len(),
+                    *aligned,
+                    aligned.then(|| (rows[0], rows[guide_row])),
+                )?;
             }
             c.pos += lane.len() as i32;
+            if !last_piece {
+                c.fed += lane.len();
+                self.reflecting = Some(c);
+                self.advance(rows[0])?;
+                self.finish_cycle(t0, lane.len(), true);
+                return Ok(());
+            }
             c.fed = c.prompt.len();
             let t = self.chain_token(rows[1])?;
             let piece = self.llm.text(&[t]);

@@ -706,3 +706,13 @@ against the repository at its end (`ground_line`, from `lens_aside`,
 which takes every line's text), and each message to Claude in
 `send_claude`; findings go beside its next turn as an aside, into
 `ground.log`, and beside the message for Claude.
+
+Long openings go in pieces (2026-10-02): the second chain's opening and
+the goal probe's question hold the objective, and both were fed in one
+batch, guarded by the batch's size (129 tokens on the dev launch): with a
+long objective the opposing chain never forked and the probe never asked,
+silently (from 16:10 to 17:00 not one objection reached the stream, and
+`goal.log` held six answers). The chain's opening now goes half a batch at
+a time beside the live token, its row read only after the last piece;
+`logits_without` decodes its tokens a batch at a time. `MAX_OPENING`
+(2048 tokens) bounds both.
