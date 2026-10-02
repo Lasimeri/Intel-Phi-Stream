@@ -531,6 +531,8 @@ const GUIDE_MAX: usize = 4096;
 
 /// The longest reflection, and the least time between two.
 const CHAIN_MAX: usize = 64;
+/// The opposing chain's length: at 64 its objections were cut mid-sentence.
+const AGAINST_MAX: usize = 112;
 const CHAIN_EVERY_US: i64 = 1_000_000;
 /// Why a summary is asked for: the context nearly full, a restart (quit),
 /// a new persona.
@@ -1990,9 +1992,19 @@ impl Engine {
             .filter(|_| self.chain_against)
             .map(|o| o.1.replace(['[', ']'], ""));
         let against = goal.is_some();
+        // The line itself, as the opposing chain's question quotes it: given
+        // only the line's J-space words, it argued against the word list ("a
+        // label set, not a step") instead of what the line said.
+        let last: String = {
+            let from = self.line_from.min(self.history.len());
+            let t = self.llm.text(&self.history[from..]);
+            let t = t.trim().replace(['"', '[', ']'], "");
+            let n = t.chars().count();
+            t.chars().skip(n.saturating_sub(300)).collect()
+        };
         let marker = match (&goal, self.cfg.frame) {
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
-                "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. On your mind in its last line: {}. Argue against that line as a step toward the objective: in a sentence or two, the strongest objection to it, or where it drifts from the objective.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
+                "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your last line: \"{last}\" (on your mind in it: {}). Argue against that line, its content, as a step toward the objective: in a sentence or two, the strongest objection to what it says or does, or where it drifts from the objective.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
                 shown.join(", ")
             ),
             (Some(g), Frame::Journal) => format!(
@@ -4290,7 +4302,7 @@ impl Engine {
             let piece = self.llm.text(&[t]);
             c.out.push(t);
             let done = self.llm.is_eog(t)
-                || c.out.len() >= CHAIN_MAX
+                || c.out.len() >= if c.against { AGAINST_MAX } else { CHAIN_MAX }
                 || (piece.contains('\n') && !self.llm.text(&c.out).trim().is_empty());
             let _ = self.tx.send(Event::Delib(crate::client::Delib {
                 kind: crate::client::DelibKind::Piece,

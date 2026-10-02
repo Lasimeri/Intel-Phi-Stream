@@ -716,3 +716,7 @@ silently (from 16:10 to 17:00 not one objection reached the stream, and
 a time beside the live token, its row read only after the last piece;
 `logits_without` decodes its tokens a batch at a time. `MAX_OPENING`
 (2048 tokens) bounds both.
+The opposing chain's question quotes the line itself (its last 300
+characters) beside its J-space words: given only the words, it argued
+against the word list ("a label set, not a step"). Its objections run to
+`AGAINST_MAX` (112 tokens): at 64 they were cut mid-sentence.
