@@ -65,6 +65,16 @@ Decision:
 
 The journal frame puts `« ` before the bracket.
 
+**The agent frame asks in a user turn** (`question_agent`): the copy's
+turn is closed, the question asked as the user, and the answer opened at
+`Decision:` with the thinking closed. Asked in brackets inside its turn,
+the question was read as noise: on the live service (2026-10-02) the
+likeliest token at `Decision:` was the chosen word itself (0.95 for
+` path`), the format share 0.000, and 67 of 115 checks went unread. Its
+checks run only inside its thinking, never in a tool call (a changed word
+would change its code or its command). The second chain's marker is asked
+the same way, and its reflection is told at its next user turn.
+
 **A newline first.** In the first dev session the model's likeliest
 token after `Decision:` was a newline (p 0.49 to 0.58): it answers on the
 next line. When the newline outweighs keep and write together, it is fed

@@ -3960,6 +3960,11 @@ impl Engine {
     /// the model comes back for the next run.
     pub fn run(mut self) -> Result<Llm> {
         let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
+        // An objective kept from before is sent to the terminals too: their
+        // OBJECTIVE said "none sent by this service" while it worked on one.
+        if let Some((t, text)) = self.objective.clone() {
+            let _ = self.tx.send(Event::Objective(t, text));
+        }
         let opening = self.opening();
         let tokens = self.tok(&opening, true)?;
         self.note(format!(
