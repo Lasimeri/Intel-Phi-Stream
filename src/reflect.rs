@@ -346,6 +346,26 @@ pub fn question(frame: Frame, t_us: Option<i64>, chosen: &str, words: &[&str]) -
     }
 }
 
+/// The question in the agent frame: the copy's turn closed and the
+/// question asked in a user turn, its answer opened at `Decision:` with the
+/// thinking closed. Put inside its turn in brackets, the question was read
+/// as noise: at `Decision:` it went on with its own sentence (the chosen
+/// word itself at 95 percent), and 63 of 106 checks went unread.
+pub fn question_agent(t_us: Option<i64>, chosen: &str, words: &[&str]) -> String {
+    let c = chosen.trim().replace('"', "'");
+    let on = if words.is_empty() {
+        "nothing in particular".to_string()
+    } else {
+        words.join(", ")
+    };
+    let at = t_us
+        .map(|t| format!("at {}, ", clock::hms(t)))
+        .unwrap_or_default();
+    format!(
+        "<|im_end|>\n<|im_start|>user\n[{at}a check on your next word: you were about to write \"{c}\" where your turn stops; on your mind there: {on}. Is \"{c}\" right at that place?] Answer with keep, or with write and the word to use instead.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{DECISION}"
+    )
+}
+
 /// The line the question ends on: the deliberation's first token after it
 /// is read as a choice between ` keep` and ` write` (their probabilities,
 /// not a sample), and only a write goes on to name the word.

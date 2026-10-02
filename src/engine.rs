@@ -1485,6 +1485,24 @@ impl Engine {
         if !quiet {
             return Ok(());
         }
+        // The agent frame: a reflection is told at its next user turn
+        // (nothing goes inside a turn), and the chain forks only from its
+        // thinking.
+        if self.cfg.agent {
+            if let Some(text) = self.reflection.take() {
+                self.tell(&format!("your second look, beside your turn: {text}"))?;
+                let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                    kind: crate::client::DelibKind::End,
+                    t_us: clock::now_us(),
+                    pos: self.history.len() as i32,
+                    text: "told at its next turn".into(),
+                }));
+            }
+            if self.speaking {
+                self.line_words.clear();
+                return Ok(());
+            }
+        }
         if let Some(text) = self.reflection.take() {
             let at = clock::hms(clock::now_us());
             let line = match self.cfg.frame {
@@ -1534,6 +1552,12 @@ impl Engine {
         words.sort_by(|a, b| b.1.total_cmp(&a.1));
         let shown: Vec<String> = words.into_iter().take(6).map(|w| w.0).collect();
         let marker = match self.cfg.frame {
+            // The agent frame: asked in a user turn on a copy, as the check
+            // is (inside its turn a bracketed line is read as noise).
+            Frame::Chat if self.cfg.agent => format!(
+                "<|im_end|>\n<|im_start|>user\n[A second look at your thinking, beside it: on your mind in its last line: {}. In a sentence or two: what are you missing, getting wrong, or not checking with a tool?]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{CHAIN_PRIMER}",
+                shown.join(", ")
+            ),
             Frame::Journal => format!(
                 "\n« [beside the journal; on its mind in the line above: {}]\n{CHAIN_PRIMER}",
                 shown.join(", ")
@@ -1543,7 +1567,7 @@ impl Engine {
                 shown.join(", ")
             ),
         };
-        let prompt = self.tok(&marker, false)?;
+        let prompt = self.tok(&marker, self.cfg.agent)?;
         if prompt.is_empty() || prompt.len() >= self.llm.batch_cap() {
             return Ok(());
         }
@@ -1626,7 +1650,8 @@ impl Engine {
         // What only repeats the journal's frame is no reflection.
         let echo = said.is_empty()
             || said.contains("beside the journal")
-            || said.contains("on its mind in the line");
+            || said.contains("on its mind in the line")
+            || said.contains("second look at your thinking");
         let opening = word_set(&said);
         let repeat = self
             .recent_reflections
@@ -2899,7 +2924,10 @@ impl Engine {
         let recovered = rf.recovered(mono);
         // Never inside its code (a check replaced a piece of a token with a
         // word and broke a #define in the dev session).
+        // In the agent frame only inside its thinking: a word changed in a
+        // tool call would change its code or its command.
         let free = !self.in_code
+            && !(self.cfg.agent && self.speaking)
             && self.check.is_none()
             && self.reading.is_none()
             && self.chase.is_none()
@@ -2934,10 +2962,14 @@ impl Engine {
         let shown: Vec<&str> = words.iter().map(String::as_str).collect();
         // A task's question carries no time: a measurement repeats.
         let shown_at = (!self.cfg.task).then_some(t_us);
-        let question = self.tok(
-            &reflect::question(self.cfg.frame, shown_at, &text, &shown),
-            false,
-        )?;
+        let question = if self.cfg.agent {
+            self.tok(&reflect::question_agent(shown_at, &text, &shown), true)?
+        } else {
+            self.tok(
+                &reflect::question(self.cfg.frame, shown_at, &text, &shown),
+                false,
+            )?
+        };
         let snap = self.free_seqs.pop().unwrap();
         let seq = self.free_seqs.pop().unwrap();
         for q in [snap, seq] {
@@ -3542,13 +3574,24 @@ impl Engine {
             s.push(self.next);
             // Its end mark, or the end of its turn, counts only once the summary
             // has some length: an early --- is not a summary.
+            let ended = self.next == self.eot
+                || self.llm.is_eog(self.next)
+                || self.next == self.think_close;
             let done = s.len() >= self.cfg.summary_max
                 || (s.len() >= SUMMARY_MIN && {
                     let tail = self.llm.text(&s[s.len().saturating_sub(6)..]);
-                    tail.contains("\n---") || self.next == self.eot || self.next == self.think_close
+                    tail.contains("\n---") || ended
                 });
             if done {
-                let s = self.summary.take().unwrap();
+                let mut s = self.summary.take().unwrap();
+                // The token that ended it is no part of it: rendered, an
+                // `<|im_end|>` would have the summary refused (`degenerate`).
+                while s
+                    .last()
+                    .is_some_and(|&t| t == self.eot || t == self.think_close || self.llm.is_eog(t))
+                {
+                    s.pop();
+                }
                 let mut text = self.llm.text(&s);
                 if let Some(i) = text.rfind("\n---") {
                     text.truncate(i);
