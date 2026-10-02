@@ -4,6 +4,7 @@
 //! (`serve`); the terminal and the one-shot commands are its clients. See
 //! main.md.
 
+mod agent;
 mod capture;
 mod check;
 mod client;
@@ -138,6 +139,10 @@ enum FrameArg {
     Journal,
     /// The model's chat template: thoughts in <think>, speech after.
     Chat,
+    /// The chat template with the model's own tool calls (src/agent.md): it
+    /// reasons in <think>, then calls its tools; their results come back before
+    /// its next turn.
+    Agent,
 }
 
 #[derive(Args, Clone)]
@@ -587,8 +592,9 @@ const PARAGRAPH: &str = "The scheduler assigns every operation of the graph to t
 fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
     let frame = match s.frame {
         FrameArg::Journal => Frame::Journal,
-        FrameArg::Chat => Frame::Chat,
+        FrameArg::Chat | FrameArg::Agent => Frame::Chat,
     };
+    let agent = matches!(s.frame, FrameArg::Agent);
     let workspace = PathBuf::from(expand_home(&s.workspace));
     // The repository it develops with Claude (docs/dev.md), checked now.
     let dev = match &s.dev {
@@ -628,6 +634,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         .unwrap_or(if reflect.is_some() { 1.0 } else { 0.0 });
     let seed = s.seed_text.clone().unwrap_or_else(|| match frame {
         Frame::Journal => "(the room is quiet; nothing has been said. The journal goes on from wherever its thoughts were.)".to_string(),
+        Frame::Chat if agent => "Begin: reason about your objective, then act on it with a tool.".to_string(),
         Frame::Chat => "[The stream begins. Nobody has spoken yet.]".to_string(),
     });
     Ok(Config {
@@ -655,6 +662,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         gate_output: !s.no_objective_gate,
         summary_on_quit: false,
         second_chain: s.second_chain,
+        agent,
     })
 }
 

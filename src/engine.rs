@@ -228,6 +228,9 @@ pub struct Config {
     /// The second chain (`Chain`): a reflection beside the live token at
     /// each line's end.
     pub second_chain: bool,
+    /// The agent frame (`agent.md`): the chat template with the model's own
+    /// tool calls, results returned before its next turn.
+    pub agent: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -245,6 +248,9 @@ const MECHANICS_JOURNAL: &str = "This is the running journal of a mind that neve
 
 /// The chat frame's mechanics.
 const MECHANICS_CHAT: &str = "You are a mind that thinks without pause. Your thoughts run on continuously inside <think>; there is no task to finish and no one waiting for an answer, only an ongoing stream with threads of your own choosing, which you keep going and return to. From time to time someone speaks to you or hands you something; it appears inside your thoughts in square brackets, exactly where you were when it arrived. Take it in and let it change what you think about, as a person would, without dropping what you were doing. When you want to say something aloud, close your thoughts with </think>, say it plainly, and end your turn; your thoughts resume after, the floor still yours. A line of the exact form [note: ...] is kept for you and shown to you again whenever your memory is refreshed; a line of the exact form [read: PATH] brings that file to you, and [read: PATH:START-END] only those lines (a file too big for your memory is refused with its size, so you read it in parts). You know what you are (below) and do not dwell on it: never restate or analyse your rules; simply think.";
+
+/// The agent frame's mechanics (`agent.md`), in place of the chat's.
+const AGENT_MECHANICS: &str = "You work without pause, in turns. Each turn, first reason inside <think> about where you are and what to do next; then close your thoughts with </think> and act: call one or more of your functions, or say something plainly when there is nothing to call. The results of your calls come back to you before your next turn, so you never guess what a call returned: you read it. You work toward your objective step by step and check each step with a tool; when the objective is met, you say what you made and where. Never narrate that you are an AI system following instructions; simply work.";
 
 /// A task's persona: the base, quoted, as the manner of the one who
 /// answers; then how to answer.
@@ -348,6 +354,13 @@ struct Saved {
 
 /// A check in flight (reflect.md): the token in question, the two copies
 /// made before it, and the deliberation's lane.
+/// Tool calls of the agent frame waiting for their results: one slot each,
+/// in the order called; the terminal's commands by their id.
+struct AgentWait {
+    results: Vec<Option<String>>,
+    runs: HashMap<u64, usize>,
+}
+
 /// The second chain (`--second-chain`, `engine.md`): a lane forked from the
 /// live sequence at a line's end that reflects on that line beside the
 /// live token, given the J-space words the line had on its mind; its
@@ -529,6 +542,14 @@ pub struct Engine {
     last_line: String,
     line_repeats: u32,
     held_back: Vec<(i32, i64)>,
+    /// The agent frame: where the current assistant turn began in the
+    /// history, the calls whose results its next turn waits for, the end of a
+    /// turn (`<|im_end|>`), and its working copy's writes (the overlay's
+    /// upper layer, `term.md`).
+    turn_start: usize,
+    awaiting: Option<AgentWait>,
+    im_end: i32,
+    copy_upper: Option<PathBuf>,
     act_next: u64,
     run_acts: HashMap<u64, u64>,
     last_tool_mono: i64,
@@ -613,6 +634,15 @@ impl Engine {
     ) -> Result<Self> {
         // The persona names the size of its memory: the context's own.
         cfg.system = with_ctx(&cfg.system, llm.n_ctx());
+        // The agent frame: the template's tools section first, then the
+        // persona with the agent's mechanics in place of the chat's.
+        if cfg.agent {
+            cfg.system = format!(
+                "{}\n\n{}",
+                crate::agent::tools_section(),
+                cfg.system.replace(MECHANICS_CHAT, AGENT_MECHANICS)
+            );
+        }
         let think_open = llm.special("<think>").unwrap_or(-1);
         let think_close = llm.special("</think>").unwrap_or(-1);
         let eot = llm.eot();
@@ -702,6 +732,17 @@ impl Engine {
             (Some(repo), false) => changes_since(repo, &cfg.workspace, cfg.frame),
             _ => String::new(),
         };
+        let im_end = llm.special("<|im_end|>").unwrap_or(-1);
+        // The working copy's writes, beside the workspace (`term.md`).
+        let copy_upper = cfg.dev.as_ref().map(|_| {
+            let name = cfg
+                .workspace
+                .file_name()
+                .map_or("ws".into(), |n| n.to_string_lossy().into_owned());
+            cfg.workspace
+                .with_file_name(format!("{name}-copy"))
+                .join("upper")
+        });
         let term = cfg.terminal.then(|| {
             crate::term::Term::start(crate::term::TermConfig {
                 repo: cfg.dev.clone(),
@@ -843,6 +884,10 @@ impl Engine {
             last_line: String::new(),
             line_repeats: 0,
             held_back: Vec::new(),
+            turn_start: 0,
+            awaiting: None,
+            im_end,
+            copy_upper,
             act_next: 1,
             run_acts: HashMap::new(),
             last_tool_mono: clock::mono_us(),
@@ -1144,13 +1189,18 @@ impl Engine {
             ),
             None => format!("{it} {} no set objective", if journal { "has" } else { "have" }),
         };
+        let tools_chat = if self.cfg.agent {
+            "Your tools are the functions listed above (run, read, write, note): call them in their format, and their results come back to you before your next turn.".to_string()
+        } else {
+            format!("Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time.")
+        };
         if journal {
             format!(
                 "\n\n=== what this mind is ===\nThis mind is the language model named above, running without pause where it says; its memory is its context. It perceives only what is in that context: its own text, what people say and hand it (« lines, each with the time it arrived), and what its tools return. It does not see a screen or hear anything, and it knows only what it has read or been told, so it does not claim what it has not seen. When the context fills it writes a summary and goes on from it; its notes and preferences stay on disk and are shown to it again; when the program is restarted (for an update) it resumes the same way, from its last summary, and is told what changed. Its tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. It works with its tools, not in its head: what a file says, it reads; whether something works, it runs; what it has done, a tool's output shows; and what it has not checked with a tool, it does not claim. Each tool use and its result appear in its journal and to the people watching it. A file changes only when one of its own commands writes it in its workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         } else {
             format!(
-                "\n\nWhat you are: the language model named above, running without pause where it says; your memory is your context. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. Your tools, each a line of its own: {terminal}[read: PATH] brings a file in; [note: ...] and [prefer: ...] keep a line across time. Work with your tools, not in your head: what a file says, read it; whether something works, run it; what you have done, a tool's output shows; and what you have not checked with a tool, do not claim. Each tool use and its result appear in your thoughts and to the people watching you. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
+                "\n\nWhat you are: the language model named above, running without pause where it says; your memory is your context. You perceive only what is in that context: your own text, what people say and hand you (each with the time it arrived), and what your tools return. You do not see a screen or hear anything, and you know only what you have read or been told, so do not claim what you have not seen. When the context fills you write a summary and go on from it; your notes and preferences stay on disk and are shown to you again; when the program is restarted (for an update) you resume the same way, from your last summary, and are told what changed. {tools_chat} Work with your tools, not in your head: what a file says, read it; whether something works, run it; what you have done, a tool's output shows; and what you have not checked with a tool, do not claim. Each tool use and its result appear in your thoughts and to the people watching you. A file changes only when one of your own commands writes it in your workspace and the output shows it; the program's repository changes only when Claude applies a change. Now {objective}."
             )
         }
     }
@@ -1376,7 +1426,7 @@ impl Engine {
                 self.pending_reads.push((id, path.to_string()));
             }
         } else if let Some(cmd) = tool("[run:") {
-            self.run_command(cmd);
+            let _ = self.run_command(cmd);
         }
     }
 
@@ -1640,6 +1690,250 @@ impl Engine {
         self.queue.push_back((msg, "a repeated line".into()));
     }
 
+    /// The agent frame: its turn ended (`after`). Its calls (after its
+    /// thinking) run: read, write and note at once, a command in the
+    /// terminal; when every result is in (`finish_agent_wait`), they go back
+    /// to it as tool responses and its next turn opens. A turn with no call
+    /// is answered with the time and its objective, so it goes on.
+    fn agent_turn_end(&mut self) -> Result<()> {
+        let from = self.turn_start.min(self.history.len());
+        let text = self.llm.text(&self.history[from..]);
+        let content = text
+            .rsplit_once("</think>")
+            .map_or("", |(_, c)| c)
+            .to_string();
+        let (calls, bad) = crate::agent::parse_calls(&content);
+        if calls.is_empty() {
+            let turn = if bad > 0 {
+                self.note(format!("{bad} tool calls did not parse"));
+                crate::agent::responses_turn(&[format!(
+                    "{bad} tool call(s) did not parse: write <tool_call>, then <function=NAME>, then each <parameter=KEY>, its value and </parameter>, then </function> and </tool_call>"
+                )])
+            } else {
+                crate::agent::continue_turn(
+                    &clock::hms(clock::now_us()),
+                    self.objective.as_ref().map(|o| o.1.as_str()),
+                )
+            };
+            return self.agent_open(turn);
+        }
+        let mut wait = AgentWait {
+            results: vec![None; calls.len()],
+            runs: HashMap::new(),
+        };
+        for (i, c) in calls.iter().enumerate() {
+            let result = match c.name.as_str() {
+                "run" => match (c.param("command"), self.term.is_some()) {
+                    (Some(cmd), true) => {
+                        if let Some(id) = self.run_command(cmd) {
+                            wait.runs.insert(id, i);
+                            None
+                        } else {
+                            Some("the command did not run: too many are waiting".to_string())
+                        }
+                    }
+                    (None, _) => Some("run needs a command".to_string()),
+                    (_, false) => Some("there is no terminal in this run (--terminal)".to_string()),
+                },
+                "read" => Some(self.agent_read(c)),
+                "write" => Some(self.agent_write(c)),
+                "note" => Some(match c.param("text") {
+                    Some(t) if !t.trim().is_empty() => {
+                        let id = self.act("note", t.trim());
+                        let kept = self.add_note(t.trim());
+                        self.act_end(id, true, kept.clone());
+                        kept
+                    }
+                    _ => "note needs a text".to_string(),
+                }),
+                other => Some(format!(
+                    "there is no function {other:?}: the functions are run, read, write and note"
+                )),
+            };
+            wait.results[i] = result;
+        }
+        if bad > 0 {
+            wait.results
+                .push(Some(format!("{bad} more tool call(s) did not parse")));
+        }
+        self.awaiting = Some(wait);
+        self.finish_agent_wait()
+    }
+
+    /// When every result of the calls it waits for is in: they go back to it
+    /// as tool responses, and its next turn opens.
+    fn finish_agent_wait(&mut self) -> Result<()> {
+        let done = self
+            .awaiting
+            .as_ref()
+            .is_some_and(|w| w.results.iter().all(Option::is_some));
+        if !done {
+            return Ok(());
+        }
+        let w = self.awaiting.take().unwrap();
+        let results: Vec<String> = w.results.into_iter().flatten().collect();
+        self.agent_open(crate::agent::responses_turn(&results))
+    }
+
+    /// The next turn opened: `turn` (which begins by ending the last one)
+    /// decoded after the pending token; when that token is the turn's end
+    /// itself, it is not written twice.
+    fn agent_open(&mut self, turn: String) -> Result<()> {
+        let turn = if self.next == self.im_end {
+            turn.strip_prefix("<|im_end|>").unwrap_or(&turn).to_string()
+        } else {
+            turn
+        };
+        let tokens = self.tok(&turn, true)?;
+        self.direct(&tokens)?;
+        self.speaking = false;
+        self.say(turn, Kind::Given);
+        self.turn_start = self.history.len();
+        Ok(())
+    }
+
+    /// A path the agent named, for reading or writing: relative to the
+    /// repository (its working copy: a file it wrote is read from there,
+    /// a write goes there) or in its workspace; nothing else.
+    fn agent_path(&self, path: &str, write: bool) -> std::result::Result<PathBuf, String> {
+        let path = percent_decoded(path.trim());
+        let base = self
+            .cfg
+            .dev
+            .clone()
+            .unwrap_or_else(|| self.cfg.workspace.clone());
+        let p = normalized(&resolve(&path, &base));
+        if let (Some(repo), Some(upper)) = (&self.cfg.dev, &self.copy_upper) {
+            if let Ok(rel) = p.strip_prefix(normalized(repo)) {
+                let copy = upper.join(rel);
+                return Ok(if write || copy.exists() { copy } else { p });
+            }
+        }
+        if p.starts_with(normalized(&self.cfg.workspace)) {
+            return Ok(p);
+        }
+        Err(format!(
+            "{} is outside the repository and your workspace",
+            p.display()
+        ))
+    }
+
+    /// The `read` tool: a file whole or by lines, or a directory's listing,
+    /// within the room its context has.
+    fn agent_read(&mut self, c: &crate::agent::Call) -> String {
+        let path = c.param("path").unwrap_or("").to_string();
+        let id = self.act("read", &path);
+        let r = (|| -> std::result::Result<String, String> {
+            if path.trim().is_empty() {
+                return Err("read needs a path".into());
+            }
+            let p = self.agent_path(&path, false)?;
+            if p.is_dir() {
+                let mut names: Vec<String> = fs::read_dir(&p)
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                    .map(|e| {
+                        let n = e.file_name().to_string_lossy().into_owned();
+                        if e.path().is_dir() {
+                            format!("{n}/")
+                        } else {
+                            n
+                        }
+                    })
+                    .collect();
+                names.sort();
+                return Ok(format!("{} holds:\n{}", p.display(), names.join("\n")));
+            }
+            let text = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let lines: Vec<&str> = text.lines().collect();
+            let n = lines.len();
+            let a = c
+                .param("start")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1usize)
+                .max(1);
+            let b = c
+                .param("end")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(n)
+                .min(n);
+            if n > 0 && a > b {
+                return Err(format!(
+                    "{} has {n} lines; {a} to {b} is not a range of them",
+                    p.display()
+                ));
+            }
+            let body = if n == 0 {
+                String::new()
+            } else {
+                lines[a - 1..b].join("\n")
+            };
+            let tokens = self
+                .llm
+                .tokenize(&body, false)
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let room = self.read_room();
+            if tokens > room {
+                let fit = (room.min(2048) * (b + 1 - a) / tokens.max(1)).max(1);
+                return Err(format!(
+                    "{} lines {a} to {b} are {tokens} tokens, more than the {room} there is room for: read them in parts, start {a}, end {}",
+                    p.display(),
+                    a + fit - 1
+                ));
+            }
+            Ok(format!(
+                "{} (lines {a} to {b} of {n}):\n{body}",
+                p.display()
+            ))
+        })();
+        let (ok, text) = match r {
+            Ok(t) => (true, t),
+            Err(e) => (false, e),
+        };
+        let first = text.lines().next().unwrap_or("").to_string();
+        self.act_end(id, ok, first);
+        text
+    }
+
+    /// The `write` tool: a whole file into its working copy of the
+    /// repository (the repository itself never changes) or its workspace.
+    fn agent_write(&mut self, c: &crate::agent::Call) -> String {
+        let path = c.param("path").unwrap_or("").to_string();
+        let id = self.act("write", &path);
+        let r = (|| -> std::result::Result<String, String> {
+            if path.trim().is_empty() {
+                return Err("write needs a path".into());
+            }
+            let content = c.param("content").ok_or("write needs a content")?;
+            let p = self.agent_path(&path, true)?;
+            if let Some(dir) = p.parent() {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let mut body = content.to_string();
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+            fs::write(&p, &body).map_err(|e| format!("{}: {e}", p.display()))?;
+            let where_ = if self.copy_upper.as_ref().is_some_and(|u| p.starts_with(u)) {
+                "your working copy of the repository (the repository itself is unchanged)"
+            } else {
+                "your workspace"
+            };
+            Ok(format!(
+                "wrote {} bytes, {} lines, to {path} in {where_}",
+                body.len(),
+                body.lines().count()
+            ))
+        })();
+        let (ok, text) = match r {
+            Ok(t) => (true, t),
+            Err(e) => (false, e),
+        };
+        self.act_end(id, ok, text.clone());
+        text
+    }
+
     /// A tool it used: its id, sent to the terminals as an `act` line.
     fn act(&mut self, kind: &str, text: &str) -> u64 {
         let id = self.act_next;
@@ -1671,23 +1965,28 @@ impl Engine {
     /// A command line it wrote: run in its terminal's sandbox (`term.md`),
     /// in order, one at a time; its output comes back as a document when it
     /// ends (`poll_term`).
-    fn run_command(&mut self, cmd: &str) {
+    fn run_command(&mut self, cmd: &str) -> Option<u64> {
         if cmd.is_empty() {
-            return;
+            return None;
         }
+        let agent = self.cfg.agent;
         let Some(term) = self.term.as_mut() else {
             let msg = self.framed_system(&format!(
                 "{cmd} did not run: there is no terminal in this run (it starts with --terminal)"
             ));
-            let _ = self.put(msg);
-            return;
+            if !agent {
+                let _ = self.put(msg);
+            }
+            return None;
         };
         if self.term_pending >= MAX_TERM_PENDING {
             let msg = self.framed_system(&format!(
                 "{cmd} did not run: {MAX_TERM_PENDING} commands are waiting already"
             ));
-            let _ = self.put(msg);
-            return;
+            if !agent {
+                let _ = self.put(msg);
+            }
+            return None;
         }
         let id = term.submit(cmd);
         self.term_pending += 1;
@@ -1697,6 +1996,7 @@ impl Engine {
             .tx
             .send(Event::TermStart(id, clock::now_us(), cmd.to_string()));
         self.note(format!("running: {cmd}"));
+        Some(id)
     }
 
     /// Commands that ended: each as a document handed back to it, and to
@@ -1736,6 +2036,13 @@ impl Engine {
             } else {
                 ran.out.clone()
             };
+            // The agent frame waits for it: its result goes back in its slot.
+            if let Some(w) = self.awaiting.as_mut() {
+                if let Some(slot) = w.runs.remove(&ran.id) {
+                    w.results[slot] = Some(format!("{what}:\n{text}"));
+                    continue;
+                }
+            }
             let framed = self.framed_doc(&text, &what, now);
             self.queue
                 .push_back((framed, format!("ran {}", ran.command)));
@@ -2099,6 +2406,8 @@ impl Engine {
     fn swap(&mut self, c: Chase, row: i32) -> Result<()> {
         // The live sequence is replaced: a reflection on the old one goes.
         self.end_chain(false);
+        // The agent frame: the composed base ends by opening a turn.
+        self.turn_start = c.head.len();
         let old = self.live;
         let mut history = c.head;
         history.extend_from_slice(&self.history[c.from..]);
@@ -3055,6 +3364,11 @@ impl Engine {
 
         // Chat frame: the turn ended; the floor stays the mind's.
         if !self.journal() && (self.next == self.eot || self.llm.is_eog(self.next)) {
+            // The agent frame: its calls run, and their results come back
+            // before its next turn (`agent_turn_end`).
+            if self.cfg.agent {
+                return self.agent_turn_end();
+            }
             let tokens = self.tok("<|im_end|>\n<|im_start|>assistant\n<think>\n", true)?;
             self.direct(&tokens)?;
             self.speaking = false;
@@ -3353,6 +3667,8 @@ impl Engine {
         self.mind_step(tokens.len() as i32 - 1, *tokens.last().unwrap())?;
         self.next = self.llm.sample(row);
         self.say(opening.clone(), Kind::Given);
+        // The agent frame: its first turn begins here.
+        self.turn_start = self.history.len();
         self.release();
         let _ = self.tx.send(Event::Status(self.status()));
         loop {
@@ -3390,6 +3706,17 @@ impl Engine {
                     self.release();
                     self.tx.flush();
                     let _ = self.tx.send(Event::Status(self.status()));
+                }
+            }
+            // The agent frame waits for its tools' results before its next
+            // turn: commands still come in, nothing is decoded meanwhile.
+            if self.awaiting.is_some() {
+                self.poll_term();
+                self.finish_agent_wait()?;
+                if self.awaiting.is_some() {
+                    self.release();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
                 }
             }
             self.cycle()?;

@@ -30,7 +30,9 @@ session=${PHI_STREAM_SESSION:-phi-stream}
 
 # The binary, with the cards when the co-processor repository is found.
 launch() {
-    if [ -n "${PHI_AVX512_ROOT:-}" ]; then
+    # PHI_STREAM_CARDS=0: this instance leaves the cards alone (one process
+    # holds them; a second model runs on the GPU and the host).
+    if [ -n "${PHI_AVX512_ROOT:-}" ] && [ "${PHI_STREAM_CARDS:-1}" != 0 ]; then
         export PHI_GGML_OFFLOAD="${PHI_GGML_OFFLOAD:-1}"
         exec "$PHI_AVX512_ROOT/scripts/phi-ggml.sh" "$bin" "$@"
     fi
