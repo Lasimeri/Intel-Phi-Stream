@@ -720,3 +720,26 @@ The opposing chain's question quotes the line itself (its last 300
 characters) beside its J-space words: given only the words, it argued
 against the word list ("a label set, not a step"). Its objections run to
 `AGAINST_MAX` (112 tokens): at 64 they were cut mid-sentence.
+
+## Reconciliation: the two chains brought to agreement
+
+The person (2026-10-02): "reconcile both the deliberation chains so the
+output gets in agreement". In the agent frame with `chain against`, an
+objection that reaches the stream stays open (`Objection`) until the two
+chains settle it, one at a time:
+- While it is open the opposing side raises no other. Once the stream has
+  thought `RECONCILE_AFTER` (48) tokens past the turn that told it, the
+  side forks again and is asked, with the objection and the stream's
+  thinking since (its last 500 characters): has it answered? It answers
+  `Agreed:` with what both hold toward the objective, or `Still:` with
+  the one point left (an answer with neither counts as `Still:`).
+- `Agreed:` closes it: the stream is told the agreement as a settled point
+  ("agreed with the other side of your thinking: ... keep to it").
+- `Still:` keeps it open with the point left, told again as the next
+  objection to answer, and counts a round; after `RECONCILE_ROUNDS` (3)
+  it is left unresolved, and the stream is told to settle it with a tool
+  (the code, a test, a log) rather than more argument.
+- Every objection and verdict is a line of `dual.log` in the workspace
+  (time, objection, agreed, still or unresolved, the round, the texts).
+  A change of the chain's kind, or a swap of the live sequence, drops
+  the open objection.

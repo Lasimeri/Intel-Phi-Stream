@@ -436,6 +436,9 @@ struct Chain {
     seq: i32,
     /// Opposing the line (`chain against`), not reflecting on it.
     against: bool,
+    /// Reconciling: asked whether the stream answered its open objection
+    /// (agreed, or the point still held).
+    reconcile: bool,
     /// Its opening (the marker with the line's J-space words), fed first.
     prompt: Vec<i32>,
     fed: usize,
@@ -443,6 +446,15 @@ struct Chain {
     out: Vec<i32>,
     /// The next position in its sequence.
     pos: i32,
+}
+
+/// An objection of the opposing chain not yet settled: its text, where the
+/// stream's history stood when it was told (None: still waiting to be),
+/// and the rounds it has been answered and still held.
+struct Objection {
+    text: String,
+    told_at: Option<usize>,
+    rounds: u32,
 }
 
 /// The guide lane (`--guide`, `engine.md`): a copy of the live sequence
@@ -533,6 +545,11 @@ const GUIDE_MAX: usize = 4096;
 const CHAIN_MAX: usize = 64;
 /// The opposing chain's length: at 64 its objections were cut mid-sentence.
 const AGAINST_MAX: usize = 112;
+/// Reconciliation: how many tokens of the stream's thinking after an
+/// objection is told before the opposing side asks whether it was answered,
+/// and how many rounds before an objection is left unresolved.
+const RECONCILE_AFTER: usize = 48;
+const RECONCILE_ROUNDS: u32 = 3;
 const CHAIN_EVERY_US: i64 = 1_000_000;
 /// Why a summary is asked for: the context nearly full, a restart (quit),
 /// a new persona.
@@ -835,6 +852,12 @@ pub struct Engine {
     /// came from an opposing chain.
     chain_against: bool,
     reflection_against: bool,
+    /// Reconciliation (agent frame, `chain against`): the objection the two
+    /// chains have not yet settled, whether its aside still waits to be told,
+    /// and the log of every objection and how it ended (`dual.log`).
+    open_objection: Option<Objection>,
+    objection_unsent: bool,
+    dual_log: RotLog,
     /// The goal probe: on, when it last asked, its answers' forms (yes,
     /// no) and its log (`goal.log`).
     goal_on: bool,
@@ -1117,6 +1140,7 @@ impl Engine {
         let guide_log = RotLog::open(cfg.workspace.join("guide.log"));
         let goal_log = RotLog::open(cfg.workspace.join("goal.log"));
         let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
+        let dual_log = RotLog::open(cfg.workspace.join("dual.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
         // The goal probe's answers: their one-token forms, none shared.
         let yes_no = {
@@ -1290,6 +1314,9 @@ impl Engine {
             reflection: None,
             chain_against,
             reflection_against: false,
+            open_objection: None,
+            objection_unsent: false,
+            dual_log,
             goal_on: goal_probe && yes_no.is_some(),
             goal_mono: i64::MIN / 2,
             yes_no,
@@ -1908,6 +1935,9 @@ impl Engine {
                 let at = clock::hms(clock::now_us());
                 // The opposing chain's objection asks for an answer: the
                 // two reason against each other, toward the one objective.
+                if self.reflection_against {
+                    self.objection_unsent = true;
+                }
                 self.asides.push(if self.reflection_against {
                     format!("[{at}] the other side of your thinking, against your last line: {text} Answer it in your thinking: concede it or rebut it, and keep to the objective.")
                 } else {
@@ -2002,7 +2032,35 @@ impl Engine {
             let n = t.chars().count();
             t.chars().skip(n.saturating_sub(300)).collect()
         };
+        // Reconciliation (agent frame): one objection at a time. While one
+        // is open the opposing side raises no other; once the stream has
+        // thought `RECONCILE_AFTER` tokens past it, the side is asked whether
+        // it was answered, and says what both hold or the point left.
+        let mut reconcile = None;
+        if against && self.cfg.agent {
+            if let Some(o) = &self.open_objection {
+                let Some(t) = o.told_at else {
+                    return Ok(());
+                };
+                if self.history.len() < t + RECONCILE_AFTER {
+                    return Ok(());
+                }
+                let since = {
+                    let s = self.llm.text(&self.history[t.min(self.history.len())..]);
+                    let s = s.trim().replace(['"', '[', ']'], "");
+                    let n = s.chars().count();
+                    s.chars().skip(n.saturating_sub(500)).collect::<String>()
+                };
+                reconcile = Some((o.text.replace(['"', '[', ']'], ""), since));
+            }
+        }
         let marker = match (&goal, self.cfg.frame) {
+            (Some(g), Frame::Chat) if self.cfg.agent && reconcile.is_some() => {
+                let (obj, since) = reconcile.as_ref().unwrap();
+                format!(
+                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your objection, which it was told: \"{obj}\". Its thinking since: \"{since}\". Has it answered the objection? If you now agree with where it stands, begin with Agreed: and say in one sentence what you both hold toward the objective. If not, begin with Still: and the one point left.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            }
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
                 "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your last line: \"{last}\" (on your mind in it: {}). Argue against that line, its content, as a step toward the objective: in a sentence or two, the strongest objection to what it says or does, or where it drifts from the objective.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
                 shown.join(", ")
@@ -2032,13 +2090,20 @@ impl Engine {
             pos,
             text: format!(
                 "{} the line before {pos}: {}",
-                if against { "against" } else { "on its mind in" },
+                if reconcile.is_some() {
+                    "reconciling its objection with"
+                } else if against {
+                    "against"
+                } else {
+                    "on its mind in"
+                },
                 shown.join(", ")
             ),
         }));
         self.reflecting = Some(Chain {
             seq,
             against,
+            reconcile: reconcile.is_some(),
             prompt,
             fed: 0,
             out: Vec::new(),
@@ -2188,6 +2253,20 @@ impl Engine {
         self.llm.seq_rm(c.seq, -1, -1);
         self.free_seqs.push(c.seq);
         let said = self.llm.text(&c.out).trim().to_string();
+        if c.reconcile {
+            let outcome = if keep {
+                self.reconciled(&said)
+            } else {
+                "dropped: the journal moved under it".to_string()
+            };
+            let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                kind: crate::client::DelibKind::End,
+                t_us: clock::now_us(),
+                pos: c.pos,
+                text: outcome,
+            }));
+            return;
+        }
         let primer = if c.against {
             AGAINST_PRIMER
         } else {
@@ -2217,6 +2296,20 @@ impl Engine {
                 self.guide_next = Some(text.clone());
                 self.guide_next_src = GuideSrc::Chain;
             }
+            // An objection in the agent frame stays open until the two
+            // chains settle it (`reconciled`).
+            if c.against && self.cfg.agent {
+                self.dual_log.line(&format!(
+                    "{}\tobjection\t0\t{}",
+                    clock::hms(clock::now_us()),
+                    text.replace('\n', " ")
+                ));
+                self.open_objection = Some(Objection {
+                    text: text.clone(),
+                    told_at: None,
+                    rounds: 0,
+                });
+            }
             self.reflection = Some(text);
             self.reflection_against = c.against;
             if self.cfg.agent {
@@ -2235,6 +2328,83 @@ impl Engine {
             pos: c.pos,
             text: outcome.to_string(),
         }));
+    }
+
+    /// The opposing side's verdict on its open objection: `Agreed:` settles
+    /// it (both hold the statement, told to the stream as a settled point),
+    /// `Still:` keeps it open with the point left (told again, a round
+    /// counted), and past `RECONCILE_ROUNDS` it is left unresolved with the
+    /// stream told to settle it with a tool. An answer that begins with
+    /// neither counts as `Still:`. Each verdict is a line of `dual.log`.
+    fn reconciled(&mut self, said: &str) -> String {
+        let Some(mut o) = self.open_objection.take() else {
+            return "no objection open".into();
+        };
+        let at = clock::hms(clock::now_us());
+        let t = said.trim();
+        let lower = t.to_lowercase();
+        let rest = |t: &str| {
+            t.split_once(':')
+                .map_or(t, |(_, r)| r)
+                .trim()
+                .replace('\n', " ")
+        };
+        let (aside, outcome) = if lower.starts_with("agreed") {
+            let r = rest(t);
+            self.dual_log.line(&format!(
+                "{at}\tagreed\t{}\t{}\t{r}",
+                o.rounds,
+                o.text.replace('\n', " ")
+            ));
+            (
+                format!(
+                    "[{at}] agreed with the other side of your thinking: {r} (settled: keep to it)"
+                ),
+                format!("agreed after {} round(s): {r}", o.rounds),
+            )
+        } else {
+            let r = if lower.starts_with("still") {
+                rest(t)
+            } else {
+                t.replace('\n', " ")
+            };
+            o.rounds += 1;
+            if o.rounds >= RECONCILE_ROUNDS {
+                self.dual_log.line(&format!(
+                    "{at}\tunresolved\t{}\t{}\t{r}",
+                    o.rounds,
+                    o.text.replace('\n', " ")
+                ));
+                (
+                    format!("[{at}] you and the other side of your thinking did not agree after {} rounds; the point: {r}. Settle it with a tool (read the code, run a test, check a log) rather than more argument.", o.rounds),
+                    format!("unresolved after {} rounds: {r}", o.rounds),
+                )
+            } else {
+                self.dual_log.line(&format!(
+                    "{at}\tstill\t{}\t{}\t{r}",
+                    o.rounds,
+                    o.text.replace('\n', " ")
+                ));
+                let aside = format!("[{at}] the other side of your thinking still holds: {r} Answer it: concede it or rebut it, and keep to the objective.");
+                o.text = r.clone();
+                o.told_at = None;
+                self.open_objection = Some(o);
+                self.objection_unsent = true;
+                (
+                    aside,
+                    format!(
+                        "still held (round {}): {r}",
+                        self.open_objection.as_ref().map_or(0, |o| o.rounds)
+                    ),
+                )
+            }
+        };
+        self.asides.push(aside);
+        while self.asides.len() > 2 {
+            self.asides.remove(0);
+        }
+        self.note(format!("the two chains: {outcome}"));
+        outcome
     }
 
     /// The guide lane given up: its sequence emptied (the live one was
@@ -3938,6 +4108,15 @@ impl Engine {
         if let Some(line) = self.head_news() {
             out.insert(0, format!("[{}] {line}", clock::hms(clock::now_us())));
         }
+        // An objection told now: the stream's thinking from here is its
+        // answer (`reconciled`).
+        if self.objection_unsent && !self.asides.is_empty() {
+            self.objection_unsent = false;
+            let at = self.history.len();
+            if let Some(o) = self.open_objection.as_mut() {
+                o.told_at = Some(at);
+            }
+        }
         out.append(&mut self.asides);
         let mut room = self.read_room();
         while let Some((text, label)) = self.queue.pop_front() {
@@ -4089,6 +4268,10 @@ impl Engine {
     fn swap(&mut self, c: Chase, row: i32) -> Result<()> {
         // The live sequence is replaced: a reflection on the old one goes.
         self.end_chain(false);
+        // And an open objection: its place in the old history means nothing
+        // in the new one.
+        self.open_objection = None;
+        self.objection_unsent = false;
         // The agent frame: the composed base ends by opening a turn.
         self.turn_start = c.head.len();
         let old = self.live;
@@ -5471,6 +5654,10 @@ impl Engine {
                     self.end_chain(false);
                     self.line_words.clear();
                     self.reflection = None;
+                }
+                if set == ChainSet::Off || against != self.chain_against {
+                    self.open_objection = None;
+                    self.objection_unsent = false;
                 }
                 self.chain_on = set != ChainSet::Off && !self.cfg.task;
                 self.chain_against = against;
