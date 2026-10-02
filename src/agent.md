@@ -8,16 +8,24 @@ tool calls, as its chat template (read from the GGUF's
   `# Tools`, the functions in a `<tools>` block, one JSON object each in the
   form the template's `tojson` gives (keys in order, `", "` and `": "`
   between them), then the template's own instructions for the call format.
-  Five functions: `run` (a command in the sandboxed terminal, `term.md`),
-  `read` (a file whole or by lines, or a directory), `write` (a whole file
-  into the working copy or the workspace), `note` (its own memory, kept
-  once), `tell_claude` (a message to Claude, `re` naming the message of
-  Claude's it answers). The persona follows,
+  Six functions: `run` (a command in the sandboxed terminal, `term.md`; it
+  starts in the repository, so no cd, and `/tmp` is kept between commands),
+  `read` (a file whole or by lines, or a directory), `edit` (one exact
+  replacement, `old` occurring once; for every change to an existing file:
+  without it, it rewrote a whole file for each fix), `write` (a new file, or
+  one replaced entirely), `note` (its own memory, kept once), `tell_claude`
+  (a message to Claude, `re` naming the message of Claude's it answers).
+  In development the persona's text names these tools
+  (`engine::agent_persona`), not the chat frame's bracketed lines
+  (`[read: PATH]`, `[prefer: ...]`), which it still taught beside them. The persona follows,
   with the agent's mechanics in place of the chat's.
 - Each turn opens `<|im_start|>assistant\n<think>\n`: it reasons first,
   then closes its thoughts and acts. A call is
   `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>`
-  (`parse_calls`; a block that does not parse is counted and told).
+  (`parse_calls`; a block that does not parse is counted and told). Calls
+  written inside its thinking, in a turn that never closed it, run too, and
+  it is told to close its thoughts first (3 percent of its calls were
+  dropped so on the live service, without a word).
 - When its turn ends, the calls run (`engine.rs`, `agent_turn_end`): read,
   write and note at once, a command in the terminal. Nothing is decoded
   while a command runs; its result is waited for, so it never invents one.

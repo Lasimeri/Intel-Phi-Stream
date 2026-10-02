@@ -54,13 +54,13 @@ fn tools() -> Vec<String> {
     vec![
         tool(
             "run",
-            "Run a shell command in your sandbox and get its output: it starts in the repository, where what it writes lands in your working copy (the repository itself never changes); no network; 60 s at most.",
+            "Run a shell command in your sandbox and get its exit code and output (at most 16 KiB). It already starts in the repository, so paths are relative to it and no cd is needed; what it writes there lands in your working copy (the repository itself never changes). /tmp is kept between commands. No network, 60 s at most. Use it to build, test, search (grep -n) and list; to read a file use read, to change one use edit.",
             &[("command", "string", "The command line, run by sh -c.")],
             &["command"],
         ),
         tool(
             "read",
-            "Read a file of the repository (your working copy) or your workspace, whole or by lines.",
+            "Read a file of the repository (your working copy) or your workspace, whole or by lines, or a directory's listing.",
             &[
                 ("path", "string", "A path relative to the repository, or absolute."),
                 ("start", "integer", "The first line, from 1."),
@@ -69,8 +69,18 @@ fn tools() -> Vec<String> {
             &["path"],
         ),
         tool(
+            "edit",
+            "Change a file of your working copy or workspace in place: the text old, which must occur exactly once in it, is replaced by new. Include enough lines around a change for old to be unique. Use it for every change to an existing file; write only creates new files or replaces one entirely.",
+            &[
+                ("path", "string", "A path relative to the repository, or in your workspace."),
+                ("old", "string", "The exact text to replace, as it is in the file."),
+                ("new", "string", "The text to put in its place."),
+            ],
+            &["path", "old", "new"],
+        ),
+        tool(
             "write",
-            "Write a whole file into your working copy of the repository (a path relative to it) or your workspace: it creates or replaces the file.",
+            "Write a whole new file into your working copy of the repository (a path relative to it) or your workspace, or replace one entirely. To change part of an existing file, use edit.",
             &[
                 ("path", "string", "A path relative to the repository, or in your workspace."),
                 ("content", "string", "The file's whole content."),

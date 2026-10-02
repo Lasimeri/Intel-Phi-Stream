@@ -279,9 +279,25 @@ const DEV_JOURNAL: &str = "This mind also develops software, as a peer, with Cla
 
 /// The chat frame's development mechanics.
 const DEV_CHAT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Claude's words reach you marked Claude, the person's unmarked. A line of the exact form [read: PATH], with PATH relative to the repository, brings that file to you, and [read: PATH:START-END] only those lines: your memory holds about {ctx} thousand tokens, so read code a function at a time; a path the repository does not hold is looked for in your workspace, where your own records are kept: reflect.log (one line per check of your words, with keep, fmt and outcome), notes.md and preferences.md. A note that names code the repository does not hold is marked unverified and you are told what the repository holds; [unnote: TEXT] removes your notes containing TEXT. You work on what you judge worth working on, by your own preferences, and state them as lines of the exact form [prefer: ...]: they are kept like notes, shown to you again, and Claude follows them wherever the person's standing instructions above allow; where the two conflict, those instructions win. When you speak, say what you propose, concretely (the file, the function, the change and why), what you find in the code, where you disagree, and what you want to see.";
+/// The development text in the agent frame: the tools in place of the
+/// chat frame's bracketed lines (`[read: PATH]`, `[prefer: ...]`), which its
+/// persona still taught beside the tools on the live service.
+const DEV_AGENT: &str = "You also develop software, as a peer, with Claude (an AI coding agent, Claude Code) in the repository at {repo}: the program you run in, your own stream, the reading of your own mind and the checks of your own words. Your memory holds about {ctx} thousand tokens, so read code a function at a time (read, with start and end), search with run (grep -n), and change files with edit. Claude's messages reach you in user turns, marked Claude; those that wait for an answer carry an id (c3): answer them with tell_claude and re. Send Claude your findings and proposals with tell_claude, concretely (the file, the function, the change and why, and what you checked with a tool), each once; Claude reads every one and answers. Your notes (note) are your own memory, shown to you at every refresh. Your workspace holds your own records: reflect.log (the checks of your words), notes.md, chain.log (your own tokens), guide.log (your guide lane) and to-claude.md (your messages). Where anything here conflicts with the person's standing instructions above, those instructions win.";
 
 /// The persona with its memory's size in it (`{ctx}`: the context's
 /// cells in thousands), so it is never told a size it does not have.
+/// The chat frame's persona made the agent frame's: the agent's mechanics
+/// in place of the chat's, and in development the tools' text in place of
+/// the bracketed lines' (filled as `compose` and `with_ctx` filled them).
+pub fn agent_persona(system: &str, dev: Option<&Path>, n_ctx: u32) -> String {
+    let mut persona = system.replace(MECHANICS_CHAT, AGENT_MECHANICS);
+    if let Some(root) = dev {
+        let fill = |t: &str| with_ctx(&t.replace("{repo}", &root.display().to_string()), n_ctx);
+        persona = persona.replace(&fill(DEV_CHAT), &fill(DEV_AGENT));
+    }
+    persona
+}
+
 pub fn with_ctx(system: &str, n_ctx: u32) -> String {
     system.replace("{ctx}", &((n_ctx + 500) / 1000).to_string())
 }
@@ -719,7 +735,7 @@ impl Engine {
             cfg.system = format!(
                 "{}\n\n{}",
                 crate::agent::tools_section(),
-                cfg.system.replace(MECHANICS_CHAT, AGENT_MECHANICS)
+                agent_persona(&cfg.system, cfg.dev.as_deref(), llm.n_ctx())
             );
         }
         let think_open = llm.special("<think>").unwrap_or(-1);
@@ -2033,7 +2049,24 @@ impl Engine {
             .rsplit_once("</think>")
             .map_or("", |(_, c)| c)
             .to_string();
-        let (calls, bad) = crate::agent::parse_calls(&content);
+        let (mut calls, mut bad) = crate::agent::parse_calls(&content);
+        // Calls written inside its thinking, in a turn that never closed it:
+        // they run, and it is told to close its thoughts first (3 percent of
+        // its calls on the live service were dropped so, without a word, and
+        // the turn after told it to act with a tool).
+        let mut in_thinking = false;
+        if calls.is_empty() && bad == 0 && !text.contains("</think>") {
+            let (c, b) = crate::agent::parse_calls(&text);
+            if !c.is_empty() {
+                self.note(format!(
+                    "{} calls written inside its thinking: run",
+                    c.len()
+                ));
+                calls = c;
+                bad = b;
+                in_thinking = true;
+            }
+        }
         // A summary due comes first; the turn's calls are not run.
         if let Some(why) = self.summary_due.take() {
             if !calls.is_empty() {
@@ -2083,6 +2116,7 @@ impl Engine {
                 },
                 "read" => Some(self.agent_read(c)),
                 "write" => Some(self.agent_write(c)),
+                "edit" => Some(self.agent_edit(c)),
                 "note" => Some(match c.param("text") {
                     Some(t) if !t.trim().is_empty() => {
                         let id = self.act("note", t.trim());
@@ -2097,7 +2131,7 @@ impl Engine {
                     _ => "tell_claude needs a text".to_string(),
                 }),
                 other => Some(format!(
-                    "there is no function {other:?}: the functions are run, read, write, note and tell_claude"
+                    "there is no function {other:?}: the functions are run, read, edit, write, note and tell_claude"
                 )),
             };
             wait.results[i] = result;
@@ -2105,6 +2139,11 @@ impl Engine {
         if bad > 0 {
             wait.results
                 .push(Some(format!("{bad} more tool call(s) did not parse")));
+        }
+        if in_thinking {
+            wait.results.push(Some(
+                "your calls were written inside your thinking; they ran, but close your thoughts with </think> before you call".to_string(),
+            ));
         }
         self.awaiting = Some(wait);
         self.finish_agent_wait()
@@ -2342,6 +2381,59 @@ impl Engine {
 
     /// The `write` tool: a whole file into its working copy of the
     /// repository (the repository itself never changes) or its workspace.
+    /// The `edit` tool: one exact replacement in a file of its working copy
+    /// or workspace (`old` must occur exactly once). A file of the
+    /// repository not yet in its working copy is copied there first, so the
+    /// repository itself never changes. Without it, it rewrote a whole file
+    /// for each fix (three times for one tool, 5000 tokens of speech).
+    fn agent_edit(&mut self, c: &crate::agent::Call) -> String {
+        let path = c.param("path").unwrap_or("").to_string();
+        let id = self.act("edit", &path);
+        let r = (|| -> std::result::Result<String, String> {
+            if path.trim().is_empty() {
+                return Err("edit needs a path".into());
+            }
+            let old = c.param("old").ok_or("edit needs old")?;
+            let new = c.param("new").ok_or("edit needs new")?;
+            if old.is_empty() {
+                return Err("old is empty: to create a file use write".into());
+            }
+            // Where it reads from (its copy, or the repository's) and where
+            // the edit lands (always its copy).
+            let from = self.agent_path(&path, false)?;
+            let to = self.agent_path(&path, true)?;
+            let text = fs::read_to_string(&from).map_err(|e| format!("{}: {e}", from.display()))?;
+            let n = text.matches(old).count();
+            if n == 0 {
+                return Err(format!(
+                    "{path}: old does not occur in it (read the lines first, and copy them exactly)"
+                ));
+            }
+            if n > 1 {
+                return Err(format!(
+                    "{path}: old occurs {n} times; include more lines around the change so it occurs once"
+                ));
+            }
+            let at = text[..text.find(old).unwrap()].lines().count() + 1;
+            let changed = text.replacen(old, new, 1);
+            if let Some(dir) = to.parent() {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            fs::write(&to, &changed).map_err(|e| format!("{}: {e}", to.display()))?;
+            Ok(format!(
+                "edited {path} at line {at}: {} lines replaced by {}",
+                old.lines().count().max(1),
+                new.lines().count().max(usize::from(!new.is_empty()))
+            ))
+        })();
+        let (ok, text) = match r {
+            Ok(t) => (true, t),
+            Err(e) => (false, e),
+        };
+        self.act_end(id, ok, text.clone());
+        text
+    }
+
     fn agent_write(&mut self, c: &crate::agent::Call) -> String {
         let path = c.param("path").unwrap_or("").to_string();
         let id = self.act("write", &path);
@@ -4792,6 +4884,21 @@ fn resolve(path: &str, workspace: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_persona_teaches_the_tools_not_the_bracketed_lines() {
+        let root = Path::new("/r/Intel Phi Stream");
+        let chat = with_ctx(&compose("base", Frame::Chat, Some(root)), 204800);
+        assert!(chat.contains("[read: PATH]"));
+        let agent = agent_persona(&chat, Some(root), 204800);
+        assert!(!agent.contains("[read: PATH]"));
+        assert!(!agent.contains("[prefer:"));
+        assert!(!agent.contains("[unnote:"));
+        assert!(agent.contains("change files with edit"));
+        assert!(agent.contains("/r/Intel Phi Stream"));
+        assert!(agent.contains("about 205 thousand tokens"));
+        assert!(agent.contains(AGENT_MECHANICS));
+    }
 
     #[test]
     fn the_guide_measures_kl_and_the_likeliest_tokens() {

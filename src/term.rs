@@ -101,7 +101,11 @@ pub fn argv(cfg: &TermConfig, command: &str) -> Vec<String> {
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
-        "--tmpfs".into(),
+        // /tmp is its workspace's tmp/, kept between commands (on disk, never
+        // tmpfs): fresh in each, a program it built in one command was gone in
+        // the next ("file wasn't created at /tmp/guide-analyze").
+        "--bind".into(),
+        format!("{ws}/tmp"),
         "/tmp".into(),
     ];
     for p in masked() {
@@ -161,6 +165,7 @@ pub fn run(cfg: &TermConfig, id: u64, command: &str) -> Ran {
         let _ = std::fs::create_dir_all(o.join("upper"));
         let _ = std::fs::create_dir_all(o.join("work"));
     }
+    let _ = std::fs::create_dir_all(cfg.workspace.join("tmp"));
     let a = argv(cfg, command);
     let mut child = match Command::new(&a[0])
         .args(&a[1..])

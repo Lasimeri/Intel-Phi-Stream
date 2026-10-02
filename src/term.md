@@ -26,7 +26,9 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
   being developed (through its working copy, or read-only), and its own
   workspace read-write; nothing else of the home directory, so private files
   never enter its context;
-- no network (`--unshare-all`: only `lo` exists), a fresh `/tmp`, its own
+- no network (`--unshare-all`: only `lo` exists), `/tmp` its workspace's
+  `tmp/` (kept between commands: fresh in each, a program it built in one
+  command was gone in the next), its own
   process tree, a cleared environment (`PATH=/usr/bin`, `HOME` the
   workspace);
 - Python masked (each interpreter's file bound over by `/dev/null`): the
