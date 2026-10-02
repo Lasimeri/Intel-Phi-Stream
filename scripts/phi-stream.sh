@@ -169,6 +169,35 @@ case "$sub" in
         done
         rm -f "$keeppid"
         ;;
+    restart)
+        # The service stopped (its summary written) and started again with
+        # the words after `restart` (`dev` and its options, by default
+        # `dev`), its window kept open: the terminal in it reconnects, so the
+        # interface stays on the desktop through an update (`stop` then
+        # `start` closed it for the whole load).
+        rest=()
+        dropped=0
+        for a in "$@"; do
+            if [ "$dropped" = 0 ] && [ "$a" = restart ]; then
+                dropped=1
+                continue
+            fi
+            rest+=("$a")
+        done
+        [ "${#rest[@]}" -gt 0 ] || rest=(dev)
+        if alive "$keeppid"; then
+            kill "$(cat "$keeppid")" 2> /dev/null || true
+        fi
+        rm -f "$keeppid"
+        "$bin" quit 2>/dev/null || true
+        for _ in $(seq 1 120); do
+            tmux has-session -t "$session" 2>/dev/null || break
+            sleep 1
+        done
+        tmux kill-session -t "$session" 2>/dev/null || true
+        echo "stopped; starting again, the window kept"
+        exec "$0" "${rest[@]}"
+        ;;
     stop)
         # The model stops, and its window with it (a restart by `quit` and
         # `start` keeps the window, which reconnects): the keeper first, so
@@ -236,7 +265,7 @@ case "$sub" in
         launch "$@"
         ;;
     "")
-        echo "usage: $0 start|dev|stop|attach|window|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
+        echo "usage: $0 start|dev|restart|stop|attach|window|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
         exit 2
         ;;
     *)
