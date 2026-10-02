@@ -50,6 +50,9 @@ end (`src/engine.md`) before it ends the session. `restart [dev OPTIONS]`
 does the same and starts it again (by default `dev`), its window kept open:
 the terminal in it reconnects, so the interface stays on the desktop
 through an update (`stop` and `start` closed it for the whole load).
+`accept PATH...` takes files the dev stream wrote out of its working copy
+once they are in the repository (kept in its workspace, `accepted-DATE/`),
+so it sees the repository's versions (`src/term.md`).
 
 `start` (and so `dev`) runs `window --keep`, detached: for as long as
   the service's tmux session lasts, every 3 s, when no window is open and

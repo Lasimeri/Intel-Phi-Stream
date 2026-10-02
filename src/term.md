@@ -12,7 +12,12 @@ mounted as an overlay: the repository as it is, with the stream's writes
 in an upper layer kept beside the workspace (`dev-copy/upper`, outside
 the sandbox's view), so it can edit, compile and test in place while the
 repository itself never changes; its changes are files in that layer, for
-Claude to review and apply. Measured on the live service: with commands
+Claude to review and apply. Once applied, a file is taken out of the layer
+(`scripts/phi-stream.sh accept PATH`, kept in its workspace under
+`accepted-DATE/`): left there, its own copy shadows the repository's newer
+one (on 2026-10-02 it reviewed Claude's fixes to its tool backwards, its
+old file standing in for the commit); it cannot take it out itself, since a
+delete inside an overlay hides the repository's file too. Measured on the live service: with commands
 starting in the workspace, its `cat src/engine.md` failed (exit 1), and
 `cat src/engine.rs | head` reported exit 0 although `cat` had failed.
 

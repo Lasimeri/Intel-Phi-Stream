@@ -169,6 +169,31 @@ case "$sub" in
         done
         rm -f "$keeppid"
         ;;
+    accept)
+        # Files of the dev stream's working copy that were brought into the
+        # repository, taken out of its copy (kept in its workspace under
+        # accepted-DATE/), so it sees the repository's versions again: its
+        # own copies shadowed them, and it reviewed Claude's fixes to its
+        # tool backwards (src/term.md). Paths relative to the repository.
+        ws=${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev$suffix}
+        upper="$ws-copy/upper"
+        keep="$ws/accepted-$(date +%Y-%m-%d)"
+        shift_done=0
+        for a in "$@"; do
+            if [ "$shift_done" = 0 ] && [ "$a" = accept ]; then
+                shift_done=1
+                continue
+            fi
+            if [ -e "$upper/$a" ]; then
+                mkdir -p "$keep/$(dirname "$a")"
+                mv "$upper/$a" "$keep/$a"
+                rmdir -p "$(dirname "$upper/$a")" 2>/dev/null || true
+                echo "accepted $a (its copy kept in $keep)"
+            else
+                echo "$a: not in the working copy ($upper)" >&2
+            fi
+        done
+        ;;
     restart)
         # The service stopped (its summary written) and started again with
         # the words after `restart` (`dev` and its options, by default
@@ -265,7 +290,7 @@ case "$sub" in
         launch "$@"
         ;;
     "")
-        echo "usage: $0 start|dev|restart|stop|attach|window|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
+        echo "usage: $0 start|dev|restart|accept|stop|attach|window|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
         exit 2
         ;;
     *)
