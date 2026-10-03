@@ -9,8 +9,10 @@ in `src/improve.md` before any candidate was measured.
 It refuses to start unless the candidate passed its sandbox (`outcome`),
 has its binary, and carries Claude's `reviewed` mark (written after
 reading its `change.patch`: nothing unreviewed runs outside the sandbox),
-and unless the repository is at the candidate's base with no source
-change; it builds the base's binary from the base itself.
+and unless the repository's source (`src`, `build.rs`, `Cargo.*`) is the
+candidate's base with no change (a head past the base that changed only
+scripts or docs builds the same binary, so it is measured as the base);
+it builds the base's binary from the base itself.
 
 Each window restarts the service (`phi-stream.sh restart dev`, the same
 options for both arms, `PHI_STREAM_MEASURE_OPTS`; the binary through

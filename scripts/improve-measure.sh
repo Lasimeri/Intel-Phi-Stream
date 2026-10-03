@@ -31,7 +31,10 @@ grep -q '^verdict passed$' "$cand/outcome" || die "candidate $n did not pass its
 [ -f "$cand/reviewed" ] || die "candidate $n is not reviewed: Claude reads $cand/change.patch, then touches $cand/reviewed"
 [ -x "$cand/phi-stream" ] || die "candidate $n has no binary"
 base=$(awk '$1 == "base" {print $2}' "$cand/outcome")
-[ "$(git -C "$root" rev-parse HEAD)" = "$base" ] || die "the repository is not at the candidate's base $base: propose it again"
+# The base is what the binary is built from: a head past it that changed
+# no source (scripts, docs) builds the same base, and is measured as it.
+git -C "$root" diff --quiet "$base" HEAD -- src build.rs Cargo.toml Cargo.lock ||
+    die "the repository's source is not at the candidate's base $base: propose it again"
 git -C "$root" diff --quiet HEAD -- src build.rs Cargo.toml Cargo.lock || die "the repository has source changes not committed"
 # The base's binary, built from the base itself.
 (cd "$root" && cargo build --release -q) || die "the base does not build"
