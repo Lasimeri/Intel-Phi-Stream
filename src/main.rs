@@ -226,6 +226,12 @@ struct StreamArgs {
     /// the main chain is told to answer; implies --second-chain.
     #[arg(long)]
     chain_against: bool,
+    /// The second chain audits each thinking token instead (src/engine.md):
+    /// the line's tokens, each with what was on the stream's mind as it was
+    /// chosen (its J-space reading), checked against the objective; implies
+    /// --chain-against.
+    #[arg(long)]
+    chain_audit: bool,
     /// The goal probe (src/engine.md): at most every 30 s, at a thinking
     /// line's end, whether it serves the objective, as P(yes), in goal.log.
     #[arg(long)]
@@ -377,10 +383,12 @@ enum Cmd {
         n: usize,
     },
     /// The second chain, live (src/engine.md): on (reflecting on each
-    /// line), off, or against (arguing against each line as a step toward
-    /// the objective, the main chain told to answer it).
+    /// line), off, against (arguing against each line as a step toward
+    /// the objective, the main chain told to answer it), or audit (each
+    /// thinking token of the line checked against what was on its mind as
+    /// it was chosen and the objective).
     Chain {
-        #[arg(value_parser = ["on", "off", "against"])]
+        #[arg(value_parser = ["on", "off", "against", "audit"])]
         state: String,
     },
     /// The goal probe, live (src/engine.md): every 30 s at most, whether
@@ -755,8 +763,9 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         terminal: s.terminal,
         gate_output: !s.no_objective_gate,
         summary_on_quit: false,
-        second_chain: s.second_chain || s.chain_against,
-        chain_against: s.chain_against,
+        second_chain: s.second_chain || s.chain_against || s.chain_audit,
+        chain_against: s.chain_against || s.chain_audit,
+        chain_audit: s.chain_audit,
         goal_probe: s.goal_probe,
         guide: s.guide,
         improve: s.improve,

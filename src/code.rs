@@ -580,6 +580,7 @@ pub fn stream(
             summary_on_quit: false,
             second_chain: false,
             chain_against: false,
+            chain_audit: false,
             goal_probe: false,
             agent: false,
             guide: false,

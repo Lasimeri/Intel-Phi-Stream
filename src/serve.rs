@@ -406,7 +406,8 @@ fn connection(
                 "on" => ctx.send(Command::Chain(ChainSet::On)).map(|_| "the second chain on".to_string()).map_err(|_| "the engine is gone".to_string()),
                 "off" => ctx.send(Command::Chain(ChainSet::Off)).map(|_| "the second chain off".to_string()).map_err(|_| "the engine is gone".to_string()),
                 "against" => ctx.send(Command::Chain(ChainSet::Against)).map(|_| "the second chain against".to_string()).map_err(|_| "the engine is gone".to_string()),
-                _ => Err("chain takes on, off or against".to_string()),
+                "audit" => ctx.send(Command::Chain(ChainSet::Audit)).map(|_| "the second chain auditing each thinking token".to_string()).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("chain takes on, off, against or audit".to_string()),
             },
             "goal" => match arg.trim() {
                 s @ ("on" | "off") => ctx.send(Command::Goal(s == "on")).map(|_| format!("the goal probe {s}")).map_err(|_| "the engine is gone".to_string()),

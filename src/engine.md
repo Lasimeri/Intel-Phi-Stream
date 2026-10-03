@@ -825,3 +825,33 @@ thinking only (never code, tool calls or control tokens), measured
 interleaved on code tasks, loopiness and the goal probe with an abort
 on think repeats (`guide-mix` at 1 had taken them from 2 or 3 to 15
 percent).
+
+### On the second chain: the token-by-token audit (`chain audit`)
+
+The person (2026-10-03, the same evening): "Each token should be reasoned
+against its J-space generalization to make sure the token generated is
+within the model's objective on the secondary reasoning chain within the
+harness." So the reasoning about each token runs on the second chain,
+beside the live token, never in its way (`--chain-audit`, or `chain
+audit` live; it implies `--chain-against`):
+
+- Every thinking token the stream places (not its tool calls, not bare
+  whitespace) gets a row as it is chosen (`jspace_score`, `audit_row`):
+  the token, the three strongest words on its mind at that moment (the
+  band's word-like readings at the position that chose it), how much
+  that reading supported the very token, and how much of it lay on the
+  objective's words.
+- At the line's end the second chain forks with the line and its rows
+  (at most `AUDIT_ROWS`, 40) and is asked which tokens were guesses
+  (meaning chosen with no support in what was on its mind) or off the
+  objective, taking what Claude and the person said as given; it answers
+  "All within the objective." or names at most three, each with why.
+- A clear audit tells the stream nothing (a line `audit` in `dual.log`).
+  A finding is an objection like the opposing chain's: told at the next
+  user turn ("audited your last line token by token ... concede it or
+  rebut it"), then reconciled (`Agreed:` / `Still:`, `RECONCILE_ROUNDS`).
+- What is audited and what went by is counted: the diagnostics say "audit
+  (N of M thinking tokens audited)". A line that ends while a fork runs,
+  or within `CHAIN_EVERY_US` of the last, goes by unaudited; the count
+  says how often (one fork at a time, so "each token" holds only as far
+  as the second chain keeps pace with the first).

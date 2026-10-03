@@ -1597,7 +1597,7 @@ fn draw(
         None => String::new(),
     };
     let hints = format!(
-        "{follows} Enter speaks · Tab views · /objective TEXT · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /lens [on|off|P%] · /chain on|off|against · /goal on|off · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
+        "{follows} Enter speaks · Tab views · /objective TEXT · /feed FILE · /persona FILE · /pause /resume · /chunk N · /temp T · /lens [on|off|P%] · /chain on|off|against|audit · /goal on|off · /quit stops it · PgUp PgDn End · ^C leaves it running   {}   {note}",
         p.workspace
     );
     s.line(lay.hints, &hints, plain(theme::ACCENT_DIM, theme::BG));
@@ -1670,7 +1670,7 @@ fn submit(line: &str, w: Option<&mut UnixStream>, v: &mut View) {
         return;
     } else if matches!(
         line,
-        "/chain on" | "/chain off" | "/chain against" | "/goal on" | "/goal off"
+        "/chain on" | "/chain off" | "/chain against" | "/chain audit" | "/goal on" | "/goal off"
     ) {
         line.trim_start_matches('/').to_string()
     } else if line == "/objective" {

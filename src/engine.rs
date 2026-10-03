@@ -139,6 +139,8 @@ pub enum ChainSet {
     Off,
     On,
     Against,
+    /// Against, from a token-by-token audit of the line (`engine.md`).
+    Audit,
 }
 
 pub enum Command {
@@ -267,6 +269,9 @@ pub struct Config {
     /// The second chain against the line instead of reflecting on it (with
     /// an objective set; without one it reflects).
     pub chain_against: bool,
+    /// The second chain audits each thinking token against what was on the
+    /// stream's mind as it was chosen and the objective (`engine.md`).
+    pub chain_audit: bool,
     /// The goal probe (`Command::Goal`) on from the start.
     pub goal_probe: bool,
     /// The agent frame (`agent.md`): the chat template with the model's own
@@ -442,6 +447,9 @@ struct Chain {
     /// Reconciling: asked whether the stream answered its open objection
     /// (agreed, or the point still held).
     reconcile: bool,
+    /// Auditing the line token by token (`chain audit`): its answer is an
+    /// objection unless it finds every token within the objective.
+    audit: bool,
     /// Its opening (the marker with the line's J-space words), fed first.
     prompt: Vec<i32>,
     fed: usize,
@@ -865,6 +873,14 @@ pub struct Engine {
     /// came from an opposing chain.
     chain_against: bool,
     reflection_against: bool,
+    /// The second chain audits thinking tokens (`chain audit`): the current
+    /// line's rows, one a token (`audit_row`), and the thinking tokens
+    /// seen and audited since the start, for the diagnostics.
+    chain_audit: bool,
+    reflection_audit: bool,
+    line_rows: Vec<String>,
+    audit_seen: u64,
+    audit_done: u64,
     /// Reconciliation (agent frame, `chain against`): the objection the two
     /// chains have not yet settled, whether its aside still waits to be told,
     /// and the log of every objection and how it ended (`dual.log`).
@@ -1162,6 +1178,7 @@ impl Engine {
         let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
         let dual_log = RotLog::open(cfg.workspace.join("dual.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
+        let chain_audit = cfg.chain_audit;
         // The goal probe's answers: their one-token forms, none shared.
         let yes_no = {
             let forms = |words: &[&str]| -> Result<Vec<i32>> {
@@ -1339,6 +1356,11 @@ impl Engine {
             reflection: None,
             chain_against,
             reflection_against: false,
+            chain_audit,
+            reflection_audit: false,
+            line_rows: Vec::new(),
+            audit_seen: 0,
+            audit_done: 0,
             open_objection: None,
             objection_unsent: false,
             dual_log,
@@ -1966,7 +1988,9 @@ impl Engine {
                 if self.reflection_against {
                     self.objection_unsent = true;
                 }
-                self.asides.push(if self.reflection_against {
+                self.asides.push(if self.reflection_audit {
+                    format!("[{at}] the other side of your thinking audited your last line token by token, each against what was on your mind as it was chosen and the objective: {text} Answer it in your thinking: concede it or rebut it, and keep to the objective.")
+                } else if self.reflection_against {
                     // Its primer is the chain's own opening, not news ("against
                     // your last line: Against it: ...").
                     let point = text.strip_prefix(AGAINST_PRIMER).map_or(text.as_str(), str::trim);
@@ -2033,10 +2057,14 @@ impl Engine {
         self.goal_probe()?;
         let mono = clock::mono_us();
         let words = std::mem::take(&mut self.line_words);
+        // The audit's rows go with the line: audited now, or (a fork still
+        // running, the last one too recent) left unaudited and counted so.
+        let rows = std::mem::take(&mut self.line_rows);
+        let auditing = self.chain_audit && self.chain_against && self.cfg.agent;
         if self.reflecting.is_some()
             || mono - self.chain_fork_mono < CHAIN_EVERY_US
             || self.free_seqs.len() < 3
-            || words.is_empty()
+            || words.is_empty() && !(auditing && !rows.is_empty())
         {
             return Ok(());
         }
@@ -2091,6 +2119,19 @@ impl Engine {
                     "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your objection, which it was told: \"{obj}\". Its thinking since: \"{since}\". Has it answered the objection? If you now agree with where it stands, begin with Agreed: and say in one sentence what you both hold toward the objective. If not, begin with Still: and the one point left.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
                 )
             }
+            // The audit (`chain audit`): every thinking token of the line,
+            // each with what was on its mind as it was chosen, against the
+            // objective.
+            (Some(g), Frame::Chat) if self.cfg.agent && auditing && !rows.is_empty() => {
+                let table: String = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| format!("{}. {}\n", i + 1, r.replace(['[', ']'], "")))
+                    .collect();
+                format!(
+                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it, auditing your last line token by token. The objective: {g}. Your last line: \"{last}\". Each of its thinking tokens as it was chosen, with what was on your mind at that moment (the J-space words of the position that chose it), how much that reading supported the very token, and how much of it lay on the objective's words:\n{table}Support near 0% is usual for joining words and punctuation; it matters for the words that carry the meaning. Take what Claude and the person said as given. Were any of these tokens guesses (meaning chosen with no support in what was on your mind) or off the objective? If none, answer exactly: All within the objective. Otherwise name at most three, each as \"TOKEN\": why, one sentence each.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                )
+            }
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
                 "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your last line: \"{last}\" (on your mind in it: {}). Argue against that line, its content, as a step toward the objective: in a sentence or two, the strongest objection to what it says or does, or where it drifts from the objective. Take what Claude and the person said as given: argue against its own reasoning and actions, never against their instructions.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
                 shown.join(", ")
@@ -2122,6 +2163,8 @@ impl Engine {
                 "{} the line before {pos}: {}",
                 if reconcile.is_some() {
                     "reconciling its objection with"
+                } else if auditing && !rows.is_empty() {
+                    "auditing token by token"
                 } else if against {
                     "against"
                 } else {
@@ -2130,10 +2173,15 @@ impl Engine {
                 shown.join(", ")
             ),
         }));
+        let audit = auditing && !rows.is_empty() && reconcile.is_none();
+        if audit {
+            self.audit_done += rows.len() as u64;
+        }
         self.reflecting = Some(Chain {
             seq,
             against,
             reconcile: reconcile.is_some(),
+            audit,
             prompt,
             fed: 0,
             out: Vec::new(),
@@ -2193,11 +2241,7 @@ impl Engine {
                 / z
         };
         let (py, pn) = (mass(y), mass(n));
-        let kind = match (self.chain_on, self.chain_against) {
-            (false, _) => "off",
-            (true, false) => "on",
-            (true, true) => "against",
-        };
+        let kind = self.chain_kind();
         self.goal_log.line(&format!(
             "{}\tpos={}\tchain={kind}\tyes={:.4}\tmass={:.4}",
             clock::now_us(),
@@ -2308,12 +2352,29 @@ impl Engine {
             }));
             return;
         }
-        let primer = if c.against {
+        // An audit that finds every token within the objective has nothing
+        // to tell; it is counted in dual.log all the same.
+        if c.audit && keep && audit_clear(&said) {
+            self.dual_line(&format!(
+                "{}\taudit\t0\tall within the objective",
+                clock::hms(clock::now_us())
+            ));
+            let _ = self.tx.send(Event::Delib(crate::client::Delib {
+                kind: crate::client::DelibKind::End,
+                t_us: clock::now_us(),
+                pos: c.pos,
+                text: "all within the objective".into(),
+            }));
+            return;
+        }
+        let primer = if c.audit {
+            ""
+        } else if c.against {
             AGAINST_PRIMER
         } else {
             CHAIN_PRIMER
         };
-        let text = format!("{primer} {said}");
+        let text = format!("{primer} {said}").trim().to_string();
         // What only repeats the journal's frame is no reflection.
         let echo = said.is_empty()
             || said.contains("beside the journal")
@@ -2353,6 +2414,7 @@ impl Engine {
             }
             self.reflection = Some(text);
             self.reflection_against = c.against;
+            self.reflection_audit = c.audit;
             if self.cfg.agent {
                 "kept for its next turn"
             } else {
@@ -3653,7 +3715,8 @@ impl Engine {
                 (true, false) => "on (reflecting)".to_string(),
                 (true, true) => match &self.open_objection {
                     Some(o) => format!(
-                        "against; open objection (round {}, {}): {}",
+                        "{}; open objection (round {}, {}): {}",
+                        self.chain_kind_audited(),
                         o.rounds,
                         if o.told_at.is_some() {
                             "told"
@@ -3662,7 +3725,7 @@ impl Engine {
                         },
                         o.text.chars().take(200).collect::<String>()
                     ),
-                    None => "against; no objection open".to_string(),
+                    None => format!("{}; no objection open", self.chain_kind_audited()),
                 },
             }
         ));
@@ -4931,6 +4994,41 @@ impl Engine {
         };
         let line = jspace_line(r, t, pos, region, &text, &self.obj_tokens);
         self.jspace_log.line(&line);
+        // The audit's row for this token (`chain audit`): thinking tokens
+        // only (a tool call's tags and arguments are no reasoning), those
+        // with something to read (not bare whitespace).
+        if self.chain_on && self.chain_audit && region == "think" && !text.trim().is_empty() {
+            let row = audit_row(r, t, &text, &self.obj_tokens);
+            self.audit_seen += 1;
+            self.line_rows.push(row);
+            if self.line_rows.len() > AUDIT_ROWS {
+                self.line_rows.remove(0);
+            }
+        }
+    }
+
+    /// The second chain's kind, as the notes, the goal log and the
+    /// diagnostics say it.
+    fn chain_kind(&self) -> &'static str {
+        match (self.chain_on, self.chain_against, self.chain_audit) {
+            (false, _, _) => "off",
+            (true, false, _) => "on",
+            (true, true, false) => "against",
+            (true, true, true) => "audit",
+        }
+    }
+
+    /// The kind for the diagnostics, an audit with how many of the thinking
+    /// tokens it has covered so far (the rest went by while a fork ran).
+    fn chain_kind_audited(&self) -> String {
+        if self.chain_audit {
+            format!(
+                "audit ({} of {} thinking tokens audited)",
+                self.audit_done, self.audit_seen
+            )
+        } else {
+            self.chain_kind().to_string()
+        }
     }
 
     /// The objective's words as single tokens, the forms the lens ranks
@@ -6035,28 +6133,23 @@ impl Engine {
             }
             Command::Objective(text) => self.set_objective(text.trim()),
             Command::Chain(set) => {
-                let against = set == ChainSet::Against;
+                let audit = set == ChainSet::Audit;
+                let against = set == ChainSet::Against || audit;
                 // A change of kind drops what the other kind had in flight
                 // or waiting, so no window mixes the two.
-                if set == ChainSet::Off || against != self.chain_against {
+                let changed = against != self.chain_against || audit != self.chain_audit;
+                if set == ChainSet::Off || changed {
                     self.end_chain(false);
                     self.line_words.clear();
+                    self.line_rows.clear();
                     self.reflection = None;
-                }
-                if set == ChainSet::Off || against != self.chain_against {
                     self.open_objection = None;
                     self.objection_unsent = false;
                 }
                 self.chain_on = set != ChainSet::Off && !self.cfg.task;
                 self.chain_against = against;
-                self.note(format!(
-                    "the second chain {}",
-                    match (self.chain_on, against) {
-                        (false, _) => "off",
-                        (true, false) => "on",
-                        (true, true) => "against",
-                    }
-                ));
+                self.chain_audit = audit;
+                self.note(format!("the second chain {}", self.chain_kind()));
             }
             Command::Goal(on) => {
                 self.goal_on = on && self.yes_no.is_some();
@@ -6269,6 +6362,53 @@ fn unmarked(note: &str) -> &str {
         Some(i) if note.trim_end().ends_with(']') => &note[..i],
         _ => note,
     }
+}
+
+/// The most rows one audit takes (`chain audit`): a longer line's earlier
+/// tokens go unaudited, and are counted so (`audit_seen` against
+/// `audit_done`).
+const AUDIT_ROWS: usize = 40;
+
+/// One thinking token's row for the second chain's audit: the token, the
+/// three strongest words on the stream's mind as it was chosen (the band's
+/// word-like readings, over the blocks), how much that reading supported
+/// the very token, and how much of it lay on the objective's words.
+fn audit_row(r: &MindReading, t: i32, text: &str, obj: &std::collections::HashSet<i32>) -> String {
+    let mut words: Vec<(String, f32)> = r
+        .layers
+        .iter()
+        .flat_map(|(_, ws)| ws.iter().map(|(w, lp)| (w.trim().to_string(), *lp)))
+        .filter(|(w, _)| !w.is_empty())
+        .collect();
+    words.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut seen: Vec<String> = Vec::new();
+    for (w, _) in words {
+        if !seen.iter().any(|s| s.eq_ignore_ascii_case(&w)) {
+            seen.push(w);
+        }
+        if seen.len() == 3 {
+            break;
+        }
+    }
+    let sup = r.band.iter().find(|(b, _)| *b == t).map_or(0.0, |e| e.1);
+    let mass: f32 = r
+        .band
+        .iter()
+        .filter(|(b, _)| obj.contains(b))
+        .map(|e| e.1)
+        .sum();
+    format!(
+        "{:?} (mind: {}) support {:.0}% objective {:.0}%",
+        text.trim(),
+        seen.join(" "),
+        sup * 100.0,
+        mass * 100.0
+    )
+}
+
+/// Whether an audit found nothing: it answers "All within the objective."
+fn audit_clear(said: &str) -> bool {
+    said.trim_start().to_lowercase().starts_with("all within")
 }
 
 /// One chosen token's J-space line (`jspace.log`): when the reading was
@@ -7094,6 +7234,40 @@ mod tests {
         assert_eq!(degenerate(&phrases), Some("repeated phrases"));
         let good = "Tasks blocked: parallel reflection thread integration into engine.rs check_cycle(); the architecture is documented in diff-second-chain.txt. Retention filter analysis complete: no spike at 0.55, about 1.3 percent error detection and 6 percent threshold rejection; keep and top1p are separate metrics, so keep is not top1p clamped. Next: read the rest of engine.rs in parts and propose one checked improvement.";
         assert_eq!(degenerate(good), None);
+    }
+
+    #[test]
+    fn an_audit_row_shows_the_mind_behind_a_token() {
+        let r = MindReading {
+            pos: 3,
+            token: String::new(),
+            layers: vec![
+                (
+                    27,
+                    vec![("leak".into(), 0.4f32.ln()), ("fix".into(), 0.2f32.ln())],
+                ),
+                (
+                    29,
+                    vec![
+                        ("Leak".into(), 0.3f32.ln()),
+                        ("sequence".into(), 0.25f32.ln()),
+                    ],
+                ),
+            ],
+            model_top: Vec::new(),
+            band: vec![(5, 0.12), (11, 0.30)],
+            ms: 0.0,
+            t_us: 0,
+        };
+        let obj: std::collections::HashSet<i32> = [11].into_iter().collect();
+        // The three strongest words, once each whatever their case.
+        assert_eq!(
+            audit_row(&r, 5, " leak", &obj),
+            "\"leak\" (mind: leak sequence fix) support 12% objective 30%"
+        );
+        assert!(audit_clear("All within the objective."));
+        assert!(audit_clear("  all within the objective"));
+        assert!(!audit_clear("\"maybe\": a guess with no support."));
     }
 
     #[test]
