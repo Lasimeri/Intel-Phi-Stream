@@ -6010,7 +6010,14 @@ impl Engine {
                 }
             }
             // At rest (`wait`): nothing is decoded until something new comes.
+            // Its terminal's commands ending and its candidates' outcomes are
+            // still taken in (either wakes the rest: a build it rests through
+            // ends it), and the status file stays fresh: a rest is not a
+            // wedge (the watchdog had restarted every rest as one).
             if self.rest.is_some() {
+                self.poll_term();
+                self.poll_improve();
+                self.write_status_file();
                 self.rest_look()?;
                 if self.rest.is_some() {
                     self.release();

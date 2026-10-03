@@ -23,7 +23,10 @@ tool calls, as its chat template (read from the GGUF's
   without it, it rewrote a whole file for each fix), `write` (a new file, or
   one replaced entirely), `note` (its own memory, kept once), `wait` (rest
   until something new comes: a message from Claude, a new commit, a new
-  objective, a quit, or the minutes it gave; nothing is decoded meanwhile
+  objective, one of its terminal commands ending, a candidate's outcome,
+  a quit, or the minutes it gave; nothing is decoded meanwhile, while
+  `diag.md` and `status.txt` stay fresh (a rest had left them stale, and
+  the watchdog restarted every rest as a wedge)
   and its next turn opens with the rested turn's results and what woke it;
   without it a finished objective was answered every turn with "go on, act
   with a tool", and its thinking went round saying "Done", 70 percent of
