@@ -47,7 +47,10 @@ tool calls, as its chat template (read from the GGUF's
   goal probe over ten minutes, what is building, the last of
   `improve.log`).
   The persona then gains a paragraph naming the loop and its log
-  (`IMPROVE_AGENT`).
+  (`IMPROVE_AGENT`); it asks it to keep working on its next change while
+  a candidate builds, waits for Claude's review or is measured (it had
+  rested through all three, and the person saw the loop stall,
+  2026-10-03).
   In development the persona's text names these tools
   (`engine::agent_persona`), not the chat frame's bracketed lines
   (`[read: PATH]`, `[prefer: ...]`), which it still taught beside them. The persona follows,
@@ -58,7 +61,10 @@ tool calls, as its chat template (read from the GGUF's
   (`parse_calls`; a block that does not parse is counted and told). Calls
   written inside its thinking, in a turn that never closed it, run too, and
   it is told to close its thoughts first (3 percent of its calls were
-  dropped so on the live service, without a word).
+  dropped so on the live service, without a word). The mechanics ask for
+  calls that do not depend on one another in one turn (several reads,
+  searches or commands at once): on the live service it made one call a
+  turn, each turn about 200 thinking tokens and 40 to 60 s (2026-10-03).
 - When its turn ends, the calls run (`engine.rs`, `agent_turn_end`): read,
   write and note at once, a command in the terminal. Nothing is decoded
   while a command runs; its result is waited for, so it never invents one.
