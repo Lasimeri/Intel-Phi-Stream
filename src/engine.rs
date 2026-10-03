@@ -6423,9 +6423,17 @@ fn audit_row(r: &MindReading, t: i32, text: &str, obj: &std::collections::HashSe
 /// reading is a candidate guess (`audit_row`).
 const GUESS_P: f32 = 0.3;
 
-/// Whether an audit found nothing: it answers "All within the objective."
+/// Whether an audit found nothing: it answers "All within the objective.",
+/// or in its own words ("All marked rows are within the objective", "All
+/// lines within the objective", live) with no token named as a finding
+/// (`"TOKEN": why`). Read as findings, those answers became objections the
+/// stream had to rebut, and the open objection stopped further audits.
 fn audit_clear(said: &str) -> bool {
-    said.trim_start().to_lowercase().starts_with("all within")
+    let l = said.trim_start().to_lowercase();
+    let named = said.contains("\":") || said.contains("\" :");
+    !named
+        && (l.starts_with("all within")
+            || l.starts_with("all ") && l.contains("within the objective"))
 }
 
 /// One chosen token's J-space line (`jspace.log`): when the reading was
@@ -7286,6 +7294,14 @@ mod tests {
         assert!(audit_row(&r, 99, " maybe", &obj).starts_with("? \"maybe\""));
         assert!(audit_clear("All within the objective."));
         assert!(audit_clear("  all within the objective"));
+        // Its own words for a clear audit, live.
+        assert!(audit_clear(
+            "All marked rows are within the objective. The reasoning correctly traces the plan."
+        ));
+        assert!(audit_clear("All lines within the objective."));
+        assert!(!audit_clear(
+            "All within reach, but \"maybe\": a guess off the objective."
+        ));
         assert!(!audit_clear("\"maybe\": a guess with no support."));
     }
 
