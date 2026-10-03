@@ -12,6 +12,7 @@ mod clock;
 mod code;
 mod engine;
 mod eval;
+mod feeds;
 mod format;
 mod gate;
 mod improve;

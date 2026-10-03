@@ -23,6 +23,7 @@ use std::time::Instant;
 use anyhow::{bail, Context as _, Result};
 
 use crate::clock;
+use crate::feeds;
 use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
 use crate::playout::Playout;
@@ -808,6 +809,8 @@ pub struct Engine {
     last_tool_nudge_mono: i64,
     /// What it works toward (since when, the text); none: its output idles.
     objective: Option<(i64, String)>,
+    feeds_prev: std::collections::HashMap<String, feeds::Status>,
+    feeds_last_poll_mono: i64,
     /// The tokens never sampled (control, `«`), and those held back while
     /// it has no objective (`»` in the journal, `</think>` in chat).
     base_ban: Vec<i32>,
@@ -1320,6 +1323,8 @@ impl Engine {
             last_tool_mono: clock::mono_us(),
             last_tool_nudge_mono: clock::mono_us(),
             objective,
+            feeds_prev: std::collections::HashMap::new(),
+            feeds_last_poll_mono: clock::mono_us(),
             base_ban,
             speak_ban,
             quit_deadline: None,
@@ -3954,6 +3959,28 @@ impl Engine {
         }
     }
 
+    /// Poll camera feeds: read all `.status` files, compare with last snapshot,
+    /// append events to `feeds/events.log`, push lines to `self.waiting`.
+    /// Throttled to at most once every 5 s.
+    fn poll_feeds(&mut self) {
+        use crate::feeds;
+        let mono = clock::mono_us();
+        if mono - self.feeds_last_poll_mono < 5_000_000_000 {
+            return;
+        }
+        self.feeds_last_poll_mono = mono;
+        let feeds_dir = self.cfg.workspace.join("feeds");
+        let cur = feeds::read_all_statuses(&feeds_dir);
+        let evs = feeds::compare_snapshots(clock::now_us(), &self.feeds_prev, &cur);
+        if !evs.is_empty() {
+            feeds::append_events(&feeds_dir, &evs);
+            for ev in &evs {
+                self.waiting.push(feeds::event_line(ev));
+            }
+        }
+        self.feeds_prev = cur;
+    }
+
     /// `tell_claude`: a message to Claude, kept in `to-claude.md` and sent
     /// to the terminals as a `claude` line (`phi-stream ask` waits for one,
     /// the MCP server's `inbox` reads them).
@@ -5747,6 +5774,7 @@ impl Engine {
         }
         // Its terminal: commands that ended come back as documents.
         self.poll_term();
+        self.poll_feeds();
         self.poll_improve();
         self.write_status_file();
         // Tokens held back after a repeated line come back when their time is up.
@@ -6289,6 +6317,7 @@ impl Engine {
             // turn: commands still come in, nothing is decoded meanwhile.
             if self.awaiting.is_some() {
                 self.poll_term();
+                self.poll_feeds();
                 self.poll_improve();
                 self.write_status_file();
                 self.finish_agent_wait()?;
@@ -6305,6 +6334,7 @@ impl Engine {
             // wedge (the watchdog had restarted every rest as one).
             if self.rest.is_some() {
                 self.poll_term();
+                self.poll_feeds();
                 self.poll_improve();
                 self.write_status_file();
                 self.rest_look()?;
