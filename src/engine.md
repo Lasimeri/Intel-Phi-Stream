@@ -843,7 +843,11 @@ audit` live; it implies `--chain-against`):
   objective's words.
 - At a line's end the second chain forks with the line and the rows
   queued since the last audit (at most `AUDIT_ROWS`, 96, compact: the
-  token, its three words, `s` support and `o` objective in percent; rows
+  token, its three words, `s` support and `o` objective in percent; a
+  row is marked `?` when nothing supported the token and the model gave
+  it under `GUESS_P`, 0.3, the candidate guesses, 4.3 percent of 5747
+  thinking tokens, which the audit must rule on: unmarked, all six audits
+  of the first live half hour answered "all within"; rows
   wait while a fork runs, so a busy chain audits them later rather than
   dropping them: the first live hour of 40-row, line-only audits covered
   40 of 314 thinking tokens) and is asked which tokens were guesses

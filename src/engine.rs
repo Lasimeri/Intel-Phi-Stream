@@ -2131,7 +2131,7 @@ impl Engine {
                     .map(|(i, r)| format!("{}. {}\n", i + 1, r.replace(['[', ']'], "")))
                     .collect();
                 format!(
-                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it, auditing your last line token by token. The objective: {g}. Your last line: \"{last}\". Each thinking token since the last audit, one a row as it was chosen: the token, the three strongest words on your mind at that moment (the J-space words of the position that chose it), s the percent that reading gave the very token, o the percent of it on the objective's words:\n{table}An s near 0 is usual for joining words and punctuation; it matters for the words that carry the meaning. Take what Claude and the person said as given. Were any of these tokens guesses (meaning chosen with no support in what was on your mind) or off the objective? If none, answer exactly: All within the objective. Otherwise name at most three, each as \"TOKEN\": why, one sentence each.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it, auditing your last line token by token. The objective: {g}. Your last line: \"{last}\". Each thinking token since the last audit, one a row as it was chosen: the token, the three strongest words on your mind at that moment (the J-space words of the position that chose it), s the percent that reading gave the very token, o the percent of it on the objective's words:\n{table}An s near 0 is usual for joining words and punctuation. Rows marked ? are the candidate guesses: nothing on your mind supported the token and you yourself gave it under 30 percent. Take what Claude and the person said as given. Rule on each marked row: was it a guess that took the line off the objective, or within it? Answer exactly All within the objective. only if every marked row (and every other) is; otherwise name at most three tokens, each as \"TOKEN\": why, one sentence each.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
                 )
             }
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
@@ -6400,14 +6400,28 @@ fn audit_row(r: &MindReading, t: i32, text: &str, obj: &std::collections::HashSe
         .filter(|(b, _)| obj.contains(b))
         .map(|e| e.1)
         .sum();
+    // A candidate guess: nothing on its mind supported the token and the
+    // model itself gave it under `GUESS_P` (4.3 percent of 5747 thinking
+    // tokens, 2026-10-03). Marked, so the audit rules on each: unmarked,
+    // every audit of the first live hour answered "all within".
+    let p = r
+        .model_top
+        .iter()
+        .find(|(m, _)| *m == t)
+        .map_or(0.0, |e| e.1.exp());
+    let mark = if sup == 0.0 && p < GUESS_P { "? " } else { "" };
     format!(
-        "{:?} {} s{:.0} o{:.0}",
+        "{mark}{:?} {} s{:.0} o{:.0}",
         text.trim(),
         seen.join(" "),
         sup * 100.0,
         mass * 100.0
     )
 }
+
+/// Below this probability of its own, a token with no support in the
+/// reading is a candidate guess (`audit_row`).
+const GUESS_P: f32 = 0.3;
 
 /// Whether an audit found nothing: it answers "All within the objective."
 fn audit_clear(said: &str) -> bool {
@@ -7268,6 +7282,8 @@ mod tests {
             audit_row(&r, 5, " leak", &obj),
             "\"leak\" leak sequence fix s12 o30"
         );
+        // No support and no confidence of its own: a candidate guess, marked.
+        assert!(audit_row(&r, 99, " maybe", &obj).starts_with("? \"maybe\""));
         assert!(audit_clear("All within the objective."));
         assert!(audit_clear("  all within the objective"));
         assert!(!audit_clear("\"maybe\": a guess with no support."));
