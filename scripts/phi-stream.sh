@@ -60,6 +60,36 @@ keeppid="$rt/phi-stream$suffix-window-keeper.pid"
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2> /dev/null; }
 # Loaded and running: `status` prints a line (while it loads, none).
 running() { [ -n "$("$bin" status 2> /dev/null || true)" ]; }
+# The service process listening on this instance's socket, however it was
+# started (in tmux by `start`, or outside it by a watchdog or a login).
+sock=${PHI_STREAM_SOCKET:-$rt/phi-stream.sock}
+serve_pid() { ss -xlpn 2> /dev/null | grep -F " $sock " | grep -oP 'pid=\K[0-9]+' | head -n 1; }
+# The service asked to quit (it writes its summary first, src/engine.md)
+# and waited for: its process gone and its tmux session ended, up to two
+# minutes, then ended anyway. Waiting on the tmux session alone, a restart
+# of a service started outside tmux began the next one beside it while it
+# still wrote its summary, and the next ran out of GPU memory loading
+# (2026-10-03).
+quit_and_wait() {
+    local p
+    p=$(serve_pid)
+    "$bin" quit 2>/dev/null || true
+    for _ in $(seq 1 120); do
+        if ! tmux has-session -t "=$session" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
+            return 0
+        fi
+        sleep 1
+    done
+    tmux kill-session -t "=$session" 2>/dev/null || true
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+        kill "$p" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$p" 2>/dev/null || return 0
+            sleep 0.5
+        done
+        kill -9 "$p" 2>/dev/null || true
+    fi
+}
 open_window() {
     alive "$winpid" && return 0
     # The desktop: this session's, or the user's own Wayland display when
@@ -130,8 +160,13 @@ case "$sub" in
         log=${PHI_STREAM_LOG:-$HOME/.local/share/phi-stream/serve.log}
         mkdir -p "$(dirname "$log")"
         # The binary chosen here (PHI_STREAM_BIN) goes with it: the session
-        # takes the tmux server's environment, not this shell's.
-        cmd="env PHI_STREAM_BIN=$(printf '%q' "$bin") $(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
+        # takes the tmux server's environment, not this shell's. So does
+        # PHI_STREAM_PRELOAD, put in the service's LD_PRELOAD alone (a
+        # watchdog's shim that lets a debugger take a stuck service's
+        # stacks, without loosening every program the tmux server runs).
+        pre=""
+        [ -n "${PHI_STREAM_PRELOAD:-}" ] && pre="LD_PRELOAD=$(printf '%q' "$PHI_STREAM_PRELOAD")"
+        cmd="env $pre PHI_STREAM_BIN=$(printf '%q' "$bin") $(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
         tmux new-session -d -s "$session" "$cmd"
         echo "started the service in tmux session $session; log: $log (and tmux attach -t $session); the terminal: $0 attach"
         # The window: on the desktop whenever the model is loaded and
@@ -220,12 +255,7 @@ case "$sub" in
             kill "$(cat "$keeppid")" 2> /dev/null || true
         fi
         rm -f "$keeppid"
-        "$bin" quit 2>/dev/null || true
-        for _ in $(seq 1 120); do
-            tmux has-session -t "=$session" 2>/dev/null || break
-            sleep 1
-        done
-        tmux kill-session -t "=$session" 2>/dev/null || true
+        quit_and_wait
         echo "stopped; starting again, the window kept"
         exec "$0" "${rest[@]}"
         ;;
@@ -239,12 +269,7 @@ case "$sub" in
         rm -f "$keeppid"
         # The service writes its summary before it stops (src/engine.md): up
         # to two minutes, then the session ends anyway.
-        "$bin" quit 2>/dev/null || true
-        for _ in $(seq 1 120); do
-            tmux has-session -t "=$session" 2>/dev/null || break
-            sleep 1
-        done
-        tmux kill-session -t "=$session" 2>/dev/null || true
+        quit_and_wait
         if alive "$winpid"; then
             kill "$(cat "$winpid")" 2> /dev/null || true
         fi

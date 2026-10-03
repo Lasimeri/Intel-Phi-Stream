@@ -52,7 +52,13 @@ past 150 thousand cells) and `--second-chain`: measured in the agent frame
 8-grams from 19.8 to 11.3 percent for 13 percent of the stream's rate.
 `phi-stream chain off` (or `/chain off` in the terminal) turns it off live.
 `stop` waits up to two minutes for the service to write its summary and
-end (`src/engine.md`) before it ends the session. `restart [dev OPTIONS]`
+end (`src/engine.md`) before it ends the session; it waits for the
+process listening on the socket (`quit_and_wait`), not only the tmux
+session, so a service started outside tmux (by a watchdog, at a login) is
+stopped too, and killed past the two minutes (a restart had started the
+next service beside one still writing its summary, and the next ran out
+of GPU memory loading, 2026-10-03). `PHI_STREAM_PRELOAD` goes into the
+service's `LD_PRELOAD` alone (a watchdog's debugger shim). `restart [dev OPTIONS]`
 does the same and starts it again (by default `dev`), its window kept open:
 the terminal in it reconnects, so the interface stays on the desktop
 through an update (`stop` and `start` closed it for the whole load).
