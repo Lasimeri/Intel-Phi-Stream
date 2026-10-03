@@ -2057,9 +2057,11 @@ impl Engine {
         self.goal_probe()?;
         let mono = clock::mono_us();
         let words = std::mem::take(&mut self.line_words);
-        // The audit's rows go with the line: audited now, or (a fork still
-        // running, the last one too recent) left unaudited and counted so.
-        let rows = std::mem::take(&mut self.line_rows);
+        // The audit's rows wait for the second chain: every thinking token
+        // since the last audit (a fork still running, or the last too
+        // recent, they stay queued; past `AUDIT_ROWS` the oldest go
+        // unaudited, counted so). Taken only when an audit starts.
+        let rows = self.line_rows.clone();
         let auditing = self.chain_audit && self.chain_against && self.cfg.agent;
         if self.reflecting.is_some()
             || mono - self.chain_fork_mono < CHAIN_EVERY_US
@@ -2129,7 +2131,7 @@ impl Engine {
                     .map(|(i, r)| format!("{}. {}\n", i + 1, r.replace(['[', ']'], "")))
                     .collect();
                 format!(
-                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it, auditing your last line token by token. The objective: {g}. Your last line: \"{last}\". Each of its thinking tokens as it was chosen, with what was on your mind at that moment (the J-space words of the position that chose it), how much that reading supported the very token, and how much of it lay on the objective's words:\n{table}Support near 0% is usual for joining words and punctuation; it matters for the words that carry the meaning. Take what Claude and the person said as given. Were any of these tokens guesses (meaning chosen with no support in what was on your mind) or off the objective? If none, answer exactly: All within the objective. Otherwise name at most three, each as \"TOKEN\": why, one sentence each.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+                    "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it, auditing your last line token by token. The objective: {g}. Your last line: \"{last}\". Each thinking token since the last audit, one a row as it was chosen: the token, the three strongest words on your mind at that moment (the J-space words of the position that chose it), s the percent that reading gave the very token, o the percent of it on the objective's words:\n{table}An s near 0 is usual for joining words and punctuation; it matters for the words that carry the meaning. Take what Claude and the person said as given. Were any of these tokens guesses (meaning chosen with no support in what was on your mind) or off the objective? If none, answer exactly: All within the objective. Otherwise name at most three, each as \"TOKEN\": why, one sentence each.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
                 )
             }
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
@@ -2176,6 +2178,7 @@ impl Engine {
         let audit = auditing && !rows.is_empty() && reconcile.is_none();
         if audit {
             self.audit_done += rows.len() as u64;
+            self.line_rows.clear();
         }
         self.reflecting = Some(Chain {
             seq,
@@ -6367,7 +6370,7 @@ fn unmarked(note: &str) -> &str {
 /// The most rows one audit takes (`chain audit`): a longer line's earlier
 /// tokens go unaudited, and are counted so (`audit_seen` against
 /// `audit_done`).
-const AUDIT_ROWS: usize = 40;
+const AUDIT_ROWS: usize = 96;
 
 /// One thinking token's row for the second chain's audit: the token, the
 /// three strongest words on the stream's mind as it was chosen (the band's
@@ -6398,7 +6401,7 @@ fn audit_row(r: &MindReading, t: i32, text: &str, obj: &std::collections::HashSe
         .map(|e| e.1)
         .sum();
     format!(
-        "{:?} (mind: {}) support {:.0}% objective {:.0}%",
+        "{:?} {} s{:.0} o{:.0}",
         text.trim(),
         seen.join(" "),
         sup * 100.0,
@@ -7263,7 +7266,7 @@ mod tests {
         // The three strongest words, once each whatever their case.
         assert_eq!(
             audit_row(&r, 5, " leak", &obj),
-            "\"leak\" (mind: leak sequence fix) support 12% objective 30%"
+            "\"leak\" leak sequence fix s12 o30"
         );
         assert!(audit_clear("All within the objective."));
         assert!(audit_clear("  all within the objective"));

@@ -841,8 +841,12 @@ audit` live; it implies `--chain-against`):
   band's word-like readings at the position that chose it), how much
   that reading supported the very token, and how much of it lay on the
   objective's words.
-- At the line's end the second chain forks with the line and its rows
-  (at most `AUDIT_ROWS`, 40) and is asked which tokens were guesses
+- At a line's end the second chain forks with the line and the rows
+  queued since the last audit (at most `AUDIT_ROWS`, 96, compact: the
+  token, its three words, `s` support and `o` objective in percent; rows
+  wait while a fork runs, so a busy chain audits them later rather than
+  dropping them: the first live hour of 40-row, line-only audits covered
+  40 of 314 thinking tokens) and is asked which tokens were guesses
   (meaning chosen with no support in what was on its mind) or off the
   objective, taking what Claude and the person said as given; it answers
   "All within the objective." or names at most three, each with why.
@@ -851,7 +855,6 @@ audit` live; it implies `--chain-against`):
   user turn ("audited your last line token by token ... concede it or
   rebut it"), then reconciled (`Agreed:` / `Still:`, `RECONCILE_ROUNDS`).
 - What is audited and what went by is counted: the diagnostics say "audit
-  (N of M thinking tokens audited)". A line that ends while a fork runs,
-  or within `CHAIN_EVERY_US` of the last, goes by unaudited; the count
-  says how often (one fork at a time, so "each token" holds only as far
+  (N of M thinking tokens audited)". Rows past the queue's 96 go by
+  unaudited; the count says how often (one fork at a time, so "each token" holds only as far
   as the second chain keeps pace with the first).
