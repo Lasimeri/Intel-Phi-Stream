@@ -556,6 +556,8 @@ const GUIDE_MAX: usize = 4096;
 const CHAIN_MAX: usize = 64;
 /// The opposing chain's length: at 64 its objections were cut mid-sentence.
 const AGAINST_MAX: usize = 112;
+/// An audit's length: up to three tokens named, a line each.
+const AUDIT_MAX: usize = 160;
 /// Reconciliation: how many tokens of the stream's thinking after an
 /// objection is told before the opposing side asks whether it was answered,
 /// and how many rounds before an objection is left unresolved.
@@ -2331,7 +2333,14 @@ impl Engine {
         self.free_seqs.push(c.seq);
         // Fit to be told (`chain_said`): no template marks, no sentence cut
         // at the token limit, at least a few words.
-        let capped = c.out.len() >= if c.against { AGAINST_MAX } else { CHAIN_MAX };
+        let capped = c.out.len()
+            >= if c.audit {
+                AUDIT_MAX
+            } else if c.against {
+                AGAINST_MAX
+            } else {
+                CHAIN_MAX
+            };
         let raw = self.llm.text(&c.out);
         let said = chain_said(&raw, capped).unwrap_or_default();
         if c.reconcile {
@@ -4869,9 +4878,26 @@ impl Engine {
             let t = self.chain_token(rows[1])?;
             let piece = self.llm.text(&[t]);
             c.out.push(t);
+            // A reflection or an objection is a line; an audit names its
+            // tokens a line each, so it ends at a blank line (live, "Looking
+            // at the tokens carefully:" was all of one, cut at its first
+            // line's end).
+            let said = self.llm.text(&c.out);
+            let ended = if c.audit {
+                said.trim_start().contains("\n\n")
+            } else {
+                piece.contains('\n') && !said.trim().is_empty()
+            };
             let done = self.llm.is_eog(t)
-                || c.out.len() >= if c.against { AGAINST_MAX } else { CHAIN_MAX }
-                || (piece.contains('\n') && !self.llm.text(&c.out).trim().is_empty());
+                || c.out.len()
+                    >= if c.audit {
+                        AUDIT_MAX
+                    } else if c.against {
+                        AGAINST_MAX
+                    } else {
+                        CHAIN_MAX
+                    }
+                || ended;
             let _ = self.tx.send(Event::Delib(crate::client::Delib {
                 kind: crate::client::DelibKind::Piece,
                 t_us: clock::now_us(),

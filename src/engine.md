@@ -854,6 +854,10 @@ audit` live; it implies `--chain-against`):
   (meaning chosen with no support in what was on its mind) or off the
   objective, taking what Claude and the person said as given; it answers
   "All within the objective." or names at most three, each with why.
+- The audit's answer runs to a blank line or `AUDIT_MAX` (160 tokens),
+  not to its first line's end as a reflection's does: it names its tokens
+  a line each, and live one finding was cut to its preamble ("Looking at
+  the tokens carefully:").
 - A clear audit tells the stream nothing (a line `audit` in `dual.log`).
   A finding is an objection like the opposing chain's: told at the next
   user turn ("audited your last line token by token ... concede it or
