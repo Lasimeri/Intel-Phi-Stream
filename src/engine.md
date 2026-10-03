@@ -721,6 +721,22 @@ characters) beside its J-space words: given only the words, it argued
 against the word list ("a label set, not a step"). Its objections run to
 `AGAINST_MAX` (112 tokens): at 64 they were cut mid-sentence.
 
+What a fork says is fitted before it is told (`chain_said`), since the
+person saw the injection done badly (2026-10-03): it is cut at the first
+mark of the chat template (one verdict was the tags of a tool call alone,
+"still holds: <tool_call>"), cut back to its last whole sentence when it
+stopped at its token limit (told mid-word: "...the decode? fix belo"), and
+dropped under three words (a dropped verdict leaves the objection open,
+asked about again later). The line and the thinking a question quotes
+are given without the template's marks (`plain`: a call shows as
+`[NAME]`), the objection without its primer ("against your last line:
+Against it:" said it twice), each aside with its time to the second
+(`hms_s`; the logs keep microseconds). The question tells the side to
+take what Claude and the person said as given and argue against the
+stream's own reasoning and actions, never their instructions: it had
+argued that Claude's direction was "a future instruction, not a current
+action item".
+
 ## Reconciliation: the two chains brought to agreement
 
 The person (2026-10-02): "reconcile both the deliberation chains so the

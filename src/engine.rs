@@ -1950,14 +1950,17 @@ impl Engine {
             if let Some(text) = self.reflection.take() {
                 // Beside the waiting lines: a reflection neither stops a rest nor
                 // wakes one (each turn left one waiting, and every rest was refused).
-                let at = clock::hms(clock::now_us());
+                let at = hms_s(clock::now_us());
                 // The opposing chain's objection asks for an answer: the
                 // two reason against each other, toward the one objective.
                 if self.reflection_against {
                     self.objection_unsent = true;
                 }
                 self.asides.push(if self.reflection_against {
-                    format!("[{at}] the other side of your thinking, against your last line: {text} Answer it in your thinking: concede it or rebut it, and keep to the objective.")
+                    // Its primer is the chain's own opening, not news ("against
+                    // your last line: Against it: ...").
+                    let point = text.strip_prefix(AGAINST_PRIMER).map_or(text.as_str(), str::trim);
+                    format!("[{at}] the other side of your thinking, against your last line: {point} Answer it in your thinking: concede it or rebut it, and keep to the objective.")
                 } else {
                     format!("[{at}] your second look, beside your turn: {text}")
                 });
@@ -2045,8 +2048,7 @@ impl Engine {
         // label set, not a step") instead of what the line said.
         let last: String = {
             let from = self.line_from.min(self.history.len());
-            let t = self.llm.text(&self.history[from..]);
-            let t = t.trim().replace(['"', '[', ']'], "");
+            let t = plain(&self.llm.text(&self.history[from..])).replace(['"', '[', ']'], "");
             let n = t.chars().count();
             t.chars().skip(n.saturating_sub(300)).collect()
         };
@@ -2064,8 +2066,8 @@ impl Engine {
                     return Ok(());
                 }
                 let since = {
-                    let s = self.llm.text(&self.history[t.min(self.history.len())..]);
-                    let s = s.trim().replace(['"', '[', ']'], "");
+                    let s = plain(&self.llm.text(&self.history[t.min(self.history.len())..]))
+                        .replace(['"', '[', ']'], "");
                     let n = s.chars().count();
                     s.chars().skip(n.saturating_sub(500)).collect::<String>()
                 };
@@ -2080,7 +2082,7 @@ impl Engine {
                 )
             }
             (Some(g), Frame::Chat) if self.cfg.agent => format!(
-                "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your last line: \"{last}\" (on your mind in it: {}). Argue against that line, its content, as a step toward the objective: in a sentence or two, the strongest objection to what it says or does, or where it drifts from the objective.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
+                "<|im_end|>\n<|im_start|>user\n[The other side of your thinking, beside it. The objective: {g}. Your last line: \"{last}\" (on your mind in it: {}). Argue against that line, its content, as a step toward the objective: in a sentence or two, the strongest objection to what it says or does, or where it drifts from the objective. Take what Claude and the person said as given: argue against its own reasoning and actions, never against their instructions.]<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{AGAINST_PRIMER}",
                 shown.join(", ")
             ),
             (Some(g), Frame::Journal) => format!(
@@ -2270,12 +2272,23 @@ impl Engine {
         };
         self.llm.seq_rm(c.seq, -1, -1);
         self.free_seqs.push(c.seq);
-        let said = self.llm.text(&c.out).trim().to_string();
+        // Fit to be told (`chain_said`): no template marks, no sentence cut
+        // at the token limit, at least a few words.
+        let capped = c.out.len() >= if c.against { AGAINST_MAX } else { CHAIN_MAX };
+        let raw = self.llm.text(&c.out);
+        let said = chain_said(&raw, capped).unwrap_or_default();
         if c.reconcile {
-            let outcome = if keep {
-                self.reconciled(&said)
-            } else {
+            let outcome = if !keep {
                 "dropped: the journal moved under it".to_string()
+            } else if said.is_empty() {
+                // Nothing to tell: the objection stays open and is asked
+                // about again after more of its thinking.
+                if let Some(o) = self.open_objection.as_mut() {
+                    o.told_at = Some(self.history.len());
+                }
+                "dropped: no verdict in it".to_string()
+            } else {
+                self.reconciled(&said)
             };
             let _ = self.tx.send(Event::Delib(crate::client::Delib {
                 kind: crate::client::DelibKind::End,
@@ -2359,6 +2372,7 @@ impl Engine {
             return "no objection open".into();
         };
         let at = clock::hms(clock::now_us());
+        let at_s = hms_s(clock::now_us());
         let t = said.trim();
         let lower = t.to_lowercase();
         let rest = |t: &str| {
@@ -2376,7 +2390,7 @@ impl Engine {
             ));
             (
                 format!(
-                    "[{at}] agreed with the other side of your thinking: {r} (settled: keep to it)"
+                    "[{at_s}] agreed with the other side of your thinking: {r} (settled: keep to it)"
                 ),
                 format!("agreed after {} round(s): {r}", o.rounds),
             )
@@ -2394,7 +2408,7 @@ impl Engine {
                     o.text.replace('\n', " ")
                 ));
                 (
-                    format!("[{at}] you and the other side of your thinking did not agree after {} rounds; the point: {r}. Settle it with a tool (read the code, run a test, check a log) rather than more argument.", o.rounds),
+                    format!("[{at_s}] you and the other side of your thinking did not agree after {} rounds; the point: {r}. Settle it with a tool (read the code, run a test, check a log) rather than more argument.", o.rounds),
                     format!("unresolved after {} rounds: {r}", o.rounds),
                 )
             } else {
@@ -2403,7 +2417,7 @@ impl Engine {
                     o.rounds,
                     o.text.replace('\n', " ")
                 ));
-                let aside = format!("[{at}] the other side of your thinking still holds: {r} Answer it: concede it or rebut it, and keep to the objective.");
+                let aside = format!("[{at_s}] the other side of your thinking still holds: {r} Answer it: concede it or rebut it, and keep to the objective.");
                 o.text = r.clone();
                 o.told_at = None;
                 self.open_objection = Some(o);
@@ -6161,6 +6175,111 @@ fn unmarked(note: &str) -> &str {
     }
 }
 
+/// `HH:MM:SS`, local time: the time an aside carries into the stream's
+/// context (`clock::hms`'s microseconds are a dozen tokens each time, and
+/// the logs keep them).
+fn hms_s(t_us: i64) -> String {
+    let t = clock::hms(t_us);
+    t.get(..8).unwrap_or(&t).to_string()
+}
+
+/// The stream's text without the chat template's marks, for a fork's
+/// question to quote: quoted raw, its last line or its thinking since an
+/// objection could be a tool call, and the opposing side answered with the
+/// tags alone ("the other side of your thinking still holds: <tool_call>",
+/// 2026-10-03). A call's function stays as `[NAME]`.
+fn plain(text: &str) -> String {
+    const MARKS: [&str; 10] = [
+        "<|im_start|>",
+        "<|im_end|>",
+        "<think>",
+        "</think>",
+        "<tool_call>",
+        "</tool_call>",
+        "</function>",
+        "</parameter>",
+        "<tool_response>",
+        "</tool_response>",
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if let Some(m) = MARKS.iter().find(|m| tail.starts_with(**m)) {
+            rest = &tail[m.len()..];
+            if *m == "<|im_start|>" {
+                rest = rest.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            }
+            out.push(' ');
+        } else if let Some(r) = tail.strip_prefix("<function=") {
+            let (name, after) = r.split_once('>').unwrap_or((r, ""));
+            out.push_str(&format!(" [{name}] "));
+            rest = after;
+        } else if let Some(r) = tail.strip_prefix("<parameter=") {
+            rest = r.split_once('>').map_or("", |(_, after)| after);
+            out.push(' ');
+        } else {
+            out.push('<');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What a fork of the second chain said, fit to be told to the stream:
+/// cut at the first template mark (a fork that went on into the stream's
+/// own format), back to its last whole sentence when it stopped at its
+/// token limit (objections were told cut mid-word: "...the decode? fix
+/// belo"), and nothing when fewer than three words are left.
+fn chain_said(said: &str, capped: bool) -> Option<String> {
+    const MARKS: [&str; 8] = [
+        "<tool_call>",
+        "</tool_call>",
+        "<function=",
+        "<parameter=",
+        "<|im_",
+        "<think>",
+        "</think>",
+        "<tool_response>",
+    ];
+    let cut = MARKS
+        .iter()
+        .filter_map(|m| said.find(m))
+        .min()
+        .unwrap_or(said.len());
+    let mut s = said[..cut].trim().to_string();
+    if capped && cut == said.len() {
+        match sentence_end(&s) {
+            Some(i) => s.truncate(i),
+            None => {
+                if let Some(i) = s.rfind(char::is_whitespace) {
+                    s.truncate(i);
+                    s.push_str("...");
+                }
+            }
+        }
+    }
+    let s = s.trim().to_string();
+    (s.split_whitespace().count() >= 3).then_some(s)
+}
+
+/// The end of the last whole sentence: `.`, `!` or `?` followed by a space
+/// and a capital, a quote or a backtick (so `decode? path` and `engine.rs`
+/// are no ends), the byte just past it.
+fn sentence_end(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    (0..b.len().saturating_sub(2))
+        .rev()
+        .find(|&i| {
+            matches!(b[i], b'.' | b'!' | b'?')
+                && b[i + 1] == b' '
+                && (b[i + 2].is_ascii_uppercase() || matches!(b[i + 2], b'"' | b'`' | b'\''))
+        })
+        .map(|i| i + 1)
+}
+
 /// What a command's exit most likely means, said beside it, as the errors
 /// of a good tool teach: on the live service grep's no-match (exit 1) was
 /// read as a failure, and git writes into the read-only `.git` came back
@@ -6845,6 +6964,37 @@ mod tests {
         assert_eq!(degenerate(&phrases), Some("repeated phrases"));
         let good = "Tasks blocked: parallel reflection thread integration into engine.rs check_cycle(); the architecture is documented in diff-second-chain.txt. Retention filter analysis complete: no spike at 0.55, about 1.3 percent error detection and 6 percent threshold rejection; keep and top1p are separate metrics, so keep is not top1p clamped. Next: read the rest of engine.rs in parts and propose one checked improvement.";
         assert_eq!(degenerate(good), None);
+    }
+
+    #[test]
+    fn a_fork_is_told_clean_and_whole() {
+        // The live service, 2026-10-03.
+        assert_eq!(chain_said("<tool_call>", false), None);
+        assert_eq!(chain_said(" <tool_call>\n<function=read>", false), None);
+        let cut = "the decode? path is a distinct error path. The strongest objection is that the pipeline treats them as one; the decode? fix belo";
+        assert_eq!(
+            chain_said(cut, true).as_deref(),
+            Some("the decode? path is a distinct error path.")
+        );
+        // No sentence end at all: back to the last whole word.
+        assert_eq!(
+            chain_said(
+                "stopping early means the remaining files are never checke",
+                true
+            )
+            .as_deref(),
+            Some("stopping early means the remaining files are never...")
+        );
+        // Not at the limit: kept as said.
+        assert_eq!(
+            chain_said("the diff is clean and the fix is whole", false).as_deref(),
+            Some("the diff is clean and the fix is whole")
+        );
+        assert_eq!(
+            plain("I read it.\n\n</think>\n\n<tool_call>\n<function=read>\n<parameter=path>\nsrc/engine.rs\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response>"),
+            "I read it. [read] src/engine.rs ok"
+        );
+        assert_eq!(hms_s(0).len(), 8);
     }
 
     #[test]
