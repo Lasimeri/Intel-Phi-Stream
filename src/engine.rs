@@ -786,6 +786,9 @@ pub struct Engine {
     /// start, the head then): a newer one is told at its next user turn
     /// (`take_waiting`) and wakes a rest (`rest_look`).
     head_told: Option<String>,
+    /// It was told that `run` starts in the repository (once: 169 of 243
+    /// commands on the live service began `cd <repository> &&`).
+    cd_told: bool,
     /// A long decode straight into the live sequence (`feed_live`): the
     /// tokens done and all of them, for the status.
     prefill: Option<(usize, usize)>,
@@ -1284,6 +1287,7 @@ impl Engine {
             rest: None,
             rest_asked: None,
             head_told,
+            cd_told: false,
             prefill: None,
             act_next: 1,
             run_acts: HashMap::new(),
@@ -3756,9 +3760,22 @@ impl Engine {
             }
             let how = match (ran.code, ran.timed_out) {
                 (_, true) => format!("stopped at the limit of {} s", MAX_TERM_SECS),
-                (Some(c), _) => format!("exit {c}"),
+                (Some(c), _) => match term_hint(&ran.command, c, &ran.out) {
+                    Some(h) => format!("exit {c}: {h}"),
+                    None => format!("exit {c}"),
+                },
                 (None, _) => "it did not run".to_string(),
             };
+            // Said once: the terminal starts in the repository already.
+            let mut how = how;
+            if !self.cd_told {
+                if let Some(root) = self.cfg.dev.as_ref().and_then(|r| r.to_str()) {
+                    if cds_into(&ran.command, root) {
+                        self.cd_told = true;
+                        how.push_str("; your commands start in the repository already, so `cd` to it is not needed");
+                    }
+                }
+            }
             // A command stopped at the limit has no result, and says so: read
             // as "ended ... (no output)", three cargo checks stopped at 60 s
             // became "compilation passes" in its review.
@@ -6104,6 +6121,88 @@ fn unmarked(note: &str) -> &str {
     }
 }
 
+/// What a command's exit most likely means, said beside it, as the errors
+/// of a good tool teach: on the live service grep's no-match (exit 1) was
+/// read as a failure, and git writes into the read-only `.git` came back
+/// as a bare exit 128, tried again and again (`git add && git commit`,
+/// `git checkout --`).
+fn term_hint(command: &str, code: i32, out: &str) -> Option<&'static str> {
+    if code == 0 {
+        return None;
+    }
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    const GIT_WRITES: [&str; 20] = [
+        "commit",
+        "add",
+        "checkout",
+        "reset",
+        "restore",
+        "stash",
+        "merge",
+        "rebase",
+        "apply",
+        "am",
+        "cherry-pick",
+        "revert",
+        "rm",
+        "mv",
+        "tag",
+        "switch",
+        "pull",
+        "push",
+        "clean",
+        "init",
+    ];
+    let git_write = words.iter().position(|w| *w == "git").is_some_and(|i| {
+        words[i + 1..]
+            .iter()
+            .take(4)
+            .any(|w| GIT_WRITES.contains(w))
+    });
+    if git_write {
+        return Some("the repository's .git is read-only in your terminal; your changes live in your working copy: `diff` shows them, `revert` puts a file back to the head, `propose` sends them to the loop, and the loop commits after Claude's review and the measurement");
+    }
+    if out.contains("Read-only file system") {
+        return Some("that path is read-only in your terminal; you write in the repository (your working copy), your workspace and /tmp");
+    }
+    let grep = words
+        .iter()
+        .any(|w| matches!(*w, "grep" | "egrep" | "fgrep" | "zgrep" | "rg"));
+    if code == 1 && grep && out.trim().is_empty() {
+        return Some("no match (grep's exit 1 when nothing matches, not an error)");
+    }
+    match code {
+        126 => Some("not executable"),
+        127 => Some("command not found in your terminal"),
+        134 => Some("it aborted (SIGABRT: an assertion or abort)"),
+        137 => Some("it was killed (SIGKILL: out of memory, or a limit)"),
+        139 => Some("it crashed (SIGSEGV: a segmentation fault)"),
+        _ => None,
+    }
+}
+
+/// The command begins by changing into the repository it starts in
+/// already: `cd ROOT`, `cd "ROOT"`, `cd 'ROOT'` or with its spaces escaped.
+fn cds_into(command: &str, root: &str) -> bool {
+    let Some(rest) = command.trim_start().strip_prefix("cd ") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let forms = [
+        root.to_string(),
+        format!("\"{root}\""),
+        format!("'{root}'"),
+        root.replace(' ', "\\ "),
+    ];
+    forms.iter().any(|f| {
+        rest.strip_prefix(f.as_str())
+            .is_some_and(|t| t.is_empty() || t.starts_with([' ', ';', '&']))
+    })
+}
+
 /// Why a text is degenerate, if it is (`summary` refused): the person's
 /// response delimiters in it, lines repeating earlier ones (a third or
 /// more of six or more), or its word 4-grams repeating (two fifths or more
@@ -6706,6 +6805,51 @@ mod tests {
         assert_eq!(degenerate(&phrases), Some("repeated phrases"));
         let good = "Tasks blocked: parallel reflection thread integration into engine.rs check_cycle(); the architecture is documented in diff-second-chain.txt. Retention filter analysis complete: no spike at 0.55, about 1.3 percent error detection and 6 percent threshold rejection; keep and top1p are separate metrics, so keep is not top1p clamped. Next: read the rest of engine.rs in parts and propose one checked improvement.";
         assert_eq!(degenerate(good), None);
+    }
+
+    #[test]
+    fn a_command_exit_is_explained() {
+        // Commands of the live service, 2026-10-02 and 03.
+        let commit = "cd /r && git add src/engine.rs && git commit -m \"engine.rs: push\"";
+        assert!(term_hint(
+            commit,
+            128,
+            "fatal: Unable to create '/r/.git/index.lock': Read-only file system"
+        )
+        .is_some_and(|h| h.contains(".git is read-only")));
+        assert!(term_hint("git checkout -- src/engine.rs", 128, "").is_some());
+        // A git read that failed is its own error, said by git.
+        assert_eq!(
+            term_hint(
+                "git show 8e4773a --no-stat",
+                128,
+                "fatal: unrecognized argument: --no-stat"
+            ),
+            None
+        );
+        assert!(term_hint("grep -n 'wake_rest' src/engine.rs", 1, "")
+            .is_some_and(|h| h.starts_with("no match")));
+        // A grep that printed something and failed is not "no match".
+        assert_eq!(
+            term_hint("grep -n x missing.rs", 2, "grep: missing.rs: No such file"),
+            None
+        );
+        assert!(term_hint("./tools/ab-analyze", 139, "").is_some_and(|h| h.contains("SIGSEGV")));
+        assert_eq!(term_hint("grep -n x f", 0, ""), None);
+    }
+
+    #[test]
+    fn a_cd_into_the_repository_is_seen() {
+        let root = "/home/u/Intel Phi Stream";
+        assert!(cds_into("cd /home/u/Intel\\ Phi\\ Stream && git log", root));
+        assert!(cds_into("cd \"/home/u/Intel Phi Stream\" && ls", root));
+        assert!(cds_into("cd '/home/u/Intel Phi Stream'; ls", root));
+        assert!(!cds_into("cd /home/u/Intel\\ Phi\\ Stream/src && ls", root));
+        assert!(!cds_into(
+            "cd /home/u/.local/share/phi-stream/dev && ls",
+            root
+        ));
+        assert!(!cds_into("ls src", root));
     }
 
     #[test]

@@ -11,7 +11,13 @@ tool calls, as its chat template (read from the GGUF's
   Seven functions: `run` (a command in the sandboxed terminal, `term.md`; its
   output at most about 4096 tokens, past that the leading lines and what
   was cut, `engine.rs` `fit_output`; it
-  starts in the repository, so no cd, and `/tmp` is kept between commands; a
+  starts in the repository, so no cd (a command that does cd there is
+  told so once, `cds_into`: 169 of 243 commands of the live service
+  began with it), and `/tmp` is kept between commands; an exit whose
+  meaning is known is explained beside it (`term_hint`: grep's no-match,
+  a git write into the read-only `.git` with what to use instead, a
+  crash or kill by its signal), since bare exits 1 and 128 were read as
+  failures and retried; a
   command stopped at its 60 s limit comes back as not finished, its result
   unknown, and the description says a Rust build does not fit there: three
   cargo checks stopped at the limit had become "compilation passes" in a
