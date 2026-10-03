@@ -594,6 +594,8 @@ const GROUND_REPO_US: i64 = 30_000_000;
 const GROUND_AGAIN_US: i64 = 600_000_000;
 /// How often the stream's own status is written for it to read.
 const STATUS_FILE_US: i64 = 5_000_000;
+/// How often the camera feeds are read (`poll_feeds`).
+const FEEDS_EVERY_US: i64 = 5_000_000;
 /// The probe's answers, as one-token forms (`yes_no`).
 const YES_FORMS: &[&str] = &[" yes", " Yes", "yes", "Yes", " YES"];
 const NO_FORMS: &[&str] = &[" no", " No", "no", "No", " NO"];
@@ -809,7 +811,10 @@ pub struct Engine {
     last_tool_nudge_mono: i64,
     /// What it works toward (since when, the text); none: its output idles.
     objective: Option<(i64, String)>,
+    /// The camera feeds (`feeds.rs`): the last poll's statuses, when it was
+    /// made (real time, for staleness), and when (monotonic, for the throttle).
     feeds_prev: std::collections::HashMap<String, feeds::Status>,
+    feeds_prev_us: i64,
     feeds_last_poll_mono: i64,
     /// The tokens never sampled (control, `«`), and those held back while
     /// it has no objective (`»` in the journal, `</think>` in chat).
@@ -1324,7 +1329,8 @@ impl Engine {
             last_tool_nudge_mono: clock::mono_us(),
             objective,
             feeds_prev: std::collections::HashMap::new(),
-            feeds_last_poll_mono: clock::mono_us(),
+            feeds_prev_us: 0,
+            feeds_last_poll_mono: i64::MIN / 2,
             base_ban,
             speak_ban,
             quit_deadline: None,
@@ -3965,13 +3971,16 @@ impl Engine {
     fn poll_feeds(&mut self) {
         use crate::feeds;
         let mono = clock::mono_us();
-        if mono - self.feeds_last_poll_mono < 5_000_000_000 {
+        // 5 s: the throttle was 5_000_000_000, 83 minutes of microseconds.
+        if mono - self.feeds_last_poll_mono < FEEDS_EVERY_US {
             return;
         }
         self.feeds_last_poll_mono = mono;
         let feeds_dir = self.cfg.workspace.join("feeds");
         let cur = feeds::read_all_statuses(&feeds_dir);
-        let evs = feeds::compare_snapshots(clock::now_us(), &self.feeds_prev, &cur);
+        let now = clock::now_us();
+        let evs = feeds::compare_snapshots(self.feeds_prev_us, now, &self.feeds_prev, &cur);
+        self.feeds_prev_us = now;
         if !evs.is_empty() {
             feeds::append_events(&feeds_dir, &evs);
             for ev in &evs {

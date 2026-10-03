@@ -1,8 +1,9 @@
-//! Camera-feed monitoring: parse status, compare snapshots, emit events to feeds/events.log.
+//! Camera-feed monitoring: the cameras' status lines read, compared between
+//! polls, and turned into events when something changes (`feeds.md`).
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
@@ -29,17 +30,40 @@ pub struct Status {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Offline { cam: String, last_t: u64 },
-    OnlineFace { cam: String, faces: u32 },
-    FaceAppeared { cam: String, faces: u32 },
-    FaceLeft { cam: String },
-    MotionNoFace { cam: String, motion: f32 },
-    Dark { cam: String, light: u32 },
+    /// Its status stopped coming (stale past `OFFLINE_US`, or gone).
+    Offline {
+        cam: String,
+        last_t: u64,
+    },
+    /// Its status came (first seen, or back after being offline).
+    Online {
+        cam: String,
+        faces: u32,
+    },
+    FaceAppeared {
+        cam: String,
+        faces: u32,
+    },
+    FaceLeft {
+        cam: String,
+    },
+    MotionNoFace {
+        cam: String,
+        motion: f32,
+    },
+    Dark {
+        cam: String,
+        light: u32,
+    },
 }
 
 const OFFLINE_US: u64 = 10_000_000;
 const MOTION_THRESH: f32 = 0.15;
 const DARK_THRESH: u32 = 20;
+/// A face counts as present while any second of the last five saw one: the
+/// detector loses a face for a frame or a second, and a poll every 5 s that
+/// read only the newest second called that leaving.
+const FACE_WINDOW_US: u64 = 5_000_000;
 
 pub fn parse_status_line(line: &str) -> Option<Status> {
     let line = line.trim();
@@ -112,112 +136,142 @@ pub fn parse_status_line(line: &str) -> Option<Status> {
     })
 }
 
+/// The most faces seen in any second of the log's tail within
+/// `FACE_WINDOW_US` of `newest_t` (the status line's own time).
+pub fn faces_in_window(log_tail: &str, newest_t: u64) -> u32 {
+    log_tail
+        .lines()
+        .filter_map(parse_status_line)
+        .filter(|s| s.t + FACE_WINDOW_US >= newest_t && s.t <= newest_t)
+        .map(|s| s.faces)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The last bytes of a file, from its first whole line.
+fn tail(path: &Path, bytes: u64) -> String {
+    let Ok(mut f) = File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(bytes)));
+    let mut s = String::new();
+    let _ = f.read_to_string(&mut s);
+    if len > bytes {
+        if let Some(i) = s.find('\n') {
+            s.drain(..=i);
+        }
+    }
+    s
+}
+
+/// Every camera's newest status (`NAME.status`), its face count taken over
+/// the last seconds of `NAME.log` (`faces_in_window`).
 pub fn read_all_statuses(dir: &Path) -> HashMap<String, Status> {
     let mut m = HashMap::new();
-    if !dir.is_dir() {
+    let Ok(entries) = fs::read_dir(dir) else {
         return m;
     };
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if let Some(n) = p.file_name().and_then(|f| f.to_str()) {
-                if n.ends_with(".status") && !n.starts_with('.') {
-                    let name = n[..n.len() - 8].to_string();
-                    if let Ok(f) = File::open(&p) {
-                        for l in BufReader::new(f).lines().map_while(|l| l.ok()) {
-                            if let Some(s) = parse_status_line(&l) {
-                                m.insert(name.clone(), s);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    for entry in entries.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        let Some(n) = p.file_name().and_then(|f| f.to_str()) else {
+            continue;
+        };
+        let Some(name) = n.strip_suffix(".status").filter(|_| !n.starts_with('.')) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(&p) else {
+            continue;
+        };
+        let Some(mut s) = text.lines().filter_map(parse_status_line).next_back() else {
+            continue;
+        };
+        let log = tail(&dir.join(format!("{name}.log")), 2048);
+        s.faces = s.faces.max(faces_in_window(&log, s.t));
+        m.insert(name.to_string(), s);
     }
     m
 }
 
-/// Time without a face before we consider it truly left (YuNet frame loss).
-const FACE_LEFT_DELAY_US: u64 = 5_000_000;
-
+/// The events between two polls: a camera's state (fresh, or stale or gone)
+/// at the previous poll (`prev_now_us`) and at this one (`now_us`). Each
+/// event is told once, when its condition starts: going offline or coming
+/// online, a face appearing or leaving, motion with no face starting, the
+/// room going dark; while a condition holds nothing more is said.
 pub fn compare_snapshots(
+    prev_now_us: i64,
     now_us: i64,
     prev: &HashMap<String, Status>,
     cur: &HashMap<String, Status>,
 ) -> Vec<Event> {
+    let fresh = |s: &Status, at: i64| (at.max(0) as u64).saturating_sub(s.t) <= OFFLINE_US;
+    let mut names: Vec<&String> = prev.keys().chain(cur.keys()).collect();
+    names.sort();
+    names.dedup();
     let mut evs = Vec::new();
-    // Offline: camera was present but is now missing or stale.
-    for (n, p) in prev {
-        if cur.get(n).is_none() || (now_us as u64).saturating_sub(p.t) > OFFLINE_US {
-            evs.push(Event::Offline {
+    for n in names {
+        let p = prev.get(n).filter(|p| fresh(p, prev_now_us));
+        let c = cur.get(n).filter(|c| fresh(c, now_us));
+        match (p, c) {
+            (Some(p), None) => evs.push(Event::Offline {
                 cam: n.clone(),
-                last_t: p.t,
-            })
-        }
-    }
-    // Face and condition transitions (emit only when condition STARTS).
-    for (n, c) in cur {
-        if let Some(p) = prev.get(n) {
-            // Face appeared: zero → some.
-            if p.faces == 0 && c.faces > 0 {
-                evs.push(Event::FaceAppeared {
-                    cam: n.clone(),
-                    faces: c.faces,
-                })
-            }
-            // Face left: some → zero, with debounce (YuNet frame loss).
-            else if p.faces > 0
-                && c.faces == 0
-                && (now_us as u64).saturating_sub(p.t) >= FACE_LEFT_DELAY_US
-            {
-                evs.push(Event::FaceLeft { cam: n.clone() })
-            }
-            // Motion with no face: started (prev was not motion).
-            if c.motion > MOTION_THRESH
-                && c.faces == 0
-                && (p.motion <= MOTION_THRESH || p.faces > 0)
-            {
-                evs.push(Event::MotionNoFace {
-                    cam: n.clone(),
-                    motion: c.motion,
-                })
-            }
-            // Dark: started (prev was not dark).
-            if c.light < DARK_THRESH && p.light >= DARK_THRESH {
-                evs.push(Event::Dark {
-                    cam: n.clone(),
-                    light: c.light,
-                })
-            }
-        } else if c.faces > 0 {
-            evs.push(Event::OnlineFace {
+                last_t: cur.get(n).map_or(p.t, |c| c.t),
+            }),
+            (None, Some(c)) => evs.push(Event::Online {
                 cam: n.clone(),
                 faces: c.faces,
-            })
+            }),
+            (Some(p), Some(c)) => {
+                if p.faces == 0 && c.faces > 0 {
+                    evs.push(Event::FaceAppeared {
+                        cam: n.clone(),
+                        faces: c.faces,
+                    });
+                } else if p.faces > 0 && c.faces == 0 {
+                    evs.push(Event::FaceLeft { cam: n.clone() });
+                }
+                let moving = |s: &Status| s.motion > MOTION_THRESH && s.faces == 0;
+                if moving(c) && !moving(p) {
+                    evs.push(Event::MotionNoFace {
+                        cam: n.clone(),
+                        motion: c.motion,
+                    });
+                }
+                if c.light < DARK_THRESH && p.light >= DARK_THRESH {
+                    evs.push(Event::Dark {
+                        cam: n.clone(),
+                        light: c.light,
+                    });
+                }
+            }
+            (None, None) => {}
         }
     }
     evs
 }
 
 pub fn event_line(ev: &Event) -> String {
-    use crate::clock;
-    let now = clock::now_us();
+    let at = crate::clock::hms(crate::clock::now_us());
+    let at = at.get(..8).unwrap_or(&at);
     match ev {
         Event::Offline { cam, last_t } => {
-            format!("[t={}] OFFLINE cam={} last_t={}", now, cam, last_t)
+            let seen = crate::clock::hms(*last_t as i64);
+            format!(
+                "[{at}] camera {cam}: offline (last seen {})",
+                seen.get(..8).unwrap_or(&seen)
+            )
         }
-        Event::OnlineFace { cam, faces } => {
-            format!("[t={}] ONLINE_FACE cam={} faces={}", now, cam, faces)
+        Event::Online { cam, faces } => {
+            format!("[{at}] camera {cam}: online, {faces} face(s) seen")
         }
         Event::FaceAppeared { cam, faces } => {
-            format!("[t={}] FACE_APPEARED cam={} faces={}", now, cam, faces)
+            format!("[{at}] camera {cam}: a face appeared ({faces})")
         }
-        Event::FaceLeft { cam } => format!("[t={}] FACE_LEFT cam={}", now, cam),
-        Event::MotionNoFace { cam, motion } => format!(
-            "[t={}] MOTION_NO_FACE cam={} motion={:.3}",
-            now, cam, motion
-        ),
-        Event::Dark { cam, light } => format!("[t={}] DARK cam={} light={}", now, cam, light),
+        Event::FaceLeft { cam } => format!("[{at}] camera {cam}: no face for 5 s"),
+        Event::MotionNoFace { cam, motion } => {
+            format!("[{at}] camera {cam}: motion ({motion:.3}) with no face seen")
+        }
+        Event::Dark { cam, light } => format!("[{at}] camera {cam}: dark (light {light})"),
     }
 }
 
@@ -233,135 +287,113 @@ pub fn append_events(dir: &Path, evs: &[Event]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn st(t: u64, faces: u32, motion: f32, light: u32) -> Status {
+        Status {
+            t,
+            cam: "c".into(),
+            faces,
+            motion,
+            light,
+            ..Default::default()
+        }
+    }
+
+    fn one(s: Status) -> HashMap<String, Status> {
+        [("c".to_string(), s)].into_iter().collect()
+    }
+
     #[test]
-    fn test_parse() {
-        let s=parse_status_line("t=1791020403094649 cam=bedroom faces=0 locked=0 box=0,0,0,0 motion=0.007 light=36 fps=10").unwrap();
+    fn a_status_line_parses() {
+        let s = parse_status_line("t=1791020403094649 cam=bedroom faces=0 locked=0 box=0,0,0,0 motion=0.007 light=36 fps=10").unwrap();
         assert_eq!(s.cam, "bedroom");
         assert_eq!(s.faces, 0);
         assert_eq!(s.light, 36);
         assert_eq!(s.fps, 10);
     }
+
     #[test]
-    fn test_compare_offline() {
-        let mut prev = HashMap::new();
-        prev.insert(
-            "cam1".into(),
-            Status {
-                t: 1000,
-                cam: "cam1".into(),
-                faces: 1,
-                ..Default::default()
-            },
+    fn a_camera_going_stale_is_offline_once() {
+        // Fresh at the last poll; its status stops at t = 1 s.
+        let s = st(1_000_000, 1, 0.0, 40);
+        let evs = compare_snapshots(2_000_000, 50_000_000, &one(s.clone()), &one(s.clone()));
+        assert!(matches!(evs.as_slice(), [Event::Offline { .. }]));
+        // The next poll reads the same stale line: nothing more.
+        let evs = compare_snapshots(50_000_000, 55_000_000, &one(s.clone()), &one(s));
+        assert!(evs.is_empty());
+        // Its file gone altogether: nothing more either.
+        let evs = compare_snapshots(
+            55_000_000,
+            60_000_000,
+            &one(st(1_000_000, 1, 0.0, 40)),
+            &HashMap::new(),
         );
-        let cur = HashMap::new();
-        let evs = compare_snapshots(50_000_000, &prev, &cur);
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            Event::Offline { cam, last_t } => {
-                assert_eq!(cam, "cam1");
-                assert_eq!(*last_t, 1000)
-            }
-            _ => panic!("expected Offline event"),
-        }
+        assert!(evs.is_empty());
     }
+
     #[test]
-    fn test_face_appeared() {
-        let mut prev = HashMap::new();
-        prev.insert(
-            "cam1".into(),
-            Status {
-                t: 1000,
-                cam: "cam1".into(),
-                faces: 0,
-                locked: false,
-                box_x: 0,
-                box_y: 0,
-                box_w: 0,
-                box_h: 0,
-                motion: 0.0,
-                light: 100,
-                fps: 10,
-            },
+    fn a_camera_coming_back_is_online() {
+        let old = st(1_000_000, 0, 0.0, 40);
+        let new = st(59_000_000, 1, 0.0, 40);
+        let evs = compare_snapshots(55_000_000, 60_000_000, &one(old), &one(new));
+        assert!(matches!(evs.as_slice(), [Event::Online { faces: 1, .. }]));
+        let evs = compare_snapshots(
+            0,
+            60_000_000,
+            &HashMap::new(),
+            &one(st(59_000_000, 0, 0.0, 40)),
         );
-        let mut cur = HashMap::new();
-        cur.insert(
-            "cam1".into(),
-            Status {
-                t: 2000,
-                cam: "cam1".into(),
-                faces: 2,
-                locked: true,
-                box_x: 100,
-                box_y: 200,
-                box_w: 80,
-                box_h: 120,
-                motion: 0.3,
-                light: 100,
-                fps: 10,
-            },
-        );
-        let evs = compare_snapshots(2000, &prev, &cur);
-        assert!(evs
-            .iter()
-            .any(|e| matches!(e, Event::FaceAppeared { faces: 2, .. })));
+        assert!(matches!(evs.as_slice(), [Event::Online { faces: 0, .. }]));
     }
+
     #[test]
-    fn test_stale_gives_one_offline() {
-        // Stale camera: prev has it with old timestamp, cur does not.
-        // Should emit exactly one Offline event regardless of how many polls.
-        let mut prev = HashMap::new();
-        prev.insert(
-            "cam1".into(),
-            Status {
-                t: 1_000_000,
-                cam: "cam1".into(),
-                faces: 1,
-                ..Default::default()
-            },
+    fn faces_motion_and_dark_are_told_when_they_start() {
+        let a = st(10_000_000, 0, 0.0, 40);
+        let b = st(15_000_000, 1, 0.0, 40);
+        let evs = compare_snapshots(10_000_000, 15_000_000, &one(a.clone()), &one(b.clone()));
+        assert!(matches!(
+            evs.as_slice(),
+            [Event::FaceAppeared { faces: 1, .. }]
+        ));
+        let evs = compare_snapshots(
+            15_000_000,
+            20_000_000,
+            &one(b),
+            &one(st(20_000_000, 0, 0.0, 40)),
         );
-        let cur = HashMap::new();
-        // First poll: stale (now - prev.t > OFFLINE_US).
-        let evs1 = compare_snapshots(50_000_000, &prev, &cur);
-        assert_eq!(evs1.len(), 1);
-        match &evs1[0] {
-            Event::Offline { cam, .. } => assert_eq!(cam, "cam1"),
-            _ => panic!("expected Offline"),
-        }
-        // Second poll: same prev (stale still), cur still empty.
-        // Since prev still has the camera and cur is empty, we get another Offline.
-        // This is correct: each poll where the condition STARTS produces an event.
-        // The throttle in engine.rs prevents flooding.
-        let evs2 = compare_snapshots(100_000_000, &prev, &cur);
-        assert_eq!(evs2.len(), 1);
+        assert!(matches!(evs.as_slice(), [Event::FaceLeft { .. }]));
+        // Motion with no face: once when it starts, not while it lasts.
+        let m = st(25_000_000, 0, 0.4, 40);
+        let evs = compare_snapshots(20_000_000, 25_000_000, &one(a.clone()), &one(m.clone()));
+        assert!(matches!(evs.as_slice(), [Event::MotionNoFace { .. }]));
+        let m2 = st(30_000_000, 0, 0.5, 40);
+        assert!(compare_snapshots(25_000_000, 30_000_000, &one(m), &one(m2)).is_empty());
+        // Dark: once.
+        let d = st(35_000_000, 0, 0.0, 10);
+        let evs = compare_snapshots(
+            30_000_000,
+            35_000_000,
+            &one(st(30_000_000, 0, 0.0, 40)),
+            &one(d.clone()),
+        );
+        assert!(matches!(evs.as_slice(), [Event::Dark { light: 10, .. }]));
+        assert!(compare_snapshots(
+            35_000_000,
+            40_000_000,
+            &one(d),
+            &one(st(40_000_000, 0, 0.0, 9))
+        )
+        .is_empty());
     }
+
     #[test]
-    fn test_face_left_debounce() {
-        // Face left only after 5 s without one (YuNet frame loss).
-        let mut prev = HashMap::new();
-        prev.insert(
-            "cam1".into(),
-            Status {
-                t: 1_000_000,
-                cam: "cam1".into(),
-                faces: 1,
-                ..Default::default()
-            },
-        );
-        let mut cur = HashMap::new();
-        cur.insert(
-            "cam1".into(),
-            Status {
-                t: 1_000_000,
-                cam: "cam1".into(),
-                faces: 0,
-                ..Default::default()
-            },
-        );
-        // Too soon: no FaceLeft event.
-        let evs = compare_snapshots(1_000_000, &prev, &cur);
-        assert!(!evs.iter().any(|e| matches!(e, Event::FaceLeft { .. })));
-        // After 5 s: FaceLeft emitted.
-        let evs = compare_snapshots(6_000_000, &prev, &cur);
-        assert!(evs.iter().any(|e| matches!(e, Event::FaceLeft { .. })));
+    fn a_face_counts_over_the_last_five_seconds() {
+        let log = "t=10000000 cam=c faces=1 locked=1 box=1,2,3,4 motion=0.01 light=40 fps=15\n\
+                   t=11000000 cam=c faces=0 locked=0 box=0,0,0,0 motion=0.01 light=40 fps=15\n\
+                   t=12000000 cam=c faces=0 locked=0 box=0,0,0,0 motion=0.01 light=40 fps=15\n";
+        // A second without a face is not the face gone.
+        assert_eq!(faces_in_window(log, 12_000_000), 1);
+        // Five seconds on, the face seen at 10 s is out of the window.
+        assert_eq!(faces_in_window(log, 16_000_000), 0);
     }
 }
