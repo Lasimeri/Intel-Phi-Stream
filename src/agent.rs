@@ -95,7 +95,7 @@ fn tools(improve: bool) -> Vec<String> {
         ),
         tool(
             "wait",
-            "Rest until something new comes: a message from Claude, a new commit in the repository, a new objective, or the time you give. Call it when your objective is met, or when you wait on Claude, rather than going on for its own sake: nothing is asked of you while you rest, and your next turn opens with what came.",
+            "Rest until something new comes: a message from Claude, a new commit in the repository, a new objective, one of your commands ending, a candidate's outcome, or the time you give. Call it when your objective is met, or when you wait on Claude, rather than going on for its own sake: nothing is asked of you while you rest, and your next turn opens with what came.",
             &[
                 ("reason", "string", "Why you rest: what is done, or what you wait for."),
                 ("minutes", "integer", "The longest rest, in minutes (default 15, at most 60)."),

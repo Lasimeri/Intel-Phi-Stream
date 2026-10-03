@@ -3084,6 +3084,13 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| self.cfg.workspace.clone());
         let p = normalized(&resolve(&path, &base));
+        // /tmp is its workspace's tmp/, as in its terminal (`term.rs`): a
+        // file a command wrote to /tmp is read and edited at /tmp too
+        // (on the live service "/tmp/test_ab.log is outside" came back
+        // for a file its own command had just written there).
+        if let Ok(rest) = p.strip_prefix("/tmp") {
+            return Ok(self.cfg.workspace.join("tmp").join(rest));
+        }
         if let (Some(repo), Some(upper)) = (&self.cfg.dev, &self.copy_upper) {
             if let Ok(rel) = p.strip_prefix(normalized(repo)) {
                 let copy = upper.join(rel);
@@ -3097,6 +3104,29 @@ impl Engine {
             "{} is outside the repository and your workspace",
             p.display()
         ))
+    }
+
+    /// A file missing at `p` that its other root holds: the same path
+    /// under the workspace for one asked in the repository and the other
+    /// way round, or the same file name at the other root's top.
+    fn elsewhere(&self, p: &Path) -> Option<PathBuf> {
+        let repo = normalized(self.cfg.dev.as_ref()?);
+        let ws = normalized(&self.cfg.workspace);
+        let upper = self.copy_upper.clone();
+        let (rel, other) = if let Ok(r) = p.strip_prefix(&repo) {
+            (r.to_path_buf(), ws.clone())
+        } else if let Some(r) = upper.as_ref().and_then(|u| p.strip_prefix(u).ok()) {
+            (r.to_path_buf(), ws.clone())
+        } else if let Ok(r) = p.strip_prefix(&ws) {
+            (r.to_path_buf(), repo.clone())
+        } else {
+            return None;
+        };
+        let mut tries = vec![other.join(&rel)];
+        if let Some(name) = rel.file_name() {
+            tries.push(other.join(name));
+        }
+        tries.into_iter().find(|q| q.is_file())
     }
 
     /// The `read` tool: a file whole or by lines, or a directory's listing,
@@ -3125,7 +3155,17 @@ impl Engine {
                 names.sort();
                 return Ok(format!("{} holds:\n{}", p.display(), names.join("\n")));
             }
-            let text = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let text = fs::read_to_string(&p).map_err(|e| {
+                // A name looked for under the wrong one of its two roots
+                // (improve.log, lessons.md and reflect.log asked for in the
+                // repository, tools/loopiness.c in the workspace): where it is.
+                match self.elsewhere(&p) {
+                    Some(q) if e.kind() == std::io::ErrorKind::NotFound => {
+                        format!("{}: {e}; it is at {}", p.display(), q.display())
+                    }
+                    _ => format!("{}: {e}", p.display()),
+                }
+            })?;
             let lines: Vec<&str> = text.lines().collect();
             let n = lines.len();
             let a = c

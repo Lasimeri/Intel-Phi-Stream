@@ -79,7 +79,12 @@ tool calls, as its chat template (read from the GGUF's
   called tools, and the summary kept the template's marks.
 - Paths: relative to the repository, through its working copy (a file it
   wrote reads from there, a write goes there; the repository never
-  changes), or in its workspace; nothing else.
+  changes), or in its workspace; `/tmp` is its workspace's `tmp/` as in
+  its terminal (a file a command wrote to /tmp had come back "outside"
+  to `read`); nothing else. A file missing under one of the two roots
+  that the other holds (the same path, or the same name at its top) is
+  named in the error (`elsewhere`: improve.log and lessons.md were asked
+  for in the repository, tools/loopiness.c in the workspace).
 
 Tests: calls parse as the template writes them (multi-line values,
 several calls); broken blocks are counted and not run; the tools section
