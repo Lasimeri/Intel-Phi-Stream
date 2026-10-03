@@ -4332,12 +4332,22 @@ impl Engine {
         let n = tokens.len();
         for (i, piece) in tokens.chunks(cap).enumerate() {
             let last = (i + 1) * cap >= n;
-            let rows = self.llm.decode(&[Lane {
+            // A failed decode gives its sequence back too, as a failed
+            // logits read does below (candidate 8, the stream's; this path
+            // folded in by Claude's review).
+            let rows = match self.llm.decode(&[Lane {
                 seq: w,
                 tokens: piece,
                 pos0: pos,
                 logits: last,
-            }])?;
+            }]) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.llm.seq_rm(w, -1, -1);
+                    self.free_seqs.push(w);
+                    return Err(e);
+                }
+            };
             // Not the live row: nobody reads the capture.
             if let Some(cap) = self.llm.capture() {
                 cap.take();
@@ -4352,7 +4362,14 @@ impl Engine {
             self.free_seqs.push(w);
             return Ok(None);
         };
-        let out = self.llm.logits(row)?.to_vec();
+        let out = match self.llm.logits(row) {
+            Ok(v) => v.to_vec(),
+            Err(e) => {
+                self.llm.seq_rm(w, -1, -1);
+                self.free_seqs.push(w);
+                return Err(e);
+            }
+        };
         self.llm.seq_rm(w, -1, -1);
         self.free_seqs.push(w);
         Ok(Some(out))
