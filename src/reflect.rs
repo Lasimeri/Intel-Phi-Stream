@@ -682,6 +682,7 @@ mod tests {
             token: String::new(),
             layers: vec![(29, words.iter().map(|(w, p)| (w.to_string(), *p)).collect())],
             model_top: Vec::new(),
+            band: Vec::new(),
             ms: 0.0,
             t_us: 0,
         }

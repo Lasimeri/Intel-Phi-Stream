@@ -877,6 +877,12 @@ pub struct Engine {
     goal_mono: i64,
     yes_no: Option<(Vec<i32>, Vec<i32>)>,
     goal_log: RotLog,
+    /// Every chosen token scored against its J-space reading and the
+    /// objective (`jspace.log`, `jspace_score`): the objective's word
+    /// tokens, and the objective text they were made from.
+    jspace_log: RotLog,
+    obj_tokens: std::collections::HashSet<i32>,
+    obj_for: String,
     /// The second chain's random state, and its last reflections (their
     /// openings, lowercased), which a new one must not repeat.
     chain_rng: u64,
@@ -1152,6 +1158,7 @@ impl Engine {
         let chain = RotLog::open(cfg.workspace.join("chain.log"));
         let guide_log = RotLog::open(cfg.workspace.join("guide.log"));
         let goal_log = RotLog::open(cfg.workspace.join("goal.log"));
+        let jspace_log = RotLog::open(cfg.workspace.join("jspace.log"));
         let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
         let dual_log = RotLog::open(cfg.workspace.join("dual.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
@@ -1339,6 +1346,9 @@ impl Engine {
             goal_mono: i64::MIN / 2,
             yes_no,
             goal_log,
+            jspace_log,
+            obj_tokens: std::collections::HashSet::new(),
+            obj_for: String::new(),
             chain_rng: (clock::now_us() as u64) | 1,
             recent_reflections: VecDeque::new(),
             read_failures_quiet: 0,
@@ -4882,11 +4892,80 @@ impl Engine {
         Ok(())
     }
 
+    /// Every chosen token, scored before it is placed against the J-space
+    /// reading of the position that chose it (the band's lens over the
+    /// whole vocabulary, `Reading::band`) and against the objective: its
+    /// support (the reading's probability of this very token), the model's
+    /// own probability of it, and the reading's mass on the objective's
+    /// words. One line a token in `jspace.log`; nothing is changed: the
+    /// score must first be shown to track the goal probe (the rule in
+    /// `engine.md`, written before any measurement).
+    fn jspace_score(&mut self, t: i32) {
+        if self.last_reading.as_ref().is_none_or(|r| r.band.is_empty()) {
+            return;
+        }
+        let goal = self
+            .objective
+            .as_ref()
+            .map(|o| o.1.clone())
+            .unwrap_or_default();
+        if goal != self.obj_for {
+            self.obj_tokens = self.objective_tokens(&goal);
+            self.obj_for = goal;
+        }
+        let pos = self.history.len();
+        let region =
+            if t == self.think_open || t == self.think_close || t == self.eot || self.llm.is_eog(t)
+            {
+                "ctl"
+            } else if self.in_code {
+                "code"
+            } else if self.speaking {
+                "speak"
+            } else {
+                "think"
+            };
+        let text = self.llm.text(&[t]);
+        let Some(r) = self.last_reading.as_ref() else {
+            return;
+        };
+        let line = jspace_line(r, t, pos, region, &text, &self.obj_tokens);
+        self.jspace_log.line(&line);
+    }
+
+    /// The objective's words as single tokens, the forms the lens ranks
+    /// (" word", "word", " Word", "Word"): words of four letters or more,
+    /// so its function words are left out; a word that is no single token
+    /// in any form is left out too (its pieces would match anything).
+    fn objective_tokens(&self, goal: &str) -> std::collections::HashSet<i32> {
+        let mut set = std::collections::HashSet::new();
+        let words: std::collections::BTreeSet<String> = goal
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 4)
+            .map(str::to_lowercase)
+            .collect();
+        for w in words {
+            let mut cap = w.clone();
+            if let Some(f) = cap.get_mut(..1) {
+                f.make_ascii_uppercase();
+            }
+            for form in [format!(" {w}"), w.clone(), format!(" {cap}"), cap] {
+                if let Ok(ts) = self.llm.tokenize(&form, false) {
+                    if ts.len() == 1 {
+                        set.insert(ts[0]);
+                    }
+                }
+            }
+        }
+        set
+    }
+
     /// The token just chosen for the next position: its signals, at every
     /// token; and a check, when a trigger fires with nothing else beside
     /// the live sequence: the snapshot and the deliberation are copied
     /// from the live sequence now, before the token is decoded (reflect.md).
     fn consider(&mut self, t: i32) -> Result<()> {
+        self.jspace_score(t);
         let (Some(rf), Some(r)) = (self.reflector.as_mut(), self.last_reading.as_ref()) else {
             return Ok(());
         };
@@ -6192,6 +6271,40 @@ fn unmarked(note: &str) -> &str {
     }
 }
 
+/// One chosen token's J-space line (`jspace.log`): when the reading was
+/// made, the token's position, where it falls (think, speak, code, ctl),
+/// its support under the band's reading (`sup`), the model's own
+/// probability (`p`, from the final block's top 64; 0 below them), the
+/// reading's mass on the objective's word tokens (`obj`), and the token.
+fn jspace_line(
+    r: &MindReading,
+    t: i32,
+    pos: usize,
+    region: &str,
+    text: &str,
+    obj: &std::collections::HashSet<i32>,
+) -> String {
+    let sup = r.band.iter().find(|(b, _)| *b == t).map_or(0.0, |e| e.1);
+    let p = r
+        .model_top
+        .iter()
+        .find(|(m, _)| *m == t)
+        .map_or(0.0, |e| e.1.exp());
+    let mass: f32 = r
+        .band
+        .iter()
+        .filter(|(b, _)| obj.contains(b))
+        .map(|e| e.1)
+        .sum();
+    format!(
+        "{}\tpos={pos}\t{region}\tsup={sup:.4}\tp={p:.4}\tobj={mass:.4}\ttok={}",
+        r.t_us,
+        text.replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    )
+}
+
 /// `HH:MM:SS`, local time: the time an aside carries into the stream's
 /// context (`clock::hms`'s microseconds are a dozen tokens each time, and
 /// the logs keep them).
@@ -6981,6 +7094,31 @@ mod tests {
         assert_eq!(degenerate(&phrases), Some("repeated phrases"));
         let good = "Tasks blocked: parallel reflection thread integration into engine.rs check_cycle(); the architecture is documented in diff-second-chain.txt. Retention filter analysis complete: no spike at 0.55, about 1.3 percent error detection and 6 percent threshold rejection; keep and top1p are separate metrics, so keep is not top1p clamped. Next: read the rest of engine.rs in parts and propose one checked improvement.";
         assert_eq!(degenerate(good), None);
+    }
+
+    #[test]
+    fn a_token_is_scored_against_its_reading() {
+        let r = MindReading {
+            pos: 9,
+            token: String::new(),
+            layers: Vec::new(),
+            model_top: vec![(5, 0.5f32.ln()), (7, 0.25f32.ln())],
+            band: vec![(5, 0.30), (11, 0.20), (12, 0.10)],
+            ms: 0.0,
+            t_us: 42,
+        };
+        let obj: std::collections::HashSet<i32> = [11, 12].into_iter().collect();
+        // Supported by the reading, the model's likeliest, the reading's
+        // mass on the objective's words 0.30.
+        assert_eq!(
+            jspace_line(&r, 5, 10, "think", " fix", &obj),
+            "42\tpos=10\tthink\tsup=0.3000\tp=0.5000\tobj=0.3000\ttok= fix"
+        );
+        // Unsupported by the reading, below the model's top 64.
+        assert_eq!(
+            jspace_line(&r, 99, 10, "speak", "\n", &obj),
+            "42\tpos=10\tspeak\tsup=0.0000\tp=0.0000\tobj=0.3000\ttok=\\n"
+        );
     }
 
     #[test]

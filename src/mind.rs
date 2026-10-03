@@ -43,6 +43,12 @@ pub struct Reading {
     /// The model's own next-token distribution at this token, its top 64
     /// (token, log-probability), when the final block is read.
     pub model_top: Vec<(i32, f32)>,
+    /// The band's J-space reading over the whole vocabulary, before the
+    /// display's word filter: every token in the top `FETCH` of any block
+    /// read, with its probability under the lens averaged over the blocks
+    /// (a block that does not rank it counts zero). The engine scores each
+    /// chosen token against it (`jspace.log`). Not in `line`.
+    pub band: Vec<(i32, f32)>,
     /// The readout's own time, milliseconds.
     pub ms: f32,
     /// When the token existed (its decode done), microseconds of real time.
@@ -165,6 +171,18 @@ impl Mind {
         } else {
             Vec::new()
         };
+        let mut band: Vec<(i32, f32)> = Vec::new();
+        let blocks = tops.len().max(1) as f32;
+        for r in &tops {
+            for &(t, lp) in &r.top {
+                let p = lp.exp() / blocks;
+                match band.iter_mut().find(|(b, _)| *b == t) {
+                    Some(e) => e.1 += p,
+                    None => band.push((t, p)),
+                }
+            }
+        }
+        band.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut layers = Vec::new();
         for (g, r) in groups.iter().zip(&tops) {
             let words: Vec<(String, f32)> = r
@@ -181,6 +199,7 @@ impl Mind {
             token: token.to_string(),
             layers,
             model_top,
+            band,
             ms: t0.elapsed().as_secs_f32() * 1000.0,
             t_us,
         };
@@ -243,6 +262,7 @@ pub fn parse_line(s: &str) -> Option<Reading> {
         token,
         layers,
         model_top: Vec::new(),
+        band: Vec::new(),
         ms,
         t_us,
     })
@@ -349,6 +369,7 @@ mod tests {
                 (26, vec![]),
             ],
             model_top: Vec::new(),
+            band: Vec::new(),
             ms: 0.75,
             t_us: 1_790_000_000_123_456,
         };

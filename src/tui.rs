@@ -2157,6 +2157,7 @@ mod tests {
             token: token.into(),
             layers: vec![(27, ws.clone()), (29, ws.clone()), (31, ws)],
             model_top: Vec::new(),
+            band: Vec::new(),
             ms: 1.0,
             t_us: 0,
         }

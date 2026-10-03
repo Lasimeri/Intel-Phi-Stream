@@ -28,7 +28,11 @@ done once).
 - With `final_block` set (the engine sets it to the last block when it
   reflects, `reflect.md`), the final block's residual is read too, as it
   is (no transport): the model's own next-token distribution, its top 64
-  in `model_top`, for the doubt trigger. The capture asks for the blocks
+  in `model_top`, for the doubt trigger. `band` keeps the band's reading
+  over the whole vocabulary before the display filter: every token in a
+  block's top 64, its probability averaged over the blocks read (a block
+  that does not rank it counts zero); the engine scores each chosen
+  token against it (`engine.md`, `jspace.log`). The capture asks for the blocks
   the mind reads when the engine starts.
 
 **In the engine** (`engine.md`): `mind_step` runs right after every

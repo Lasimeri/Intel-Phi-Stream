@@ -775,3 +775,53 @@ last of `improve.log` and the lessons. The same text is written to
 sent to the terminals as a `diag` line (`Event::Diag`; the DIAGNOSTICS
 view, `tui.md`), and returned by the `report` tool: what the harness shows
 a person and what it shows the model are one thing.
+
+## Every token against its J-space reading and the objective (2026-10-03)
+
+The person (2026-10-03): "make sure each token before it is generated is
+reasoned against its JSpace generalization to make sure the token
+generated is within the model's objective each and every time it's
+generated rather than just guessing or estimating the next token."
+
+What already ran at every token: `advance` reads the position just
+decoded through the lens (`mind_step`), samples the next token, and
+`consider` scores it against that reading before it is decoded; a
+deliberation (a fork asking keep or write, `reflect.md`) runs only when a
+trigger fires, within a budget. Over the 24 hours to 2026-10-03 02:00
+there were 4537 such checks (4304 doubt, 233 flag): 4280 kept, 105
+changed, 70 the same, 82 unparsed, 705 ms each on average. A fork at
+every token would leave the stream about 1.4 tokens a second and change
+little; and a reading is the model's own estimate from its middle blocks,
+not a verification, so no score turns sampling into something other
+than an estimate. What runs at every token is a score, with no fork:
+
+- `Reading::band` (`mind.md`): the band's reading over the whole
+  vocabulary before the display filter (the doubt trigger's
+  `chosen_in_band` sees only the top five word-like words, blind to
+  punctuation and code pieces).
+- `jspace_score` (in `consider`, every chosen token, before it is
+  placed): `sup`, the reading's probability of this very token; `p`, the
+  model's own (the final block's top 64; 0 below them); `obj`, the
+  reading's mass on the objective's words (each word of four letters or
+  more that is one token in some form, `objective_tokens`, remade when
+  the objective changes); where the token falls (think, speak, code,
+  ctl). One line a token in `jspace.log` (`jspace_line`). Nothing is
+  changed by it.
+
+**The rule, written before any measurement.** The score `obj` may gate or
+steer anything only if it tracks the goal probe: over at least 60 goal
+probe answers (`goal.log`), the mean `obj` of the 64 think and speak
+tokens before each probed position must separate the answers with
+P(yes) of 0.5 or more from those below with an AUC of at least 0.65.
+Short of that it measures something other than "within the objective",
+as the lens aside measured nothing a placebo did not (0.81 of placebo,
+`docs/results/2026-10-02-guide-ab.md`), and it stays a log. A token
+unsupported by the reading (`sup` 0) is not a guess by itself: the lens
+is fitted on future tokens, and punctuation and continuations fall
+outside it; the candidate for a guess is `sup` 0 with a flat `p`, and
+its share among thinking tokens is measured first. Any change to which
+token is chosen comes after both, behind a knob, off by default, in
+thinking only (never code, tool calls or control tokens), measured
+interleaved on code tasks, loopiness and the goal probe with an abort
+on think repeats (`guide-mix` at 1 had taken them from 2 or 3 to 15
+percent).
