@@ -910,7 +910,10 @@ fn load_mind(m: &ModelArgs, a: &MindArgs) -> Result<Llm> {
 
 /// The service: the engine on its thread, the socket on this one.
 fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
-    eprintln!("phi-stream: placing the model and loading it; the cards upload their shares at the first multiply");
+    match &m.remote {
+        Some(url) => eprintln!("phi-stream: the model is served by {url}; asking it what it holds"),
+        None => eprintln!("phi-stream: placing the model and loading it; the cards upload their shares at the first multiply"),
+    }
     let mut cfg = config(s, sampling(m))?;
     // A restart of the service resumes from the summary its quit writes.
     cfg.summary_on_quit = true;
