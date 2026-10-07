@@ -19,7 +19,13 @@ n=${1:?usage: $0 N [MINUTES]}
 minutes=${2:-10}
 cand="$HOME/.cache/phi-stream/improve/cand-$n"
 ws=${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev}
-opts=${PHI_STREAM_MEASURE_OPTS:--c 204800 --kv-q8 --frame agent --temp 0.5 --top-p 0.95 --min-p 0.05 --guide --goal-probe --chain-against}
+# With PHI_STREAM_REMOTE (the GPU rack's server, src/remote.md) both arms run
+# on the remote model, which has no goal probe, checks or second chain.
+if [ -n "${PHI_STREAM_REMOTE:-}" ]; then
+    opts=${PHI_STREAM_MEASURE_OPTS:---remote $PHI_STREAM_REMOTE --frame agent --temp 0.5 --top-p 0.95 --min-p 0.05}
+else
+    opts=${PHI_STREAM_MEASURE_OPTS:--c 204800 --kv-q8 --frame agent --temp 0.5 --top-p 0.95 --min-p 0.05 --guide --goal-probe --chain-against}
+fi
 after=${PHI_STREAM_AFTER_OPTS:-$opts --improve}
 # The objective of every window: ongoing work with its tools, the same for
 # both arms (an objective it can finish would leave it resting, at no rate).
@@ -112,7 +118,10 @@ PHI_STREAM_WINDOW=0 "$here/phi-stream.sh" restart dev $after > /dev/null 2>&1
 # pairs it is worse than the base beyond a tolerance on any one measure:
 # rate under 0.9 of the base's, think repeats over the base's plus 3
 # points, goal yes under the base's minus 0.05, unparsed checks over the
-# base's plus 5 points. Otherwise it is kept.
+# base's plus 5 points. Otherwise it is kept. With a remote model no goal
+# probe or check runs: yes and unparsed read 0 in both arms and never
+# decide, so the rule is the rate and the think repeats alone (written in
+# src/improve.md on 2026-10-07, before any remote candidate was measured).
 verdict=$(awk -F'\t' '
     /\tbase\t|\tcand\t/ {
         w++

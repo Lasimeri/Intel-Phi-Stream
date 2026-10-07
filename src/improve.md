@@ -86,6 +86,14 @@ and Claude's review ("nothing unreviewed runs").
    byte for byte, never by totals alone (a 40-task subset carries about
    three tasks of noise; not built yet). Measuring holds the cards, so the
    service restarts for each window.
+   **With a remote model** (`--remote`, the GPU rack's Flash Next,
+   2026-10-07; written before any remote candidate was measured): run as
+   `PHI_STREAM_REMOTE=http://192.168.0.39:8001 scripts/improve-measure.sh N`,
+   both arms on the server. No goal probe and no check runs there, so
+   `yes` and `unparsed` read 0 in both arms and never decide: the rule is
+   the rate and the think repeats alone, with the same tolerances. Each
+   window's restart reads the opening again on the server (about 24 s for
+   8000 tokens), inside the minute it settles.
 6. **Keep**: a candidate that passes review and the rule is committed
    (credited to the stream, with no attribution lines for Claude), the
    stream's copies of its files taken out of its layer

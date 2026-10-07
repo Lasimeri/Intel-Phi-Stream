@@ -33,3 +33,12 @@ copy into the stream's workspace (`improve/cand-N/`), and a line of its
 with the loop on (`PHI_STREAM_AFTER_OPTS`). The rule's arithmetic was run
 on example lines (a candidate worse in one pair only is kept; one slower
 in both is rejected on rate; one that died is rejected).
+
+## A remote model
+
+With `PHI_STREAM_REMOTE` set (the GPU rack's server, `http://192.168.0.39:8001`),
+both arms run on that server (`--remote`, [`src/remote.md`](../src/remote.md))
+with no goal probe, checks or second chain. `yes` and `unparsed` then read 0
+in both arms and never decide; the rule is the rate and the think repeats
+([`src/improve.md`](../src/improve.md), written 2026-10-07 before any remote
+candidate was measured).
