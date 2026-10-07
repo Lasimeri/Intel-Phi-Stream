@@ -63,7 +63,7 @@ past 150 thousand cells) and `--second-chain`: measured in the agent frame
 (2026-10-02, two interleaved pairs of 5 minutes) it cut the repeated
 8-grams from 19.8 to 11.3 percent for 13 percent of the stream's rate.
 `phi-stream chain off` (or `/chain off` in the terminal) turns it off live.
-`stop` waits up to two minutes for the service to write its summary and
+`stop` waits up to two minutes (`PHI_STREAM_QUIT_WAIT` seconds, read by the service too) for the service to write its summary and
 end (`src/engine.md`) before it ends the session; it waits for the
 process listening on the socket (`quit_and_wait`), not only the tmux
 session, so a service started outside tmux (by a watchdog, at a login) is
@@ -139,7 +139,7 @@ on cores the server does not use (measured placement:
 each of the 16 L3 groups, the card daemons on 51, 55, 59, 63):
 
     cd "/mnt/raid5/phi/Intel Phi Stream"
-    PHI_STREAM_WINDOW=0 PHI_STREAM_BUILD_CPUS=3,7,11,15,19,23,27,31 PHI_STREAM_BUILD_JOBS=8 PHI_STREAM_TERM_CPU=35 \
+    PHI_STREAM_WINDOW=0 PHI_STREAM_QUIT_WAIT=480 PHI_STREAM_BUILD_CPUS=3,7,11,15,19,23,27,31 PHI_STREAM_BUILD_JOBS=8 PHI_STREAM_TERM_CPU=35 \
         scripts/phi-stream.sh dev --remote http://127.0.0.1:8001 --frame agent --improve --temp 0.5 --top-p 0.95 --min-p 0.05
 
 The vocabulary there is the model's own first file (its metadata):

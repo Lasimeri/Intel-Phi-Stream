@@ -941,8 +941,18 @@ pub struct Engine {
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
-/// The longest a quit waits for its summary (microseconds).
+/// The longest a quit waits for its summary (microseconds), or
+/// `PHI_STREAM_QUIT_WAIT` seconds (a slower model: the rack's Flash Next at
+/// 7 tokens a second closes a turn and writes a summary of up to 1024
+/// tokens in more than two minutes; the launcher waits as long).
 const QUIT_WAIT_US: i64 = 120_000_000;
+
+fn quit_wait_us() -> i64 {
+    std::env::var("PHI_STREAM_QUIT_WAIT")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .map_or(QUIT_WAIT_US, |s| s * 1_000_000)
+}
 /// The agent frame: how long a turn may run while something waits for
 /// it (most turns took about 14 s on the live service, a review over 8
 /// minutes; 90 s cut one short), and while a quit
@@ -6293,7 +6303,7 @@ impl Engine {
                 if !self.cfg.summary_on_quit || self.cfg.task || self.quit_deadline.is_some() {
                     return false;
                 }
-                self.quit_deadline = Some(clock::mono_us() + QUIT_WAIT_US);
+                self.quit_deadline = Some(clock::mono_us() + quit_wait_us());
                 self.note("quitting: writing the summary first".into());
             }
         }

@@ -99,7 +99,8 @@ quit_and_wait() {
     local p
     p=$(serve_pid)
     "$bin" quit 2>/dev/null || true
-    for _ in $(seq 1 120); do
+    # As long as the service waits for its summary (PHI_STREAM_QUIT_WAIT, src/engine.rs).
+    for _ in $(seq 1 "${PHI_STREAM_QUIT_WAIT:-120}"); do
         if ! tmux has-session -t "=$session" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
             return 0
         fi
@@ -303,7 +304,7 @@ case "$sub" in
         fi
         rm -f "$keeppid"
         # The service writes its summary before it stops (src/engine.md): up
-        # to two minutes, then the session ends anyway.
+        # to two minutes (PHI_STREAM_QUIT_WAIT seconds), then the session ends anyway.
         quit_and_wait
         if alive "$winpid"; then
             kill "$(cat "$winpid")" 2> /dev/null || true

@@ -882,3 +882,5 @@ nothing generated in between). The rollover point is never past the
 context less an eighth of it (4096 at least), whatever `--rollover-tokens`
 says: the rack's slot holds 131072 tokens and the dev launch carries
 150000.
+
+The quit waits for the summary up to two minutes, or `PHI_STREAM_QUIT_WAIT` seconds (`quit_wait_us`): the rack's Flash Next, at 7 tokens a second, needed more than two to close its turn and write one (2026-10-07: the stop kept no summary).
