@@ -866,3 +866,19 @@ audit` live; it implies `--chain-against`):
   (N of M thinking tokens audited)". Rows past the queue's 96 go by
   unaudited; the count says how often (one fork at a time, so "each token" holds only as far
   as the second chain keeps pace with the first).
+
+## One sequence: a remote model (2026-10-07)
+
+With `--remote` (`remote.md`) the model's sequences beside the live one do
+not exist. `Engine::new` takes the free sequences from `n_seq` (3, 2, 1 for
+the usual 4; none for 1), so the second chain, the checks, the goal probe
+and the lens aside never start (each waits for free sequences), and the
+`chain` and `goal on` commands say why they stay off. What would have
+gone into a reading beside the stream goes in at once: a queued document
+of any size through `direct`, and a rollover through `resume_now` (the
+live sequence cleared, the new base and the pending token decoded from the
+start: what `start_reading`, `finish_reading` and `swap` compose, with
+nothing generated in between). The rollover point is never past the
+context less an eighth of it (4096 at least), whatever `--rollover-tokens`
+says: the rack's slot holds 131072 tokens and the dev launch carries
+150000.

@@ -68,3 +68,21 @@ temperature.
 `--cpu` loads the model with no GPU (no device listed, no layer
 offloaded, a split of zero blocks): on the host, and on the cards when
 their backend is loaded. A second model then has the GPU to itself.
+
+## A remote model (`Llm::remote`, `--remote`)
+
+With `--remote URL` nothing is loaded here: `Llm` holds a
+[`Remote`](remote.md) instead of a model, a context and a sampler, and
+every method goes to it. `decode` keeps the lanes' tokens in order (only
+sequence 0) and returns row 0 for the last; `sample` asks the server for
+the next token; `tokenize` is the server's; `piece`, `is_eog`, `eot`,
+`tokens_containing` and the dash scan come from the vocabulary file;
+`seq_rm` and `seq_pos_max` act on the one sequence, `seq_cp` and `accept`
+do nothing, `clear` empties it; `set_sampling` sends the settings and the
+banned tokens with the next request. `logits`, `greedy` and
+`sample_logits` return an error: no logits cross the network. `n_ctx` is
+the server's slot, `n_seq` 1, `batch_cap` the whole context (a sequence
+goes to the server as one prompt). `forks()` says whether sequences beside
+the live one exist (false here); `remote_info()` gives the server, the
+model's name and the streams and tokens so far. `sample` and
+`sample_logits` return a `Result` in both modes (a network can fail).

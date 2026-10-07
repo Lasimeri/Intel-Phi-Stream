@@ -24,6 +24,7 @@ mod playout;
 mod probe;
 mod readout;
 mod reflect;
+mod remote;
 mod rotlog;
 mod screen;
 mod serve;
@@ -150,6 +151,27 @@ struct ModelArgs {
     /// Show llama.cpp's informational log.
     #[arg(global = true, short = 'v', long)]
     verbose: bool,
+    /// The model served by a llama-server elsewhere instead of one loaded
+    /// here (http://HOST:PORT; the GPU rack's is http://192.168.0.39:8001):
+    /// its slot holds the one sequence and samples it (src/remote.md). The
+    /// mind, the checks, the second chain, the guide and the goal probe need
+    /// the model's state in this process and are off.
+    #[arg(global = true, long, env = "PHI_STREAM_REMOTE")]
+    remote: Option<String>,
+    /// The remote model's vocabulary, its GGUF metadata without the weights
+    /// (default: ~/.local/share/phi-stream/remote/STEM.vocab.gguf for the
+    /// server's model; scripts/remote-vocab.sh fetches it).
+    #[arg(global = true, long, env = "PHI_STREAM_REMOTE_VOCAB")]
+    remote_vocab: Option<String>,
+    /// The server's slot the sequence is kept in (pinned, so another client
+    /// does not evict its cache).
+    #[arg(
+        global = true,
+        long,
+        env = "PHI_STREAM_REMOTE_SLOT",
+        default_value_t = 1
+    )]
+    remote_slot: i32,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -669,7 +691,9 @@ const READOUT_RESERVE: u64 = 256 << 20;
 /// The model with a capture installed (`capture.md`) and `extra` bytes of
 /// GPU memory kept free for the readout.
 fn load_with(m: &ModelArgs, capture: Option<capture::CaptureConfig>, extra: u64) -> Result<Llm> {
-    backend_path();
+    if m.remote.is_none() {
+        backend_path();
+    }
     let opts = Options {
         model: expand_home(&m.model),
         backend_dir: m.backend_dir.clone(),
@@ -702,7 +726,49 @@ fn load_with(m: &ModelArgs, capture: Option<capture::CaptureConfig>, extra: u64)
         capture,
         extra_reserve: extra,
     };
-    Llm::load(opts, &sampling(m))
+    match &m.remote {
+        Some(url) => Llm::remote(
+            opts,
+            &sampling(m),
+            url,
+            m.remote_vocab.as_deref().map(expand_home).as_deref(),
+            m.remote_slot,
+        ),
+        None => Llm::load(opts, &sampling(m)),
+    }
+}
+
+/// With a remote model (`--remote`) what needs the model's state in this
+/// process is turned off, each said once on stderr: the mind and the
+/// checks on it, the second chain, the guide, the goal probe.
+fn remote_off(cfg: &mut Config) {
+    let mut off = Vec::new();
+    if cfg.mind.take().is_some() {
+        off.push("the mind (--mind)");
+    }
+    if cfg.reflect.take().is_some() {
+        off.push("the checks (--reflect)");
+    }
+    if cfg.second_chain {
+        off.push("the second chain (--second-chain, --chain-against, --chain-audit)");
+    }
+    if cfg.guide {
+        off.push("the guide (--guide)");
+    }
+    if cfg.goal_probe {
+        off.push("the goal probe (--goal-probe)");
+    }
+    cfg.second_chain = false;
+    cfg.chain_against = false;
+    cfg.chain_audit = false;
+    cfg.guide = false;
+    cfg.goal_probe = false;
+    if !off.is_empty() {
+        eprintln!(
+            "phi-stream: the model is remote: off, since each needs the model's state in this process: {}",
+            off.join(", ")
+        );
+    }
 }
 
 const PARAGRAPH: &str = "The scheduler assigns every operation of the graph to the backend that reports support for it, in priority order, and splits the graph where the assignment changes so that each backend computes a contiguous run of nodes; tensors crossing a split are copied between buffers before the next run starts. ";
@@ -817,7 +883,7 @@ fn info_line(llm: &Llm, cfg: &Config) -> String {
 /// The model as a stream loads it: with the capture and the readout's
 /// GPU memory set aside when the mind is read.
 fn load_mind(m: &ModelArgs, a: &MindArgs) -> Result<Llm> {
-    if !a.mind {
+    if !a.mind || m.remote.is_some() {
         return load(m);
     }
     let lens = lens::Lens::open(&expand_home(&a.lens))?;
@@ -854,6 +920,9 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
         m.n_seq = m.n_seq.max(5);
     }
     let llm = load_mind(&m, &s.mind)?;
+    if !llm.forks() {
+        remote_off(&mut cfg);
+    }
     let info = info_line(&llm, &cfg);
     serve::asks_from(cfg.workspace.join("asks"));
     let (etx, erx) = mpsc::channel();
@@ -880,8 +949,11 @@ fn serve_cmd(m: &ModelArgs, s: &StreamArgs, socket: PathBuf) -> Result<()> {
 
 /// The stream on stdout, status and notes on stderr, stdin lines said to it.
 fn run_cmd(m: &ModelArgs, s: &StreamArgs, max_tokens: usize) -> Result<()> {
-    let cfg = config(s, sampling(m))?;
+    let mut cfg = config(s, sampling(m))?;
     let llm = load_mind(m, &s.mind)?;
+    if !llm.forks() {
+        remote_off(&mut cfg);
+    }
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel();
     if let Some(f) = &s.feed {

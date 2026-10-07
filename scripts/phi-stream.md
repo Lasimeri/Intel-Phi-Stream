@@ -112,3 +112,18 @@ first's backend then reported "could not clear card 0: no answer within
 time, Intel-Phi-AVX512), so two instances each with a card are not
 supported yet. A second instance with `PHI_STREAM_CARDS=0` and `--cpu`, or
 on the GPU, does not touch the cards.
+
+## A remote model
+
+With `--remote URL` among the options (or `PHI_STREAM_REMOTE` set),
+`launch` runs the binary directly: the model is served elsewhere
+([`src/remote.md`](../src/remote.md)), so `phi-ggml.sh`, the cards and the
+GPU are left alone. The option and `--remote-vocab`/`--remote-slot` take a
+value, so the subcommand is found after them. The development service on
+the GPU rack's Flash Next:
+
+    scripts/phi-stream.sh dev --remote http://192.168.0.39:8001 --frame agent --improve --temp 0.5 --top-p 0.95 --min-p 0.05
+
+(`dev` adds `--mind --reflect --second-chain`; the binary turns them off
+for a remote model and says so.) The vocabulary comes first, once:
+`PHI_STREAM_REMOTE_SSH="rack sh" scripts/remote-vocab.sh http://192.168.0.39:8001`.

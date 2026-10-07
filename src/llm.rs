@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use anyhow::{bail, Context as _, Result};
 
 use crate::capture::{eval_callback, Capture, CaptureConfig};
+use crate::remote::Remote;
 use crate::split::{self, Split};
 use crate::sys;
 
@@ -123,10 +124,13 @@ pub struct Lane<'a> {
     pub logits: bool,
 }
 
-/// The loaded model and its context.
+/// The loaded model and its context; or, with `--remote`, a server that
+/// holds the one sequence (`remote.rs`): then there is no model, context,
+/// vocabulary pointer or sampler here, and every method below goes to it.
 pub struct Llm {
-    model: NonNull<sys::llama_model>,
-    ctx: NonNull<sys::llama_context>,
+    model: Option<NonNull<sys::llama_model>>,
+    ctx: Option<NonNull<sys::llama_context>>,
+    remote: Option<Box<Remote>>,
     vocab: *const sys::llama_vocab,
     n_vocab: usize,
     batch: sys::llama_batch,
@@ -321,8 +325,9 @@ impl Llm {
             let n_ctx_train = sys::llama_model_n_ctx_train(m.as_ptr());
             let sampler = make_sampler(sampling, &dash_tokens, &[], vocab, n_ctx_train);
             Ok(Self {
-                model: m,
-                ctx: c,
+                model: Some(m),
+                ctx: Some(c),
+                remote: None,
                 vocab,
                 n_vocab,
                 batch,
@@ -346,6 +351,104 @@ impl Llm {
         }
     }
 
+    /// The model served by the llama-server at `url` (`remote.rs`): its
+    /// slot `slot` holds the one sequence, the vocabulary is read from
+    /// `vocab` (default: the one kept for the server's model) and checked
+    /// against the server's. Nothing is loaded here; `opts.model` becomes
+    /// the server's model file and `opts.ctx` its slot's context.
+    pub fn remote(
+        mut opts: Options,
+        sampling: &Sampling,
+        url: &str,
+        vocab: Option<&str>,
+        slot: i32,
+    ) -> Result<Self> {
+        let r = Remote::connect(url, vocab, slot, sampling)?;
+        opts.model = r.model.clone();
+        opts.ctx = r.n_ctx;
+        opts.n_seq = 1;
+        opts.capture = None;
+        let n_vocab = r.vocab.len();
+        let eog = r.vocab.eog.clone();
+        let dash_tokens = [
+            r.vocab.containing("\u{2014}".as_bytes()),
+            r.vocab.containing("\u{2013}".as_bytes()),
+        ]
+        .concat();
+        let n_layer = r.vocab.n_layer.max(0) as usize;
+        let mut me = Self {
+            model: None,
+            ctx: None,
+            remote: Some(Box::new(r)),
+            vocab: std::ptr::null(),
+            n_vocab,
+            // SAFETY: a one-token batch, freed in `drop`; never decoded.
+            batch: unsafe { sys::llama_batch_init(1, 0, 1) },
+            // A whole sequence goes to the server at once.
+            batch_cap: opts.ctx as usize,
+            sampler: std::ptr::null_mut(),
+            dash_tokens,
+            n_ctx_train: opts.ctx as i32,
+            banned: Vec::new(),
+            _devices: Vec::new(),
+            _pattern: None,
+            _overrides: Box::new(
+                [sys::llama_model_tensor_buft_override {
+                    pattern: std::ptr::null(),
+                    buft: std::ptr::null_mut(),
+                }; 3],
+            ),
+            _tensor_split: Vec::new(),
+            split: Split {
+                n_blocks: n_layer,
+                gpu_blocks: 0,
+                gpu_set: Vec::new(),
+                gpu_bytes: 0,
+                host_bytes: 0,
+                pattern: None,
+            },
+            sizes: split::Sizes {
+                block: Vec::new(),
+                experts: Vec::new(),
+                other: 0,
+                host_only: 0,
+                kv_per_token_f16: 0,
+                recurrent_per_seq: 0,
+                cache_kind: Vec::new(),
+                arch: String::new(),
+            },
+            vram: (0, 0),
+            gpu_layers: Vec::new(),
+            opts,
+            eog,
+            capture: None,
+        };
+        me.set_sampling(sampling);
+        Ok(me)
+    }
+
+    /// Whether sequences beside the live one can be read, forked and
+    /// composed (a model in this process); not with `--remote`.
+    pub fn forks(&self) -> bool {
+        self.remote.is_none()
+    }
+
+    /// With `--remote`: where the model runs and its name, the streams the
+    /// server was asked for and the tokens they gave.
+    pub fn remote_info(&self) -> Option<(String, String, u64, u64)> {
+        self.remote
+            .as_ref()
+            .map(|r| (r.url(), r.vocab.name.clone(), r.streams, r.tokens))
+    }
+
+    fn model_ptr(&self) -> *mut sys::llama_model {
+        self.model.expect("a model in this process").as_ptr()
+    }
+
+    fn ctx_ptr(&self) -> *mut sys::llama_context {
+        self.ctx.expect("a context in this process").as_ptr()
+    }
+
     /// The capture, when one is installed.
     pub fn capture(&mut self) -> Option<&mut Capture> {
         self.capture.as_deref_mut()
@@ -356,13 +459,19 @@ impl Llm {
     /// against `n_layer_all`, llama-hparams.cpp): 40 for this model, whose
     /// file holds 41.
     pub fn n_layer(&self) -> i32 {
+        if let Some(r) = &self.remote {
+            return r.vocab.n_layer;
+        }
         // SAFETY: a plain query of the model.
-        unsafe { sys::llama_model_n_layer(self.model.as_ptr()) }
+        unsafe { sys::llama_model_n_layer(self.model_ptr()) }
     }
 
     pub fn n_ctx(&self) -> u32 {
+        if let Some(r) = &self.remote {
+            return r.n_ctx;
+        }
         // SAFETY: a plain query of the context.
-        unsafe { sys::llama_n_ctx(self.ctx.as_ptr()) }
+        unsafe { sys::llama_n_ctx(self.ctx_ptr()) }
     }
 
     pub fn batch_cap(&self) -> usize {
@@ -371,13 +480,19 @@ impl Llm {
 
     /// Sequences the context holds apart (`--n-seq`).
     pub fn n_seq(&self) -> u32 {
+        if self.remote.is_some() {
+            return 1;
+        }
         // SAFETY: a plain query of the context.
-        unsafe { sys::llama_n_seq_max(self.ctx.as_ptr()) }
+        unsafe { sys::llama_n_seq_max(self.ctx_ptr()) }
     }
 
     /// The vocabulary's tokens whose text holds `needle` (a scan of every
     /// token's piece, as for the dashes).
     pub fn tokens_containing(&self, needle: &str) -> Vec<i32> {
+        if let Some(r) = &self.remote {
+            return r.vocab.containing(needle.as_bytes());
+        }
         tokens_with(self.vocab, self.n_vocab, needle.as_bytes())
     }
 
@@ -402,6 +517,9 @@ impl Llm {
 
     /// Text to tokens; `special` parses the template's control tokens.
     pub fn tokenize(&self, text: &str, special: bool) -> Result<Vec<i32>> {
+        if let Some(r) = &self.remote {
+            return r.tokenize(text, special);
+        }
         let mut out = vec![0i32; text.len() + 8];
         for _ in 0..2 {
             // SAFETY: `out` has room for `out.len()` tokens.
@@ -435,6 +553,9 @@ impl Llm {
 
     /// A token's bytes (control tokens included when `special`).
     pub fn piece(&self, token: i32, special: bool, out: &mut Vec<u8>) {
+        if let Some(r) = &self.remote {
+            return r.vocab.piece(token, special, out);
+        }
         let mut buf = [0u8; 256];
         // SAFETY: `buf` holds 256 bytes.
         let n = unsafe {
@@ -491,6 +612,9 @@ impl Llm {
     }
 
     pub fn eot(&self) -> i32 {
+        if let Some(r) = &self.remote {
+            return r.vocab.eot;
+        }
         // SAFETY: a plain query of the vocabulary.
         unsafe { sys::llama_vocab_eot(self.vocab) }
     }
@@ -502,6 +626,18 @@ impl Llm {
         let n: usize = lanes.iter().map(|l| l.tokens.len()).sum();
         if n == 0 {
             return Ok(Vec::new());
+        }
+        // Remote: the tokens are kept in order; the server decodes them with
+        // the next stream (`sample`). Its one row stands for "the last".
+        if let Some(r) = self.remote.as_mut() {
+            let mut rows = Vec::new();
+            for l in lanes {
+                r.place(l.seq, l.tokens, l.pos0)?;
+                if l.logits {
+                    rows.push(0);
+                }
+            }
+            return Ok(rows);
         }
         if n > self.batch_cap {
             bail!(
@@ -532,7 +668,7 @@ impl Llm {
             }
         }
         // SAFETY: the batch is filled for its `n_tokens`.
-        let r = unsafe { sys::llama_decode(self.ctx.as_ptr(), self.batch) };
+        let r = unsafe { sys::llama_decode(self.ctx_ptr(), self.batch) };
         if r != 0 {
             bail!("llama_decode failed ({r})");
         }
@@ -541,9 +677,12 @@ impl Llm {
 
     /// The logits of batch row `row` of the last decode.
     pub fn logits(&self, row: i32) -> Result<&[f32]> {
+        if self.remote.is_some() {
+            bail!("no logits: the model is served remotely (--remote) and samples on the server");
+        }
         // SAFETY: the row asked for logits in the last decode: n_vocab floats.
         unsafe {
-            let p = sys::llama_get_logits_ith(self.ctx.as_ptr(), row);
+            let p = sys::llama_get_logits_ith(self.ctx_ptr(), row);
             if p.is_null() {
                 bail!("no logits for row {row}");
             }
@@ -553,9 +692,12 @@ impl Llm {
 
     /// The sampler chain's choice for batch row `row` (accepted into its
     /// own history).
-    pub fn sample(&mut self, row: i32) -> i32 {
+    pub fn sample(&mut self, row: i32) -> Result<i32> {
+        if let Some(r) = self.remote.as_mut() {
+            return r.sample();
+        }
         // SAFETY: the row asked for logits in the last decode.
-        unsafe { sys::llama_sampler_sample(self.sampler, self.ctx.as_ptr(), row) }
+        Ok(unsafe { sys::llama_sampler_sample(self.sampler, self.ctx_ptr(), row) })
     }
 
     /// The next token from logits given here (one per vocabulary entry)
@@ -563,7 +705,10 @@ impl Llm {
     /// random state), accepted once: what `llama_sampler_sample` does with a
     /// row of the context (llama-sampling.cpp), for a row the engine made
     /// (the guide's mix).
-    pub fn sample_logits(&mut self, logits: &[f32]) -> i32 {
+    pub fn sample_logits(&mut self, logits: &[f32]) -> Result<i32> {
+        if self.remote.is_some() {
+            bail!("no sampling from given logits: the model is served remotely (--remote)");
+        }
         let mut data: Vec<sys::llama_token_data> = logits
             .iter()
             .enumerate()
@@ -594,12 +739,20 @@ impl Llm {
                     .map_or(0, |(i, _)| i as i32)
             };
             sys::llama_sampler_accept(self.sampler, t);
-            t
+            Ok(t)
         }
     }
 
     /// Replace the chain (new temperature or seed).
     pub fn set_sampling(&mut self, s: &Sampling) {
+        if let Some(r) = self.remote.as_mut() {
+            let mut never = self.banned.clone();
+            if s.ban_dashes {
+                never.extend_from_slice(&self.dash_tokens);
+            }
+            r.set_sampling(s, &never);
+            return;
+        }
         // SAFETY: the old chain is freed once, the new one made once.
         unsafe {
             sys::llama_sampler_free(self.sampler);
@@ -626,24 +779,35 @@ impl Llm {
 
     fn mem(&self) -> sys::llama_memory_t {
         // SAFETY: a plain query of the context.
-        unsafe { sys::llama_get_memory(self.ctx.as_ptr()) }
+        unsafe { sys::llama_get_memory(self.ctx_ptr()) }
     }
 
     /// Give `dst` the cells of `src` in `[p0, p1)` (`-1`: open) and
     /// `src`'s recurrent state.
+    /// Remote: nothing is copied (one sequence), and a decode into `dst`
+    /// is refused there.
     pub fn seq_cp(&mut self, src: i32, dst: i32, p0: i32, p1: i32) {
+        if self.remote.is_some() {
+            return;
+        }
         // SAFETY: plain calls on this context's memory.
         unsafe { sys::llama_memory_seq_cp(self.mem(), src, dst, p0, p1) }
     }
 
     /// Drop `seq`'s cells in `[p0, p1)`; false when a partial range cannot go.
     pub fn seq_rm(&mut self, seq: i32, p0: i32, p1: i32) -> bool {
+        if let Some(r) = self.remote.as_mut() {
+            return r.remove(seq, p0, p1);
+        }
         // SAFETY: plain calls on this context's memory.
         unsafe { sys::llama_memory_seq_rm(self.mem(), seq, p0, p1) }
     }
 
     /// The highest position `seq` holds; -1 when it holds none.
     pub fn seq_pos_max(&self, seq: i32) -> i32 {
+        if let Some(r) = &self.remote {
+            return r.pos_max(seq);
+        }
         // SAFETY: a plain query of this context's memory.
         unsafe { sys::llama_memory_seq_pos_max(self.mem(), seq) }
     }
@@ -651,6 +815,10 @@ impl Llm {
     /// Put `token` into the sampler chain's history as if the chain had
     /// chosen it (a forced token: the penalties count it).
     pub fn accept(&mut self, token: i32) {
+        // Remote: the server's sampler counts the prompt it is sent.
+        if self.remote.is_some() {
+            return;
+        }
         // SAFETY: the chain lives as long as `self`.
         unsafe { sys::llama_sampler_accept(self.sampler, token) }
     }
@@ -671,6 +839,9 @@ impl Llm {
     }
 
     pub fn clear(&mut self) {
+        if let Some(r) = self.remote.as_mut() {
+            return r.clear();
+        }
         // SAFETY: plain calls on this context's memory.
         unsafe { sys::llama_memory_clear(self.mem(), true) }
     }
@@ -806,12 +977,19 @@ unsafe fn make_sampler(
 
 impl Drop for Llm {
     fn drop(&mut self) {
-        // SAFETY: each was made once in `load` and is freed once here.
+        // SAFETY: each was made once in `load` (or `remote`: the batch
+        // alone) and is freed once here.
         unsafe {
-            sys::llama_sampler_free(self.sampler);
+            if !self.sampler.is_null() {
+                sys::llama_sampler_free(self.sampler);
+            }
             sys::llama_batch_free(self.batch);
-            sys::llama_free(self.ctx.as_ptr());
-            sys::llama_model_free(self.model.as_ptr());
+            if let Some(c) = self.ctx {
+                sys::llama_free(c.as_ptr());
+            }
+            if let Some(m) = self.model {
+                sys::llama_model_free(m.as_ptr());
+            }
         }
     }
 }

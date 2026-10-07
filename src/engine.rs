@@ -1244,6 +1244,10 @@ impl Engine {
         // The guide lane takes the last sequence; the others stay free.
         let guide_seq =
             (cfg.guide && !cfg.task && llm.n_seq() >= 5).then(|| llm.n_seq() as i32 - 1);
+        // The sequences beside the live one for readings, checks and the
+        // second chain: 3, 2, 1 (the guide's is apart); none when the
+        // model holds one sequence (`--remote`), which turns all of them off.
+        let free_seqs: Vec<i32> = (1..llm.n_seq().min(4) as i32).rev().collect();
         Ok(Self {
             llm,
             cfg,
@@ -1261,7 +1265,7 @@ impl Engine {
             chase: None,
             queue: VecDeque::new(),
             pending_reads: Vec::new(),
-            free_seqs: vec![3, 2, 1],
+            free_seqs,
             summary: None,
             reseat: false,
             rollovers: 0,
@@ -1625,10 +1629,16 @@ impl Engine {
             } else {
                 format!("The computer: {host_line}.")
             },
-            format!(
-                "The model: {model}, {gpu} of its {blocks} blocks on the GPU, {rest}; its context holds {} tokens.",
-                self.llm.n_ctx()
-            ),
+            match self.llm.remote_info() {
+                Some((url, name, _, _)) => format!(
+                    "The model: {name} ({model}), served over the network by the llama-server at {url} (the GPU rack), which holds its context of {} tokens and samples each token; this computer runs the harness, its tools and its terminal.",
+                    self.llm.n_ctx()
+                ),
+                None => format!(
+                    "The model: {model}, {gpu} of its {blocks} blocks on the GPU, {rest}; its context holds {} tokens.",
+                    self.llm.n_ctx()
+                ),
+            },
             format!("Its workspace: {ws}{repo}."),
             format!("Present: {present}."),
         ];
@@ -4429,7 +4439,7 @@ impl Engine {
         let row = self.feed_live(&all, pos0)?;
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
-        self.next = self.llm.sample(row);
+        self.next = self.llm.sample(row)?;
         Ok(())
     }
 
@@ -4505,7 +4515,7 @@ impl Engine {
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         let out = self.llm.logits(row)?.to_vec();
-        self.next = self.llm.sample(row);
+        self.next = self.llm.sample(row)?;
         Ok(out)
     }
 
@@ -4715,8 +4725,30 @@ impl Engine {
         self.llm.seq_rm(old, -1, -1);
         self.free_seqs.push(old);
         self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
-        self.next = self.llm.sample(row);
+        self.next = self.llm.sample(row)?;
         let mark = self.framed_system(&c.label);
+        self.say(mark, Kind::Given);
+        Ok(())
+    }
+
+    /// A rollover with one sequence (`--remote`): what `start_reading`,
+    /// `finish_reading` and `swap` do over a reading beside the stream,
+    /// done at once: the live sequence becomes `base` and the pending token,
+    /// decoded from the start (the server reads it as one prompt).
+    fn resume_now(&mut self, base: Vec<i32>, label: String) -> Result<()> {
+        self.end_chain(false);
+        self.open_objection = None;
+        self.objection_unsent = false;
+        self.drop_guide();
+        self.turn_start = base.len();
+        let mut all = base;
+        all.push(self.next);
+        self.llm.clear();
+        let row = self.feed_live(&all, 0)?;
+        self.history = all;
+        self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
+        self.next = self.llm.sample(row)?;
+        let mark = self.framed_system(&label);
         self.say(mark, Kind::Given);
         Ok(())
     }
@@ -5002,8 +5034,8 @@ impl Engine {
                 self.llm.accept(f);
                 f
             }
-            (None, Some(m)) => self.llm.sample_logits(&m),
-            (None, None) => self.llm.sample(row),
+            (None, Some(m)) => self.llm.sample_logits(&m)?,
+            (None, None) => self.llm.sample(row)?,
         };
         if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
             // The journal has no end: a newline stands in for it.
@@ -5862,7 +5894,11 @@ impl Engine {
                 ));
                 self.rollovers += 1;
                 self.reseat = false;
-                self.start_reading(tokens, "resumed from the summary".into(), true)?;
+                if self.llm.forks() {
+                    self.start_reading(tokens, "resumed from the summary".into(), true)?;
+                } else {
+                    self.resume_now(tokens, "resumed from the summary".into())?;
+                }
             }
             return Ok(());
         }
@@ -5902,10 +5938,17 @@ impl Engine {
 
         // Rollover: past the share, or a new persona waiting, with nothing
         // in flight: ask for the summary.
+        // Never past the context, whatever was asked: an eighth of it (4096
+        // at least) kept for the summary and a turn's results. A remote
+        // server's slot can be smaller than the `--rollover-tokens` a launch
+        // carries (131072 on the rack against 150000).
+        let n_ctx = self.llm.n_ctx() as usize;
+        let cap = n_ctx.saturating_sub((n_ctx / 8).max(4096));
         let limit = self
             .cfg
             .rollover_tokens
-            .unwrap_or((self.llm.n_ctx() as f32 * self.cfg.rollover_at) as usize);
+            .unwrap_or((n_ctx as f32 * self.cfg.rollover_at) as usize)
+            .min(cap);
         // A quit asks for the summary too: the restart resumes from it.
         let quitting = self.quit_deadline.is_some() && !self.cfg.task;
         if idle && (self.history.len() >= limit || self.reseat || quitting) {
@@ -6025,7 +6068,9 @@ impl Engine {
                         tokens.len()
                     ));
                 }
-                if tokens.len() <= self.cfg.direct_max {
+                // A remote model holds one sequence: no reading beside it, so
+                // everything is heard at once.
+                if tokens.len() <= self.cfg.direct_max || !self.llm.forks() {
                     self.direct(&tokens)?;
                     self.say(text, Kind::Given);
                 } else {
@@ -6212,13 +6257,23 @@ impl Engine {
                     self.open_objection = None;
                     self.objection_unsent = false;
                 }
+                if set != ChainSet::Off && !self.llm.forks() {
+                    self.note(
+                        "the second chain needs a sequence beside the live one: none with a remote model (--remote)"
+                            .into(),
+                    );
+                    return true;
+                }
                 self.chain_on = set != ChainSet::Off && !self.cfg.task;
                 self.chain_against = against;
                 self.chain_audit = audit;
                 self.note(format!("the second chain {}", self.chain_kind()));
             }
             Command::Goal(on) => {
-                self.goal_on = on && self.yes_no.is_some();
+                if on && !self.llm.forks() {
+                    self.note("the goal probe reads a fork of the live sequence: none with a remote model (--remote)".into());
+                }
+                self.goal_on = on && self.yes_no.is_some() && self.llm.forks();
                 self.note(format!(
                     "the goal probe {}",
                     if self.goal_on { "on" } else { "off" }
@@ -6279,7 +6334,7 @@ impl Engine {
         }
         self.history.extend_from_slice(&tokens);
         self.mind_step(tokens.len() as i32 - 1, *tokens.last().unwrap())?;
-        self.next = self.llm.sample(row);
+        self.next = self.llm.sample(row)?;
         self.say(opening.clone(), Kind::Given);
         // The agent frame: its first turn begins here.
         self.turn_start = self.history.len();

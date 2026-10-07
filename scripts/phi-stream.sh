@@ -41,6 +41,16 @@ fi
 
 # The binary, with the cards when the co-processor repository is found.
 launch() {
+    # A remote model (--remote URL, src/remote.md): nothing loads here,
+    # so neither the cards nor the GPU are touched.
+    if [ -n "${PHI_STREAM_REMOTE:-}" ]; then
+        exec "$bin" "$@"
+    fi
+    for a in "$@"; do
+        case "$a" in
+            --remote|--remote=*) exec "$bin" "$@" ;;
+        esac
+    done
     # PHI_STREAM_CARDS=0: this instance leaves the cards alone (one process
     # holds them; a second model runs on the GPU and the host).
     if [ -n "${PHI_AVX512_ROOT:-}" ] && [ "${PHI_STREAM_CARDS:-1}" != 0 ]; then
@@ -146,7 +156,7 @@ for a in "$@"; do
         continue
     fi
     case "$a" in
-        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|--gpu-headroom|-t|--threads|--n-seq|--temp|--top-k|--top-p|--min-p|--dry-multiplier|--dry-base|--dry-allowed-length|--dry-last-n|--seed|--repeat-penalty|--repeat-last-n|--socket) skip=1 ;;
+        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|--gpu-headroom|-t|--threads|--n-seq|--temp|--top-k|--top-p|--min-p|--dry-multiplier|--dry-base|--dry-allowed-length|--dry-last-n|--seed|--repeat-penalty|--repeat-last-n|--socket|--remote|--remote-vocab|--remote-slot) skip=1 ;;
         -*) ;;
         *) sub=$a; break ;;
     esac

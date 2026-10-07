@@ -97,3 +97,16 @@ terminal, `term.md`) and `--no-objective-gate` (its output not held until
 it has an objective, `engine.md`); `objective TEXT` (`-` clears) sets the
 objective of a running service. The service's `quit` writes the summary
 first; `run` stops at once.
+
+## A remote model
+
+`--remote http://HOST:PORT` (or `PHI_STREAM_REMOTE`) serves the model from a
+llama-server elsewhere ([`remote.md`](remote.md)); `--remote-vocab PATH`
+names its vocabulary file (default: the one
+[`scripts/remote-vocab.sh`](../scripts/remote-vocab.md) keeps for the
+server's model), `--remote-slot N` the slot (default 1). `load_with` then
+makes `Llm::remote` and leaves the backends alone; `load_mind` loads no
+capture; `serve` and `run` call `remote_off`, which turns off what needs
+the model's state in this process (the mind, the checks, the second
+chain, the guide, the goal probe) and says each on stderr. `-c` is
+ignored: the context is the server's slot.
