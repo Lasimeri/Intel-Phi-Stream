@@ -46,7 +46,10 @@ and Claude's review ("nothing unreviewed runs").
    `attach --follow` would load) and cargo's home with the registry
    read-only, llama.cpp read-only at its own path (`build.md`), no
    network (`--unshare-all`), cargo offline, Python masked, a cleared
-   environment; `nice -n 19` on CPUs 12 to 15 with 4 jobs (the stream's
+   environment; `nice -n 19` on CPUs 12 to 15 with 4 jobs (`PHI_STREAM_BUILD_CPUS`, a
+   taskset list, and `PHI_STREAM_BUILD_JOBS` for a host whose cores 12 to
+   15 do other work: on the GPU rack, 56-59,120-123 with 8 jobs, away from
+   the decode server's cores and the card daemons' 60 to 63) (the stream's
    threads start from the first CPU), stopped after 20 minutes. The
    build and the tests execute code the stream wrote (`build.rs` is
    denied, but tests and macros run), which is why the sandbox matters.

@@ -35,10 +35,20 @@ pub const DENY: &[&str] = &[
 ];
 
 /// The longest a build may take, and the CPUs it runs on (the stream's
-/// threads start from the first; `nice -n 19` too).
+/// threads start from the first; `nice -n 19` too): `PHI_STREAM_BUILD_CPUS`
+/// (a taskset list) and `PHI_STREAM_BUILD_JOBS` override them for a host
+/// whose cores 12 to 15 do other work (the GPU rack: its decode server's).
 const BUILD_LIMIT_S: u64 = 1200;
 const BUILD_CPUS: &str = "12-15";
 const BUILD_JOBS: &str = "4";
+
+fn build_cpus() -> String {
+    std::env::var("PHI_STREAM_BUILD_CPUS").unwrap_or_else(|_| BUILD_CPUS.into())
+}
+
+fn build_jobs() -> String {
+    std::env::var("PHI_STREAM_BUILD_JOBS").unwrap_or_else(|_| BUILD_JOBS.into())
+}
 
 #[derive(Clone, Debug)]
 pub struct ImproveConfig {
@@ -406,6 +416,8 @@ fn stage(dir: &Path, cfg: &ImproveConfig, base: &str, ch: &[Change]) -> Result<(
 /// stopped after `BUILD_LIMIT_S`.
 fn build_argv(tree: &Path, root: &Path) -> Vec<String> {
     let home = std::env::var("HOME").unwrap_or_default();
+    let cpus = build_cpus();
+    let jobs = build_jobs();
     let llama = std::env::var("LLAMA_CPP_DIR").unwrap_or(format!("{home}/llama.cpp"));
     let t = tree.display().to_string();
     let target = root.join("target").display().to_string();
@@ -421,7 +433,7 @@ fn build_argv(tree: &Path, root: &Path) -> Vec<String> {
         "19",
         "taskset",
         "-c",
-        BUILD_CPUS,
+        &cpus,
         "bwrap",
         "--ro-bind",
         "/usr",
@@ -512,7 +524,7 @@ fn build_argv(tree: &Path, root: &Path) -> Vec<String> {
             "true",
             "--setenv",
             "CARGO_BUILD_JOBS",
-            BUILD_JOBS,
+            &jobs,
             "make",
             "check",
         ]

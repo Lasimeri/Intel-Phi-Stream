@@ -1124,7 +1124,14 @@ impl Engine {
                 timeout: std::time::Duration::from_secs(MAX_TERM_SECS),
                 max_out: 16 * 1024,
                 // The last CPU: the stream's own threads start from the first.
-                cpu: std::thread::available_parallelism().map_or(0, |n| n.get() - 1),
+                // The last CPU, or PHI_STREAM_TERM_CPU (the rack's last CPU is
+                // the twin of a core a card daemon spins on).
+                cpu: std::env::var("PHI_STREAM_TERM_CPU")
+                    .ok()
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or_else(|| {
+                        std::thread::available_parallelism().map_or(0, |n| n.get() - 1)
+                    }),
             })
         });
         // Its messages to Claude are numbered on from those it sent before.

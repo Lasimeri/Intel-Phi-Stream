@@ -40,7 +40,9 @@ The sandbox (bubblewrap), so a wrong or invented command can do little:
   person's standing instructions forbid it, and they are its manner too;
 - at the lowest priority (`nice -n 19`) on the last CPU (`taskset`): the
   stream's own threads start from the first, and a second process on
-  them cost the stream about ten times (xks measured 2026-10-01);
+  them cost the stream about ten times (xks measured 2026-10-01); or on
+  `PHI_STREAM_TERM_CPU` where the last CPU does other work (on the GPU
+  rack it is the twin of core 63, where a card daemon spins);
 - stopped after 60 s, the output (stdout and stderr) cut at 16 KiB (in the
   agent frame, then to about 4096 tokens, `engine.rs` `fit_output`);
 - started again, up to five times, when the overlay refuses its mount as
