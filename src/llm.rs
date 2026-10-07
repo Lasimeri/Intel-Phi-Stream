@@ -18,6 +18,10 @@ use crate::capture::{eval_callback, Capture, CaptureConfig};
 use crate::split::{self, Split};
 use crate::sys;
 
+/// The tensors kept in host memory whatever the plan (`split::Sizes::host_only`),
+/// as llama.cpp's override pattern.
+const HOST_ONLY: &CStr = c"per_layer_token_embd\\.weight";
+
 /// How the model and its context are set up.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -37,6 +41,14 @@ pub struct Options {
     pub keep_on_gpu: Vec<usize>,
     /// K and V as 8-bit blocks instead of float16 (half the cells' bytes).
     pub kv_q8: bool,
+    /// The KV cache and the attention over it in host memory
+    /// (llama.cpp's `offload_kqv` off): none of it reserved on a GPU.
+    pub kv_host: bool,
+    /// llama.cpp's `op_offload`: a batch over host weights copied to a GPU.
+    pub op_offload: bool,
+    /// Each GPU's room for llama.cpp's working buffers, bytes; none: 1.25
+    /// GiB plus 2 MiB per batch token.
+    pub gpu_headroom: Option<u64>,
     /// No GPU: the model on the host (and the cards, when their backend is
     /// loaded), so a second model can have the GPU.
     pub cpu: bool,
@@ -127,13 +139,18 @@ pub struct Llm {
     /// Tokens the engine asked never to sample (a frame's control tokens).
     banned: Vec<i32>,
     // Kept alive for the model, which keeps the pointers.
-    _devices: Box<[sys::ggml_backend_dev_t; 2]>,
+    _devices: Vec<sys::ggml_backend_dev_t>,
     _pattern: Option<CString>,
-    _overrides: Box<[sys::llama_model_tensor_buft_override; 2]>,
+    _overrides: Box<[sys::llama_model_tensor_buft_override; 3]>,
+    _tensor_split: Vec<f32>,
     pub split: Split,
     pub sizes: split::Sizes,
-    /// GPU memory free and total when the plan was made, bytes.
+    /// GPU memory free and total when the plan was made, bytes, summed
+    /// over every GPU.
     pub vram: (u64, u64),
+    /// Blocks per GPU (llama.cpp's layer split; the last GPU also holds
+    /// the output layer). One entry for one GPU.
+    pub gpu_layers: Vec<usize>,
     pub opts: Options,
     eog: Vec<i32>,
     /// The callback's state; boxed so its address is stable for llama.cpp.
@@ -159,57 +176,102 @@ impl Llm {
             sys::llama_log_set(Some(log_cb), std::ptr::null_mut());
             sys::ggml_backend_load_all_from_path(dir.as_ptr());
             sys::llama_backend_init();
-            let cuda_name = CString::new("CUDA0")?;
-            let cuda = if opts.cpu {
-                std::ptr::null_mut()
-            } else {
-                sys::ggml_backend_dev_by_name(cuda_name.as_ptr())
-            };
-            if cuda.is_null() && !opts.cpu {
-                bail!("no CUDA0 device: is {} the CUDA build?", opts.backend_dir);
-            }
-            let (mut free, mut total) = (0usize, 0usize);
+            // Every CUDA device (CUDA0, CUDA1, ...; PHI_STREAM_GPUS=N keeps
+            // the first N), none with --cpu.
+            let mut gpus: Vec<sys::ggml_backend_dev_t> = Vec::new();
             if !opts.cpu {
-                sys::ggml_backend_dev_memory(cuda, &mut free, &mut total);
+                for i in 0..16 {
+                    let name = CString::new(format!("CUDA{i}"))?;
+                    let d = sys::ggml_backend_dev_by_name(name.as_ptr());
+                    if d.is_null() {
+                        break;
+                    }
+                    gpus.push(d);
+                }
+                if let Some(k) = std::env::var("PHI_STREAM_GPUS")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                {
+                    gpus.truncate(k.max(1));
+                }
+                if gpus.is_empty() {
+                    bail!("no CUDA0 device: is {} the CUDA build?", opts.backend_dir);
+                }
             }
+            let mem: Vec<(u64, u64)> = gpus
+                .iter()
+                .map(|&d| {
+                    let (mut f, mut t) = (0usize, 0usize);
+                    sys::ggml_backend_dev_memory(d, &mut f, &mut t);
+                    (f as u64, t as u64)
+                })
+                .collect();
+            let free: u64 = mem.iter().map(|m| m.0).sum();
+            let total: u64 = mem.iter().map(|m| m.1).sum();
             let kv_per_token = if opts.kv_q8 {
                 sizes.kv_per_token_f16 * 17 / 32
             } else {
                 sizes.kv_per_token_f16
             };
-            // The context's own needs: the cells, the compute buffers of a
-            // cycle, and a margin for CUDA's own allocations.
-            let reserve = kv_per_token * opts.ctx as u64
-                + 512 * (1 << 20)
-                + opts.batch as u64 * 2 * (1 << 20)
-                + 768 * (1 << 20)
-                // Every sequence slot's recurrent state (62.8 MiB each
-                // for this model), which the K and V term does not count.
-                + sizes.recurrent_per_seq * opts.n_seq as u64
+            // Each GPU's own needs: the compute buffers of a cycle and a
+            // margin for CUDA's own allocations.
+            let per_gpu = opts
+                .gpu_headroom
+                .unwrap_or(512 * (1 << 20) + opts.batch as u64 * 2 * (1 << 20) + 768 * (1 << 20));
+            // The context's: the cells, and every sequence slot's
+            // recurrent state (62.8 MiB each for the 35B), which the K and
+            // V term does not count; none of it on a GPU with --kv-host
+            // (llama.cpp keeps both caches where offload_kqv says).
+            let on_gpu_cache = if opts.kv_host { 0 } else { 1 };
+            let reserve = on_gpu_cache
+                * (kv_per_token * opts.ctx as u64 + sizes.recurrent_per_seq * opts.n_seq as u64)
+                + per_gpu * gpus.len().max(1) as u64
                 + opts.extra_reserve;
-            let budget = (free as u64).saturating_sub(reserve);
+            let budget = free.saturating_sub(reserve);
             // With --cpu no block goes to a GPU (and none is listed below).
             let want = if opts.cpu { Some(0) } else { opts.gpu_blocks };
             let plan = split::plan(&sizes, budget, want, &opts.keep_on_gpu);
+            // Which blocks each GPU holds: llama.cpp splits by layer count,
+            // so the counts are chosen to balance what each block leaves on
+            // a GPU (a block whose experts went to the host is small), in
+            // proportion to each GPU's free memory.
+            let frees: Vec<u64> = mem.iter().map(|m| m.0).collect();
+            let cache = if opts.kv_host {
+                Vec::new()
+            } else {
+                split::block_cache(&sizes, kv_per_token, opts.ctx as u64, opts.n_seq as u64)
+            };
+            let gpu_layers = split::layer_split(&sizes, &plan, &frees, &cache);
+            let mut tensor_split = vec![0f32; sys::llama_max_devices().max(1)];
+            for (i, &n) in gpu_layers.iter().enumerate().take(tensor_split.len()) {
+                tensor_split[i] = n as f32;
+            }
 
-            let mut devices = Box::new([cuda, std::ptr::null_mut()]);
+            let mut devices = gpus.clone();
+            devices.push(std::ptr::null_mut());
             let pattern = plan.pattern.as_deref().map(CString::new).transpose()?;
-            let mut overrides = Box::new([
-                sys::llama_model_tensor_buft_override {
-                    pattern: std::ptr::null(),
-                    buft: std::ptr::null_mut(),
-                },
-                sys::llama_model_tensor_buft_override {
-                    pattern: std::ptr::null(),
-                    buft: std::ptr::null_mut(),
-                },
-            ]);
+            let none = sys::llama_model_tensor_buft_override {
+                pattern: std::ptr::null(),
+                buft: std::ptr::null_mut(),
+            };
+            // The host blocks' experts, then the host-only tables (the
+            // per-layer token embeddings), then the list's end.
+            let mut overrides = Box::new([none, none, none]);
+            let mut k = 0;
             if let Some(p) = pattern.as_ref().filter(|_| !opts.cpu) {
-                overrides[0].pattern = p.as_ptr();
-                overrides[0].buft = sys::ggml_backend_cpu_buffer_type();
+                overrides[k].pattern = p.as_ptr();
+                overrides[k].buft = sys::ggml_backend_cpu_buffer_type();
+                k += 1;
+            }
+            if sizes.host_only > 0 && !opts.cpu {
+                overrides[k].pattern = HOST_ONLY.as_ptr();
+                overrides[k].buft = sys::ggml_backend_cpu_buffer_type();
             }
             let mut mp = sys::llama_model_default_params();
             mp.devices = devices.as_mut_ptr();
+            if gpus.len() > 1 {
+                mp.tensor_split = tensor_split.as_ptr();
+            }
             mp.tensor_buft_overrides = overrides.as_ptr();
             mp.n_gpu_layers = if opts.cpu { 0 } else { 999 };
             // No repacking: a repacked weight is never offered to the cards.
@@ -227,6 +289,8 @@ impl Llm {
             cp.n_threads_batch = opts.threads;
             cp.flash_attn_type = sys::llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_ENABLED;
             cp.kv_unified = opts.kv_unified;
+            cp.offload_kqv = !opts.kv_host;
+            cp.op_offload = opts.op_offload;
             let mut capture = opts.capture.clone().map(|c| Box::new(Capture::new(c)));
             if let Some(c) = capture.as_mut() {
                 cp.cb_eval = Some(eval_callback);
@@ -270,9 +334,11 @@ impl Llm {
                 _devices: devices,
                 _pattern: pattern,
                 _overrides: overrides,
+                _tensor_split: tensor_split,
                 split: plan,
                 sizes,
-                vram: (free as u64, total as u64),
+                vram: (free, total),
+                gpu_layers,
                 opts,
                 eog,
                 capture,
@@ -663,11 +729,24 @@ unsafe fn make_sampler(
             sys::llama_sampler_init_logit_bias(0, biases.len() as i32, biases.as_ptr()),
         );
     }
+    // A window of -1 is the whole trained context, resolved here: since
+    // llama.cpp a6aa6f545 (2026-08-04) the samplers clamp a negative
+    // window to 0, which turns them off, and take no context length
+    // (build.rs sets llama_samplers_v2 for that API).
+    let window = |n: i32| if n < 0 { n_ctx_train } else { n };
     if s.repeat_penalty > 1.0 && s.repeat_last_n != 0 {
-        sys::llama_sampler_chain_add(
-            chain,
-            sys::llama_sampler_init_penalties(s.repeat_last_n, s.repeat_penalty, 0.0, 0.0),
+        #[cfg(llama_samplers_v2)]
+        let penalties = sys::llama_sampler_init_penalties(
+            sys::llama_vocab_n_tokens(vocab),
+            window(s.repeat_last_n),
+            s.repeat_penalty,
+            0.0,
+            0.0,
         );
+        #[cfg(not(llama_samplers_v2))]
+        let penalties =
+            sys::llama_sampler_init_penalties(window(s.repeat_last_n), s.repeat_penalty, 0.0, 0.0);
+        sys::llama_sampler_chain_add(chain, penalties);
     }
     // Repeated sequences penalized (llama.cpp's order: after the
     // penalties, before top-k), with its usual breakers but the newline:
@@ -679,19 +758,28 @@ unsafe fn make_sampler(
             .map(|b| std::ffi::CString::new(*b).unwrap())
             .collect();
         let ptrs: Vec<*const c_char> = breakers.iter().map(|b| b.as_ptr()).collect();
-        sys::llama_sampler_chain_add(
-            chain,
-            sys::llama_sampler_init_dry(
-                vocab,
-                n_ctx_train,
-                s.dry_multiplier,
-                s.dry_base,
-                s.dry_allowed_length,
-                s.dry_last_n,
-                ptrs.as_ptr() as *mut *const c_char,
-                ptrs.len(),
-            ),
+        #[cfg(llama_samplers_v2)]
+        let dry = sys::llama_sampler_init_dry(
+            vocab,
+            s.dry_multiplier,
+            s.dry_base,
+            s.dry_allowed_length,
+            window(s.dry_last_n),
+            ptrs.as_ptr() as *mut *const c_char,
+            ptrs.len(),
         );
+        #[cfg(not(llama_samplers_v2))]
+        let dry = sys::llama_sampler_init_dry(
+            vocab,
+            n_ctx_train,
+            s.dry_multiplier,
+            s.dry_base,
+            s.dry_allowed_length,
+            s.dry_last_n,
+            ptrs.as_ptr() as *mut *const c_char,
+            ptrs.len(),
+        );
+        sys::llama_sampler_chain_add(chain, dry);
     }
     if s.top_k > 0 {
         sys::llama_sampler_chain_add(chain, sys::llama_sampler_init_top_k(s.top_k));

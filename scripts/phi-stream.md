@@ -16,9 +16,21 @@ scripts/phi-stream.sh serve ...               # the service in the foreground
 `start`, `serve`, `probe`, `gate`, `run` and `lens` go through the cards when the
 co-processor repository is found (`avx512.md`): that repository's
 `scripts/phi-ggml.sh` starts a worker on every card that is up and names
-`libggml_phi.so` to ggml through `GGML_BACKEND_PATH`; `PHI_GGML_OFFLOAD=1`
-is set unless the caller sets it, so the cards' rows leave host memory
-after the upload. Without it, the binary runs on the GPU and the host.
+`libggml_phi.so` to ggml through `GGML_BACKEND_PATH`. Since 2026-10-06 (the
+four-card rack, 251 GB of host memory) the host keeps its copy of the
+cards' rows (`PHI_GGML_OFFLOAD=0` unless the caller sets it) and the
+cards' work is chosen by `PHI_GGML_PP_ONLY`: with no placement file the
+cards take the prompts alone and the GPUs and the host generate
+(`PHI_GGML_PP_ONLY=1`; measured on Flash-Next Q6_K_XL, twice
+interleaved: prompts 88.0 against 85.6 tok/s, generation 7.9 against
+7.6); with `PHI_GGML_EXPERTS=<placement file>` (the experts a routing
+calibration found most used, `tools/expert-placement.c` there) the
+cards hold those experts whole and work at the generation steps beside
+the host (`PHI_GGML_PP_ONLY=0`) while the prompts go to the GPUs through
+llama.cpp's op offload (the stream's default; `--no-op-offload` sends
+them to the host and the cards instead). `PHI_GGML_OFFLOAD=1` is for a
+host short of memory: the cards' rows leave host memory after the
+upload. Without the repository, the binary runs on the GPUs and the host.
 The tmux session runs this script's own `serve`, so the cards are found
 the same way; `tmux attach -t phi-stream` shows the service's log. Every
 other verb is a client and passes through to the binary (`src/main.md`),

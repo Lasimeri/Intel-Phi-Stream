@@ -91,6 +91,18 @@ struct ModelArgs {
     /// K and V in 8-bit blocks (half the cells' bytes).
     #[arg(global = true, long)]
     kv_q8: bool,
+    /// The KV cache (and the attention over it) in host memory, not on the
+    /// GPUs: a longer context, and the GPUs' memory for weights.
+    #[arg(global = true, long)]
+    kv_host: bool,
+    /// A batch over host weights computed where they are (the host and the
+    /// cards: the prompts on the cards), not copied to a GPU per batch.
+    #[arg(global = true, long)]
+    no_op_offload: bool,
+    /// Each GPU's room for llama.cpp's working buffers (the compute buffers
+    /// and the pool), GiB; default: 1.25 plus 2 MiB per batch token.
+    #[arg(global = true, long)]
+    gpu_headroom: Option<f64>,
     /// No GPU: the model on the host and the cards, leaving the GPU to another
     /// model (a second instance, src/llm.md).
     #[arg(global = true, long)]
@@ -680,6 +692,9 @@ fn load_with(m: &ModelArgs, capture: Option<capture::CaptureConfig>, extra: u64)
             Vec::new()
         },
         kv_q8: m.kv_q8,
+        kv_host: m.kv_host,
+        op_offload: !m.no_op_offload,
+        gpu_headroom: m.gpu_headroom.map(|g| (g * (1u64 << 30) as f64) as u64),
         cpu: m.cpu,
         n_seq: m.n_seq,
         kv_unified: !m.kv_split,
@@ -776,7 +791,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
 
 fn info_line(llm: &Llm, cfg: &Config) -> String {
     format!(
-        "info model={} gpu_blocks={} n_blocks={} gpu_gib={:.2} host_gib={:.2} n_ctx={} frame={} workspace={} started={}",
+        "info model={} gpu_blocks={} n_blocks={} gpu_gib={:.2} host_gib={:.2} gpu_split={} n_ctx={} frame={} workspace={} started={}",
         escape(
             &std::path::Path::new(&llm.opts.model)
                 .file_stem()
@@ -787,6 +802,11 @@ fn info_line(llm: &Llm, cfg: &Config) -> String {
         llm.split.n_blocks,
         split::gib(llm.split.gpu_bytes),
         split::gib(llm.split.host_bytes),
+        llm.gpu_layers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("+"),
         llm.n_ctx(),
         if cfg.agent { "agent" } else { cfg.frame.name() },
         escape(&cfg.workspace.display().to_string()),

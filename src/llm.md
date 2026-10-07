@@ -7,14 +7,28 @@ One model split three ways and one context over llama.cpp's C API.
   build, then `GGML_BACKEND_PATH`, the cards' `libggml_phi.so`), asks the
   CUDA device its free memory, plans the split (`split.rs`: the budget is
   the free memory less the cells' K and V, every sequence slot's
-  recurrent state, the cycle's compute buffers and a margin), loads the model with the device list `{CUDA0}` and the one
-  tensor override, repacking off (a repacked weight is never offered to
-  the cards), and makes the context: a unified KV cache (`kv_unified`, so
-  a range of one sequence's cells is given to another by metadata alone),
-  `n_seq` sequences, flash attention on, K and V float16 or 8-bit
-  (`--kv-q8`), no recurrent snapshots (`n_rs_seq 0`), `batch` tokens a
-  cycle. The device list and the override are kept in the struct: the
-  model keeps the pointers.
+  recurrent state, the cycle's compute buffers and a margin), loads the
+  model with the device list of every CUDA device (`CUDA0`, `CUDA1`, ...;
+  `PHI_STREAM_GPUS=N` keeps the first N; the budget is their free memory
+  summed, the margin counted once per GPU, or `--gpu-headroom GIB` each)
+  and up to two tensor overrides (the host blocks' experts; the host-only
+  tables, `split.md`), the blocks shared out by `tensor_split` from
+  `split::layer_split` when there is more than one GPU, repacking off (a
+  repacked weight is never offered to the cards), and makes the context:
+  a unified KV cache (`kv_unified`, so a range of one sequence's cells is
+  given to another by metadata alone), `n_seq` sequences, flash attention
+  on, K and V float16 or 8-bit (`--kv-q8`), on the GPUs or in host memory
+  (`--kv-host`: llama.cpp's `offload_kqv` off, nothing of the cache
+  reserved on a GPU, a longer context), a batch over host weights copied
+  to a GPU or computed where the weights are (`--no-op-offload`: the
+  cards' backend then takes the prompts), no recurrent snapshots
+  (`n_rs_seq 0`), `batch` tokens a cycle. The device list, the overrides
+  and the split are kept in the struct: the model keeps the pointers.
+- `make_sampler` follows the llama.cpp it is built against: since
+  a6aa6f545 (2026-08-04) the penalties sampler takes the vocabulary size,
+  DRY takes no context length, and a negative window turns a sampler
+  off, so `-1` is resolved to the trained context here; `build.rs` sets
+  `llama_samplers_v2` from the header, and both forms are kept.
 - `decode` runs one `llama_decode` over lanes: each lane is one sequence's
   tokens at their positions, the last one's logits kept on request. A
   cycle of the engine is one live token (its sequence) and a chunk of a

@@ -37,6 +37,17 @@ fn main() {
     if !Path::new(&lib).join("libllama.so").is_file() {
         panic!("phi-stream needs a built llama.cpp: no libllama.so in {lib} (set PHI_STREAM_LLAMA_BUILD_DIR, or build llama.cpp with shared libraries)");
     }
+    // The sampler API this llama.cpp declares: since a6aa6f545 (2026-08-04)
+    // the history samplers take no context length (DRY) and the vocabulary
+    // size (penalties). Both forms are supported; the header decides.
+    println!("cargo::rustc-check-cfg=cfg(llama_samplers_v2)");
+    let text = std::fs::read_to_string(&header).unwrap_or_default();
+    if let Some(at) = text.find("llama_sampler_init_penalties(") {
+        let decl = &text[at..text[at..].find(';').map_or(text.len(), |e| at + e)];
+        if decl.contains("n_vocab") {
+            println!("cargo:rustc-cfg=llama_samplers_v2");
+        }
+    }
     let bindings = bindgen::Builder::default()
         .header_contents(
             "wrapper.h",

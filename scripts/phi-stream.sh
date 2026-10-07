@@ -44,7 +44,22 @@ launch() {
     # PHI_STREAM_CARDS=0: this instance leaves the cards alone (one process
     # holds them; a second model runs on the GPU and the host).
     if [ -n "${PHI_AVX512_ROOT:-}" ] && [ "${PHI_STREAM_CARDS:-1}" != 0 ]; then
-        export PHI_GGML_OFFLOAD="${PHI_GGML_OFFLOAD:-1}"
+        # The cards take the prompts (a multiply of more than one token),
+        # the GPUs and the host the generation (measured 2026-10-06 on the
+        # rack, Flash-Next Q6_K_XL, interleaved: prompts 88.0 against 85.6
+        # tok/s, generation 7.9 against 7.6). That needs the host's own copy
+        # of the cards' rows, so the offload is off unless asked for
+        # (PHI_GGML_OFFLOAD=1 PHI_GGML_PP_ONLY=0: a host short of memory).
+        export PHI_GGML_OFFLOAD="${PHI_GGML_OFFLOAD:-0}"
+        # With a placement file (PHI_GGML_EXPERTS, the cards holding the
+        # experts a calibration found most used), the cards work at the
+        # generation steps instead, beside the host, and the prompts go to
+        # the GPUs through llama.cpp's op offload (the stream's default).
+        if [ -n "${PHI_GGML_EXPERTS:-}" ]; then
+            export PHI_GGML_PP_ONLY="${PHI_GGML_PP_ONLY:-0}"
+        else
+            export PHI_GGML_PP_ONLY="${PHI_GGML_PP_ONLY:-1}"
+        fi
         exec "$PHI_AVX512_ROOT/scripts/phi-ggml.sh" "$bin" "$@"
     fi
     echo "$0: Intel-Phi-AVX512 not found; running on the GPU and the host alone (scripts/avx512.md)" >&2
@@ -131,7 +146,7 @@ for a in "$@"; do
         continue
     fi
     case "$a" in
-        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|-t|--threads|--n-seq|--temp|--top-k|--top-p|--min-p|--dry-multiplier|--dry-base|--dry-allowed-length|--dry-last-n|--seed|--repeat-penalty|--repeat-last-n|--socket) skip=1 ;;
+        -m|--model|--backend-dir|-c|--ctx|--batch|--gpu-blocks|--gpu-headroom|-t|--threads|--n-seq|--temp|--top-k|--top-p|--min-p|--dry-multiplier|--dry-base|--dry-allowed-length|--dry-last-n|--seed|--repeat-penalty|--repeat-last-n|--socket) skip=1 ;;
         -*) ;;
         *) sub=$a; break ;;
     esac

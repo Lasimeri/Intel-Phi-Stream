@@ -31,3 +31,33 @@ memory, never from a table.
 Everything the GPU holds for the blocks it does not keep experts of is
 the small part (31 MiB a block): the split moves the experts only, which
 are 95 percent of the file.
+
+Added 2026-10-06 for Qwen3.8 Flash Next (`qwen4exp`, 48 blocks, 512
+experts a block, 157 GiB at UD-Q6_K_XL) on the four-GPU rack:
+
+- A model in several files (`split.count` in the header, a u16 from
+  llama.cpp's gguf-split) keeps its header in the first and its tensors
+  spread over all of them: `sizes` reads every file's table
+  (`shard_paths`, through `llama_split_prefix` and `llama_split_path`;
+  `tally` adds one file's tensors). The first part must be the one
+  named; the Q6_K_XL's part 1 holds no tensor at all.
+- `host_only`: tensors kept in host memory whatever the plan, today the
+  per-layer token embeddings (`per_layer_token_embd`, 50.7 GiB in that
+  model, a lookup table read a row per token). `llm.rs` names them to
+  llama.cpp by a second override, so they stay memory-mapped on disk and
+  are never counted against a GPU.
+- `cache_kind` says per block whether it keeps K and V (1), a recurrent
+  state (2) or nothing (0, an extra prediction block); `block_cache`
+  turns that into each block's cache bytes for the context's cells and
+  sequences, since llama.cpp allocates a block's cache on the GPU that
+  holds the block.
+- `layer_split` chooses how many blocks each GPU takes for llama.cpp's
+  layer split (`tensor_split` given as counts): what each block leaves
+  on a GPU (all of it when its experts stay, else all but its experts)
+  plus its cache is laid end to end and cut in proportion to each GPU's
+  free memory; a block goes to the GPU its middle falls in; the output
+  layer, which llama.cpp places after the last block, is counted on the
+  last GPU. One GPU takes every block. Without the cache term the last
+  GPU, which held the most expert blocks and all the attention blocks'
+  K and V, ran out of memory at the first cycle (296 MiB short, the rack,
+  2026-10-06).
