@@ -191,7 +191,17 @@ case "$sub" in
         # stacks, without loosening every program the tmux server runs).
         pre=""
         [ -n "${PHI_STREAM_PRELOAD:-}" ] && pre="LD_PRELOAD=$(printf '%q' "$PHI_STREAM_PRELOAD")"
-        cmd="env $pre PHI_STREAM_BIN=$(printf '%q' "$bin") $(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
+        # So do the placement and backend settings of this shell (PHI_STREAM_*
+        # and PHI_GGML_*: on the GPU rack, PHI_STREAM_BUILD_CPUS and the
+        # like), each quoted.
+        fwd=""
+        for k in $(compgen -e); do
+            case "$k" in
+                PHI_STREAM_BIN | PHI_STREAM_PRELOAD) ;;
+                PHI_STREAM_* | PHI_GGML_*) fwd="$fwd $k=$(printf '%q' "${!k}")" ;;
+            esac
+        done
+        cmd="env $pre$fwd PHI_STREAM_BIN=$(printf '%q' "$bin") $(printf '%q ' "$here/phi-stream.sh" serve "${args[@]}") 2>&1 | tee -a $(printf '%q' "$log")"
         tmux new-session -d -s "$session" "$cmd"
         echo "started the service in tmux session $session; log: $log (and tmux attach -t $session); the terminal: $0 attach"
         # The window: on the desktop whenever the model is loaded and

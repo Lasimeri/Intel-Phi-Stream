@@ -127,3 +127,22 @@ the GPU rack's Flash Next:
 (`dev` adds `--mind --reflect --second-chain`; the binary turns them off
 for a remote model and says so.) The vocabulary comes first, once:
 `PHI_STREAM_REMOTE_SSH="rack sh" scripts/remote-vocab.sh http://192.168.0.39:8001`.
+
+## On the GPU rack
+
+`start` passes every `PHI_STREAM_*` and `PHI_GGML_*` variable of the
+calling shell into the tmux session (which otherwise takes the tmux
+server's environment). The development service runs on the rack beside
+llama.phi's server, its model, with the build sandbox and the terminal
+on cores the server does not use (measured placement:
+`docs/results/` of 2026-10-07; the server's threads on three cores of
+each of the 16 L3 groups, the card daemons on 51, 55, 59, 63):
+
+    cd "/mnt/raid5/phi/Intel Phi Stream"
+    PHI_STREAM_WINDOW=0 PHI_STREAM_BUILD_CPUS=3,7,11,15,19,23,27,31 PHI_STREAM_BUILD_JOBS=8 PHI_STREAM_TERM_CPU=35 \
+        scripts/phi-stream.sh dev --remote http://127.0.0.1:8001 --frame agent --improve --temp 0.5 --top-p 0.95 --min-p 0.05
+
+The vocabulary there is the model's own first file (its metadata):
+`~/.local/share/phi-stream/remote/STEM.vocab.gguf` a link to it. Its
+terminal on the desktop: a Konsole running `rack -t` with
+`scripts/phi-stream.sh attach --follow` in the rack's checkout.
