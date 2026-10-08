@@ -43,3 +43,8 @@ Tests: a status line parses; a camera going stale is offline once (and
 not again on the next polls); coming back is online; a face, motion and
 dark are told when they start and not while they last; a face counts over
 the last five seconds of the log.
+
+With the service on another machine than the trackers (the harness on
+the GPU rack, the cameras on the desktop), the feeds folder is kept there
+by [`tools/feed-relay.md`](../tools/feed-relay.md)
+(`scripts/feed-relay.sh install` on the trackers' machine).
