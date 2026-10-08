@@ -90,7 +90,9 @@ running() { [ -n "$("$bin" status 2> /dev/null || true)" ]; }
 # The service process listening on this instance's socket, however it was
 # started (in tmux by `start`, or outside it by a watchdog or a login).
 sock=${PHI_STREAM_SOCKET:-$rt/phi-stream.sock}
-serve_pid() { ss -xlpn 2> /dev/null | grep -F " $sock " | grep -oP 'pid=\K[0-9]+' | head -n 1; }
+# no service: an empty answer, not a failed pipeline (set -e and pipefail
+# ended `doctor` silently at its first check of a stopped service)
+serve_pid() { ss -xlpn 2> /dev/null | grep -F " $sock " | grep -oP 'pid=\K[0-9]+' | head -n 1 || true; }
 # The service asked to quit (it writes its summary first, src/engine.md)
 # and waited for: its process gone and its tmux session ended, as long as
 # it answers (it bounds its own wait, src/engine.md). Waiting on the tmux session alone, a restart
