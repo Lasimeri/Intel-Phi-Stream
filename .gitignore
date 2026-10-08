@@ -8,3 +8,6 @@
 *.swp
 .DS_Store
 /tools/*/target/
+
+# This machine's settings (scripts/conf.md)
+/phi-stream.local.conf

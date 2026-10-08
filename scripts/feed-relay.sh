@@ -8,16 +8,19 @@
 #   scripts/feed-relay.sh status    # the unit, and each feed's age on both sides
 #
 # PHI_STREAM_FEEDS_HOST: a command that runs one command on the service's
-# machine with stdin passed through ("ssh HOST"; the rack: "env RACK_NOMUX=1
-# $HOME/.local/bin/rack"). PHI_STREAM_FEEDS_DIR: the checkout there (default
-# the same path as here). PHI_STREAM_FEEDS_FROM and PHI_STREAM_FEEDS_TO: the
+# machine with stdin passed through (default PHI_STREAM_HOST, conf.md).
+# PHI_STREAM_FEEDS_DIR: the checkout there (default PHI_STREAM_HOST_DIR, else the same path as here).
+# PHI_STREAM_FEEDS_FROM and PHI_STREAM_FEEDS_TO: the
 # feeds folders, here and there (there relative to its home), both by default
 # the dev workspace's .local/share/phi-stream/dev/feeds.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
-host=${PHI_STREAM_FEEDS_HOST:-}
-rdir=${PHI_STREAM_FEEDS_DIR:-$root}
+. "$here/conf.sh"
+phi_stream_conf "$root"
+# The service's machine as phi-stream.sh reaches it, unless set apart.
+host=${PHI_STREAM_FEEDS_HOST:-${PHI_STREAM_HOST:-}}
+rdir=${PHI_STREAM_FEEDS_DIR:-${PHI_STREAM_HOST_DIR:-$root}}
 from=${PHI_STREAM_FEEDS_FROM:-$HOME/.local/share/phi-stream/dev/feeds}
 to=${PHI_STREAM_FEEDS_TO:-.local/share/phi-stream/dev/feeds}
 unit=phi-stream-feeds.service

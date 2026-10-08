@@ -2,22 +2,21 @@
 
 The feeds written on this machine kept in the workspace of the service on
 another ([`tools/feed-relay.md`](../tools/feed-relay.md)): on the desktop,
-for the harness on the GPU rack.
+for the harness on the GPU rack. The far machine comes from this machine's
+`phi-stream.local.conf` ([`conf.md`](conf.md)), as for `phi-stream.sh`.
 
 ```sh
-export PHI_STREAM_FEEDS_HOST="env RACK_NOMUX=1 $HOME/.local/bin/rack"
-export PHI_STREAM_FEEDS_DIR="/mnt/raid5/phi/Intel Phi Stream"
 scripts/feed-relay.sh install   # a user unit (phi-stream-feeds) that keeps it running, started now
 scripts/feed-relay.sh status    # the unit, and each feed's age here and there
 scripts/feed-relay.sh run       # the relay in the foreground (what the unit runs)
 scripts/feed-relay.sh remove    # the unit stopped and removed
 ```
 
-- `PHI_STREAM_FEEDS_HOST`: a command that runs one command on the
+- `PHI_STREAM_FEEDS_HOST` (default `PHI_STREAM_HOST`, [`conf.md`](conf.md)): a command that runs one command on the
   service's machine with stdin passed through (`ssh HOST`). The rack's
   wrapper with `RACK_NOMUX=1` gives the relay a connection of its own, so
   restarting the shared one does not cut it.
-- `PHI_STREAM_FEEDS_DIR`: the checkout there (default: the same path as
+- `PHI_STREAM_FEEDS_DIR`: the checkout there (default `PHI_STREAM_HOST_DIR`, else the same path as
   here); its `tools/feed-relay.c` is the receiving half.
 - `PHI_STREAM_FEEDS_FROM`, `PHI_STREAM_FEEDS_TO`: the folders, here and
   there (there relative to its home); by default both are the dev

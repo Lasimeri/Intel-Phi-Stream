@@ -21,6 +21,10 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
+# This machine's settings (conf.md): the environment, then
+# phi-stream.local.conf, then the tracked defaults in phi-stream.conf.
+. "$here/conf.sh"
+phi_stream_conf "$root"
 # PHI_STREAM_BIN names another build (a measurement pinned to a frozen
 # binary while the tree is rebuilt).
 bin="${PHI_STREAM_BIN:-$root/target/release/phi-stream}"
@@ -36,8 +40,6 @@ fi
 if [ -n "${PHI_STREAM_CARD:-}" ]; then
     export PHI_GGML_CARDS="$PHI_STREAM_CARD"
 fi
-[ -x "$bin" ] || { echo "$0: $bin not built; run make build" >&2; exit 1; }
-. "$here/avx512.sh"
 
 # The binary, with the cards when the co-processor repository is found.
 launch() {
@@ -162,6 +164,29 @@ for a in "$@"; do
         *) sub=$a; break ;;
     esac
 done
+
+# The service on another machine (PHI_STREAM_HOST, conf.md): with no
+# service answering here, every verb runs there, in its checkout, with a
+# terminal when this one has one (attach, a TUI); `window` opens its window
+# here, running this script's `attach --follow`, which comes back here and
+# goes there. `doctor` checks this side first, then goes there too.
+if [ -n "${PHI_STREAM_HOST:-}" ] && [ ! -S "$sock" ] && [ "$sub" != window ] && [ "$sub" != doctor ]; then
+    remote_cmd="cd $(phi_stream_q "${PHI_STREAM_HOST_DIR:-$root}") && scripts/phi-stream.sh"
+    for a in "$@"; do
+        remote_cmd+=" $(phi_stream_q "$a")"
+    done
+    if [ -t 0 ] && [ -t 1 ] && [ -n "${PHI_STREAM_HOST_TTY:-}" ]; then
+        # shellcheck disable=SC2086 # the host command is words by design
+        exec $PHI_STREAM_HOST_TTY "$remote_cmd"
+    fi
+    # shellcheck disable=SC2086
+    exec $PHI_STREAM_HOST "$remote_cmd"
+fi
+
+if [ "$sub" != window ] && [ "$sub" != doctor ]; then
+    [ -x "$bin" ] || { echo "$0: $bin not built; run make build" >&2; exit 1; }
+fi
+. "$here/avx512.sh"
 
 case "$sub" in
     start)
@@ -326,6 +351,11 @@ case "$sub" in
             fi
             rest+=("$a")
         done
+        # No options given: this machine's (PHI_STREAM_DEV_ARGS, conf.md;
+        # words, none holding a space).
+        if [ "${#rest[@]}" = 0 ] && [ -n "${PHI_STREAM_DEV_ARGS:-}" ]; then
+            read -r -a rest <<< "$PHI_STREAM_DEV_ARGS"
+        fi
         exec "$0" start --dev "$root" --mind --reflect --terminal --rollover-tokens 150000 --second-chain \
             --workspace "${PHI_STREAM_DEV_WORKSPACE:-$HOME/.local/share/phi-stream/dev$suffix}" "${rest[@]}"
         ;;
@@ -353,11 +383,113 @@ case "$sub" in
             sleep 1
         done
         ;;
+    doctor)
+        # What stands between this machine and a working service, one line
+        # each: ok, or what is wrong and the fix. Exit 0 when nothing is.
+        # The side that shows a service elsewhere (PHI_STREAM_HOST) checks
+        # its own part, then runs the same verb there.
+        bad=0
+        ok() { printf '  ok    %s\n' "$1"; }
+        no() { printf '  FIX   %s\n        -> %s\n' "$1" "$2"; bad=1; }
+        if [ -n "${PHI_STREAM_HOST:-}" ] && [ ! -S "$sock" ]; then
+            echo "this machine ($(hostname)), showing the service on PHI_STREAM_HOST:"
+            if systemctl --user is-active --quiet phi-stream-feeds.service 2> /dev/null; then
+                ok "the feed relay runs (phi-stream-feeds)"
+            elif [ -d "$HOME/.local/share/phi-stream/dev/feeds" ]; then
+                no "feeds are written here but not relayed" "scripts/feed-relay.sh install (feed-relay.md)"
+            else
+                ok "no feeds written here"
+            fi
+            if command -v claude > /dev/null; then
+                reg=$(claude mcp get phi-stream 2> /dev/null || true)
+                if grep -q 'phi-stream-mcp.sh' <<< "$reg" && grep -q 'PHI_STREAM_MCP_HOST' <<< "$reg"; then
+                    ok "Claude Code reaches the management interface there (phi-stream-mcp.sh)"
+                else
+                    no "Claude Code's phi-stream MCP server is not the remote launcher" \
+                        "claude mcp add --scope user phi-stream -e PHI_STREAM_MCP_HOST=\"\$PHI_STREAM_HOST\" -e PHI_STREAM_MCP_DIR=\"\$PHI_STREAM_HOST_DIR\" -- \"$here/phi-stream-mcp.sh\" (phi-stream-mcp.md); a session started before needs /mcp"
+                fi
+            fi
+            rcmd="cd $(phi_stream_q "${PHI_STREAM_HOST_DIR:-$root}") && scripts/phi-stream.sh doctor"
+            # shellcheck disable=SC2086
+            if $PHI_STREAM_HOST "$rcmd"; then
+                exit "$bad"
+            fi
+            exit 1
+        fi
+        echo "the service's machine ($(hostname)):"
+        if [ ! -x "$bin" ]; then
+            no "not built" "make build"
+        else
+            newest=$( { find "$root/src" -name "*.rs" -newer "$bin"; find "$root/build.rs" "$root/Cargo.toml" "$root/Cargo.lock" -newer "$bin"; } 2> /dev/null | head -n 1)
+            if [ -n "$newest" ]; then
+                no "the binary is older than ${newest#"$root"/}" "make build (make check before a commit)"
+            else
+                ok "built: $bin"
+            fi
+        fi
+        pid=$(serve_pid)
+        line=$("$bin" status 2> /dev/null | head -n 1 || true)
+        if [ -z "$pid" ]; then
+            no "no service on $sock" "scripts/phi-stream.sh dev (PHI_STREAM_DEV_ARGS: ${PHI_STREAM_DEV_ARGS:-none})"
+        else
+            ok "the service answers (pid $pid): ${line:-loading}"
+            exe=$(readlink "/proc/$pid/exe" 2> /dev/null || true)
+            if [[ "$exe" == *" (deleted)" ]] || { [ -n "$exe" ] && [ "$(stat -Lc %i "$exe" 2> /dev/null)" != "$(stat -Lc %i "$bin" 2> /dev/null)" ]; }; then
+                no "the service runs a binary from before the last build" "scripts/phi-stream.sh restart (keeps the window; a summary first)"
+            else
+                ok "the service runs the current build"
+            fi
+            args=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null || true)
+            url=$(grep -oP -- '--remote[ =]\Khttp\S+' <<< "$args" || true)
+            if [ -n "$url" ]; then
+                if curl -sf -m 5 "$url/health" > /dev/null; then
+                    ok "its model server answers: $url"
+                    model=$(curl -sf -m 5 "$url/props" | jq -r '.model_path // empty' 2> /dev/null || true)
+                    slots=$(curl -sf -m 5 "$url/slots" | jq 'length' 2> /dev/null || echo 0)
+                    want=$(grep -oP -- '--remote-slot[ =]\K[0-9]+' <<< "$args" || echo 1)
+                    if [ "${slots:-0}" -gt "$want" ]; then
+                        ok "the server has $slots slots; the stream holds slot $want"
+                    else
+                        no "the server has ${slots:-0} slots, the stream asks for slot $want" "start the server with -np $((want + 1)) or more"
+                    fi
+                    if [ -n "$model" ]; then
+                        stem=$(basename "$model" .gguf)
+                        voc="$HOME/.local/share/phi-stream/remote/$stem.vocab.gguf"
+                        if [ -e "$voc" ]; then
+                            ok "vocabulary for $stem"
+                        else
+                            no "no vocabulary file for the served $stem" "scripts/remote-vocab.sh $url (remote-vocab.md)"
+                        fi
+                    fi
+                else
+                    no "its model server does not answer: $url" "start it (the rack: llama.phi scripts/phi-serve.sh)"
+                fi
+            fi
+            ws=$(grep -oP -- '--workspace[ =]\K\S+' <<< "$args" || true)
+            if [ -n "$ws" ] && [ -d "$ws/feeds" ]; then
+                now=$(date +%s%6N)
+                newest=0
+                for f in "$ws"/feeds/*.status; do
+                    [ -e "$f" ] || continue
+                    t=$(grep -oP '^t=\K[0-9]+' "$f" 2> /dev/null || echo 0)
+                    [ "$t" -gt "$newest" ] && newest=$t
+                done
+                age=$(((now - newest) / 1000000))
+                if [ "$newest" -gt 0 ] && [ "$age" -le 15 ]; then
+                    ok "feeds fresh (newest ${age} s old)"
+                else
+                    no "no feed newer than 15 s in $ws/feeds" "on the machine with the cameras and microphones: scripts/feed-relay.sh install"
+                fi
+            fi
+        fi
+        [ "$bad" = 0 ] && echo "nothing to fix"
+        exit "$bad"
+        ;;
     serve|probe|gate|run|lens|code)
         launch "$@"
         ;;
     "")
-        echo "usage: $0 start|dev|restart|accept|stop|attach|window|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
+        echo "usage: $0 start|dev|restart|accept|stop|attach|window|doctor|say|feed|tail|status|persona|chunk|temp|pause|resume|quit|serve|probe|gate|run|lens|code ..." >&2
         exit 2
         ;;
     *)

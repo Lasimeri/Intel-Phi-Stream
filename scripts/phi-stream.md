@@ -11,6 +11,7 @@ scripts/phi-stream.sh say "hello"             # and feed, tail, status, persona,
 scripts/phi-stream.sh stop                    # quit the service, end the session, close the window
 scripts/phi-stream.sh probe | gate | run | lens ...  # the subcommands that own the model, without a service
 scripts/phi-stream.sh serve ...               # the service in the foreground
+scripts/phi-stream.sh doctor                  # what stands between this machine and a working service, and the fix for each
 ```
 
 `start`, `serve`, `probe`, `gate`, `run` and `lens` go through the cards when the
@@ -146,3 +147,33 @@ The vocabulary there is the model's own first file (its metadata):
 `~/.local/share/phi-stream/remote/STEM.vocab.gguf` a link to it. Its
 terminal on the desktop: a Konsole running `rack -t` with
 `scripts/phi-stream.sh attach --follow` in the rack's checkout.
+
+## Settings, another machine, the doctor
+
+The settings come from the environment, then `phi-stream.local.conf` in
+the checkout (this machine's own, not tracked), then the tracked defaults
+in [`phi-stream.conf`](../phi-stream.conf) ([`conf.md`](conf.md)).
+`dev` with no options after it adds `PHI_STREAM_DEV_ARGS` (the GPU rack:
+`--remote http://127.0.0.1:8001 --frame agent --improve` and its
+sampling), so `restart` alone brings the harness back as it was.
+
+With `PHI_STREAM_HOST` set (a command that runs one command on the
+service's machine, `PHI_STREAM_HOST_TTY` the same with a terminal,
+`PHI_STREAM_HOST_DIR` the checkout there) and no service answering on
+this machine's socket, every verb runs there in that checkout: on the
+desktop, `status`, `say`, `ask`, `tail`, `listen`, `objective`, `chain`,
+`restart`, `stop`, `attach` (with a terminal) all reach the harness on
+the rack. `window` opens the window here, running `attach --follow`,
+which goes there. The management interface for an agent does the same
+through [`phi-stream-mcp.sh`](phi-stream-mcp.md), and the feeds written
+here reach the workspace there through [`feed-relay.sh`](feed-relay.md).
+
+`doctor` prints one line per check, `ok` or what is wrong and the fix,
+and exits 0 when nothing is. On the service's machine: the binary built
+and newer than the sources, a service on the socket and its status, the
+service running the current build (else `restart`), and for a remote
+model its server's `/health`, enough slots for the stream's pinned slot,
+the vocabulary file for the served model, and a feed fresher than 15 s in
+the workspace. On a machine with `PHI_STREAM_HOST`: the feed relay's unit
+and Claude Code's `phi-stream` MCP registration (the remote launcher),
+then the same verb there.
