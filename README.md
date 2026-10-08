@@ -194,6 +194,7 @@ exact to the kernels' rounding ([`src/gate.md`](src/gate.md)).
 | `scripts/fetch-lens.sh` | the lens and the evaluation sets, pinned, checksummed, converted |
 | `src/code.rs`, `scripts/fetch-code-eval.sh`, `tools/parquet-jsonl` | whether it writes working code: MultiPL-E's HumanEval in Rust, fetched pinned, compiled and tested in a sandbox |
 | `scripts/phi-stream.sh` | the launcher: the service in tmux, the terminal, the clients; with the cards when the co-processor repository is found |
+| `scripts/phi-stream-mcp.sh` | the management interface for Claude Code wherever the service runs: here, or beside it on another machine (the rack) over ssh |
 | `docs/results/` | measurements, with their commands |
 
 ## The repositories

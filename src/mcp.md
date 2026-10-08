@@ -25,7 +25,10 @@ develops for the interface it also sees.
 
 - Register it once: `claude mcp add --scope user phi-stream --
   "<checkout>/target/release/phi-stream" mcp`. A session started before
-  the registration sees it after `/mcp` reconnects.
+  the registration sees it after `/mcp` reconnects. With the service on
+  another machine (the rack), register `scripts/phi-stream-mcp.sh` instead
+  (`scripts/phi-stream-mcp.md`): the interface then runs beside the service
+  over ssh, so its socket, its workspace and its tmux session are local to it.
 - The protocol version answered is the client's own when it is one of
   2025-06-18, 2025-03-26, 2024-11-05, else the newest; notifications get no
   answer; an unknown method is `-32601`; a tool's failure is a result with
