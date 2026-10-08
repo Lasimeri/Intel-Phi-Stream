@@ -64,8 +64,14 @@ past 150 thousand cells) and `--second-chain`: measured in the agent frame
 (2026-10-02, two interleaved pairs of 5 minutes) it cut the repeated
 8-grams from 19.8 to 11.3 percent for 13 percent of the stream's rate.
 `phi-stream chain off` (or `/chain off` in the terminal) turns it off live.
-`stop` waits up to two minutes (`PHI_STREAM_QUIT_WAIT` seconds, read by the service too) for the service to write its summary and
-end (`src/engine.md`) before it ends the session; it waits for the
+`stop` waits for the service to write its summary and end
+(`src/engine.md`) before it ends the session, as long as the service
+answers: the service bounds its own wait (`PHI_STREAM_QUIT_WAIT` seconds,
+default 120, in which its summary gains no token), and the script ends one
+that stops answering for 30 s or is still there after
+`PHI_STREAM_QUIT_HARD` seconds (default 3600), saying each minute what it
+waits on (a fixed two minutes, then 480 s, cut off a summary on the rack on
+2026-10-08 while its remote server re-read 99k tokens for twelve minutes); it waits for the
 process listening on the socket (`quit_and_wait`), not only the tmux
 session, so a service started outside tmux (by a watchdog, at a login) is
 stopped too, and killed past the two minutes (a restart had started the

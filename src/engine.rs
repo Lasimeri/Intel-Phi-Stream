@@ -866,8 +866,11 @@ pub struct Engine {
     base_ban: Vec<i32>,
     speak_ban: Vec<i32>,
     /// `quit` asked: the summary is being written, then it stops (by this
-    /// monotonic deadline at the latest); `stop_now` ends the loop.
+    /// monotonic deadline at the latest, moved on by every token the live
+    /// sequence gains: `quit_len`); `stop_now` ends the loop.
     quit_deadline: Option<i64>,
+    /// The live sequence's length when the quit deadline was last moved.
+    quit_len: usize,
     stop_now: bool,
     /// What changed in the program since it last ran (`changes_since`).
     changed_since: String,
@@ -986,7 +989,7 @@ pub struct Engine {
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
-/// The longest a quit waits for its summary (microseconds), or
+/// How long a quit waits for its summary to gain a token (microseconds), or
 /// `PHI_STREAM_QUIT_WAIT` seconds (a slower model: the rack's Flash Next at
 /// 7 tokens a second closes a turn and writes a summary of up to 1024
 /// tokens in more than two minutes; the launcher waits as long).
@@ -1407,6 +1410,7 @@ impl Engine {
             base_ban,
             speak_ban,
             quit_deadline: None,
+            quit_len: 0,
             stop_now: false,
             changed_since,
             chain_on,
@@ -6416,6 +6420,7 @@ impl Engine {
                     return false;
                 }
                 self.quit_deadline = Some(clock::mono_us() + quit_wait_us());
+                self.quit_len = self.history.len();
                 self.note("quitting: writing the summary first".into());
             }
         }
@@ -6591,7 +6596,16 @@ impl Engine {
                 return Ok(self.finish());
             }
             self.release();
-            // Quitting: once the summary is kept, or past the deadline.
+            // Quitting: once the summary is kept, or past the deadline,
+            // which every token gained moves on: the wait is for a stall,
+            // not for the whole summary. A remote server re-reading a long
+            // context before the summary's first token (twelve minutes for
+            // 99k tokens on the rack, 2026-10-08) ran past a fixed deadline
+            // and the summary was lost.
+            if self.quit_deadline.is_some() && self.history.len() != self.quit_len {
+                self.quit_len = self.history.len();
+                self.quit_deadline = Some(clock::mono_us() + quit_wait_us());
+            }
             if self.stop_now || self.quit_deadline.is_some_and(|d| clock::mono_us() > d) {
                 self.abandon();
                 self.release();

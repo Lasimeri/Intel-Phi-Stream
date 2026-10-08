@@ -325,7 +325,7 @@ sampling stays), `Quit`.
   a document, `the command ... ended (exit 0, 12 ms); its output`.
 - **Quit writes the summary first** (the service): `quit` asks for the
   summary at the next point with nothing in flight, keeps it, and stops
-  (by two minutes at the latest; a second `quit` stops at once). Every
+  (by the time it gains no token for two minutes at the latest; a second `quit` stops at once). Every
   summary is also kept by its time in `summaries/`, so none is lost to
   the next.
 - **What changed** (in development): the commit it runs is kept in
@@ -887,4 +887,4 @@ context less an eighth of it (4096 at least), whatever `--rollover-tokens`
 says: the rack's slot holds 131072 tokens and the dev launch carries
 150000.
 
-The quit waits for the summary up to two minutes, or `PHI_STREAM_QUIT_WAIT` seconds (`quit_wait_us`): the rack's Flash Next, at 7 tokens a second, needed more than two to close its turn and write one (2026-10-07: the stop kept no summary).
+The quit waits for the summary until it gains no token for two minutes, or `PHI_STREAM_QUIT_WAIT` seconds (`quit_wait_us`; every token gained moves the deadline on, `quit_len`: a remote server re-reading 99k tokens for twelve minutes before the summary's first token ran past the fixed deadline it had before, 2026-10-08): the rack's Flash Next, at 7 tokens a second, needed more than two to close its turn and write one (2026-10-07: the stop kept no summary).

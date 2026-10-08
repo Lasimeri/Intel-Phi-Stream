@@ -92,21 +92,39 @@ running() { [ -n "$("$bin" status 2> /dev/null || true)" ]; }
 sock=${PHI_STREAM_SOCKET:-$rt/phi-stream.sock}
 serve_pid() { ss -xlpn 2> /dev/null | grep -F " $sock " | grep -oP 'pid=\K[0-9]+' | head -n 1; }
 # The service asked to quit (it writes its summary first, src/engine.md)
-# and waited for: its process gone and its tmux session ended, up to two
-# minutes, then ended anyway. Waiting on the tmux session alone, a restart
+# and waited for: its process gone and its tmux session ended, as long as
+# it answers (it bounds its own wait, src/engine.md). Waiting on the tmux session alone, a restart
 # of a service started outside tmux began the next one beside it while it
 # still wrote its summary, and the next ran out of GPU memory loading
 # (2026-10-03).
 quit_and_wait() {
-    local p
+    local p line waited=0 quiet=0
     p=$(serve_pid)
     "$bin" quit 2>/dev/null || true
-    # As long as the service waits for its summary (PHI_STREAM_QUIT_WAIT, src/engine.rs).
-    for _ in $(seq 1 "${PHI_STREAM_QUIT_WAIT:-120}"); do
+    # As long as the service answers: it ends itself once its summary is
+    # kept, or after PHI_STREAM_QUIT_WAIT seconds in which the summary
+    # gained no token (src/engine.md). A fixed wait here cut off a summary
+    # on the rack (2026-10-08): the remote server re-read 99k tokens for
+    # twelve minutes before its first token. Ended here only when it stops
+    # answering for 30 s, or past PHI_STREAM_QUIT_HARD seconds (an hour).
+    while :; do
         if ! tmux has-session -t "=$session" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then
             return 0
         fi
+        line=$(timeout 5 "$bin" status 2>/dev/null | head -n 1 || true)
+        if [ -n "$line" ]; then
+            quiet=0
+        else
+            quiet=$((quiet + 1))
+        fi
+        if [ "$quiet" -ge 30 ] || [ "$waited" -ge "${PHI_STREAM_QUIT_HARD:-3600}" ]; then
+            break
+        fi
+        if [ "$waited" -gt 0 ] && [ $((waited % 60)) = 0 ]; then
+            echo "waiting for the service to keep its summary ($((waited / 60)) min): ${line:-no answer}" >&2
+        fi
         sleep 1
+        waited=$((waited + 1))
     done
     tmux kill-session -t "=$session" 2>/dev/null || true
     if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
