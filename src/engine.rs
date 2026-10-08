@@ -4052,6 +4052,13 @@ impl Engine {
                 self.inject.joins,
                 self.inject.given_up
             ));
+            // The ids the sampler never draws in this frame (`<|im_start|>`
+            // here): an empty list would mean the ban the comparison of on
+            // against off rests on was not found.
+            out.push_str(&format!(
+                "  control tokens never sampled: {:?}\n",
+                self.base_ban
+            ));
         }
         out.push_str(&format!(
             "objective\n  {}\n",

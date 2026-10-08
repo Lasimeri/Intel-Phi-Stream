@@ -102,8 +102,13 @@ sends the whole sequence. A server whose cache holds the prefetched
 prefix (the history up to the fork and the input) starts from that state
 and reads only the rest. That needs llama.phi to load, for a pinned slot
 that is not empty, a cached state sharing more of the new prompt than the
-slot itself does. Without that, the slot reuses only its own prefix up to
-the fork, and the input is read again in the decode server.
+slot itself does. This is required, not an optimization. The slot shares
+only the history up to the fork with the new prompt, and this model's
+recurrent state cannot be cut back the tokens generated since (`engine.md`:
+neither shifted nor cut). Without the load, the server goes back to a
+checkpoint at or before the fork, or to zero, and reads from there, which
+could be minutes deep in a context. Today's path never rolls a slot back
+more than the few tokens a dropped stream sampled ahead.
 
 ## The vocabulary
 

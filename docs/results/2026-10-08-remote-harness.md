@@ -111,8 +111,8 @@ What was built (`src/engine.md`, "Splicing inputs into its thinking";
   start, join, give-up and toggle with its time.
 - Tests, no network: the composition, the fork point, the join's wait on
   an open tool call, the frame, the prefetch's answers from raw HTTP
-  bytes, and the toggle with every fallback. `make test`: 136 passed on
-  the rack (`/mnt/raid5/phi/bench/harness-2026-10-08/inject-build-1.log`).
+  bytes, and the toggle with every fallback. `make check` passed (136 tests) on
+  the rack (`/mnt/raid5/phi/bench/harness-2026-10-08/inject-check-2.log`).
 
 ### The rule, written before any measurement
 
@@ -128,7 +128,10 @@ any of three measures:
 2. **Unparsed or cut tool calls.** The counts in the `given` pieces that
    say `tool call(s) did not parse` or `your calls were written inside
    your thinking`. Counted per 100 turns, a turn being a `given` piece
-   that holds `<|im_start|>assistant`.
+   that holds `<|im_start|>assistant`, less the joins `inject.log` shows
+   in the window: each join puts such a piece in the chain without the
+   model ending a turn, and counted as turns they would lower the on
+   arm's rate (amended before any window was measured).
 3. **Thinking loops.** The share of repeated 8-grams in its thinking:
    `tools/loopiness.c START_US END_US --kind think chain.log`.
 
@@ -137,7 +140,8 @@ The windows:
 - 30 minutes each, inject on and inject off alternating (this host
   drifts, so interleave), at least three of each.
 - All after the restart that brought the `<|im_start|>` ban, so both arms
-  have it.
+  have it. `diag.md`'s `inject` section must name its id under `control
+  tokens never sampled`: an empty list means the ban was not found.
 - An on window counts only if `inject.log` shows a join in it. An off
   window counts only if an input past 48 tokens came in it. Otherwise it
   is extended.
@@ -170,6 +174,15 @@ If inject is worse by this rule, `--inject` comes out of the rack's
 - The cached state must be the one after exactly the tokens sent. The
   slot's next request then sends those tokens, plus `G`, plus one.
 - A pinned slot that is not empty loads a cached state that shares more
-  of the new prompt than the slot itself does. Without that, the decode
-  server reads `|T| + |G| + 1` tokens itself, and the splice saves nothing
-  but the wait.
+  of the new prompt than the slot itself does. This is required, not an
+  optimization. Without it the slot shares only `history[..p]` with the
+  new prompt, and the model's recurrent state cannot be cut back the
+  `|G|` tokens to `p` (`src/engine.md`: neither shifted nor cut). The
+  server would then have to go back to a checkpoint at or before `p`, or
+  to zero, and read from there. At 33k cells and about 70 tokens a second
+  deep in a context, that is minutes with the stream held. Today's path
+  never rolls a slot back more than the few tokens a dropped stream
+  sampled ahead, so nothing measured so far covers this case. The cost
+  without the load is unknown until the live check. There, a prompt eval
+  far above `|G| + 1`, or a long stall after the join, means the load is
+  not working: inject stays off, and llama.phi is told.

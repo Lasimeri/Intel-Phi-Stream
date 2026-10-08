@@ -948,7 +948,9 @@ once it is read.
   again until `inject on`. After a failure, no other splice is tried in
   that turn. An unknown state is named once and waited on. The
   diagnostics' `inject` section shows the toggle, the splice in flight,
-  and the joins and the splices given up. `inject.log` in the workspace
+  the joins and the splices given up, and the ids the sampler never draws
+  (`<|im_start|>`'s: an empty list means the ban was not found, and an
+  on and off comparison loses its premise). `inject.log` in the workspace
   keeps each start, join, give-up and toggle with its time (`t_us`, a
   tab, the note): a measurement counts its joins from it, since the notes
   themselves reach only the socket.
