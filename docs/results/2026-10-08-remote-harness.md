@@ -41,7 +41,7 @@ work goes, one commit per step, so the progress can be followed here.
 | settings files (`phi-stream.conf`, `phi-stream.local.conf`), every verb run where the service is, `doctor` | done | 921da15 |
 | a quit waits for a stalled summary, not a fixed time (engine and script) | done | 59b0d19 |
 | splicing inputs into its thinking (`inject`): read on the prefill server beside the stream, joined once read; guards, toggle, fallbacks, tests (below) | done, off by default | this step's commit |
-| the live check of a splice against llama.phi's `/phi/prefetch` | blocked: llama.phi at 28547bc92 has no such route yet (being added by another agent) | |
+| the live check of a splice against llama.phi's `/phi/prefetch` | passed (below, "The live check") | |
 | inject on in the rack's `PHI_STREAM_DEV_ARGS`, then the measurement below | after the live check | |
 | forks over llama.phi: a slot copy (`llama_memory_seq_cp`, as Intel Phi Jev's ARTICHOKE) so the second chain, the checks, the goal probe and the guide have sequences beside the live one | next | |
 | token probabilities from the server for the checks and the goal probe | next | |
@@ -186,3 +186,30 @@ If inject is worse by this rule, `--inject` comes out of the rack's
   without the load is unknown until the live check. There, a prompt eval
   far above `|G| + 1`, or a long stall after the join, means the load is
   not working: inject stays off, and llama.phi is told.
+
+### The live check (2026-10-08, afternoon)
+
+After the rack's maintenance (every card on the phictl idle fix and the
+DMA worker, Q8_0 served with decode on cards 0 to 2), with llama.phi at
+7813e278f, the harness started on an empty slot and inject turned on
+(`phi-stream.sh inject on`). The input was Claude's report of that
+maintenance (`say` over MCP, 300 tokens), the kind of input the rule
+counts, not one made up for the test.
+
+- The start: the context, 10580 tokens, read on the prefill server in
+  40.1 s (265 tok/s, state 277.7 MiB) and loaded by slot 1, whose first
+  prompt eval was 1 token.
+- `inject.log`: read beside the stream, forked at 13123; joined 17 s
+  after it was asked, with the 89 tokens placed since carried after it
+  and the pending one (90 for the server to read).
+- llama.phi: the prefetch of 13423 tokens in 16.26 s (the prefix came
+  from the cache entry; 322.1 MiB state), then "its state left the prompt
+  cache (loaded or replaced)".
+- The decode server's next request on slot 1: prompt eval 91 tokens in
+  4.12 s, generation 6.02 tok/s. So |G| + 1 (and the turn-closing token):
+  the pinned slot loaded the spliced state; without the load it would
+  have read about 13400 tokens again (minutes at the depth's ~70 tok/s).
+
+Inject stays on at run time; it goes into `PHI_STREAM_DEV_ARGS` only
+after the measurement above (the three measures over interleaved
+windows) says it is not worse.
