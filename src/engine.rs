@@ -18,6 +18,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Context as _, Result};
@@ -28,6 +29,7 @@ use crate::llm::{Lane, Llm, Sampling};
 use crate::mind::{Mind, MindConfig, Reading as MindReading};
 use crate::playout::Playout;
 use crate::reflect::{self, Decision, Episode, Outcome, ReflectConfig, Reflector, Why};
+use crate::remote;
 use crate::rotlog::RotLog;
 use crate::verify;
 
@@ -594,6 +596,43 @@ const GROUND_REPO_US: i64 = 30_000_000;
 const GROUND_AGAIN_US: i64 = 600_000_000;
 /// How often the stream's own status is written for it to read.
 const STATUS_FILE_US: i64 = 5_000_000;
+/// When the loop has not written its status files for this long, the
+/// heartbeat thread writes them instead: a loop held inside one step (a
+/// remote server reading a long prompt, `remote.md` Limits) must still
+/// leave fresh `status.txt` and `diag.md` behind. Twice the write interval,
+/// so the thread never races the engine's own on-time write.
+const HEART_TAKEOVER_US: i64 = 2 * STATUS_FILE_US;
+
+/// What the heartbeat thread may write while the loop is held: the last
+/// status line, diagnostics and objective the loop produced, and when it
+/// last wrote the files itself (microseconds, `clock::mono_us`). The engine
+/// owns it; the thread holds a `Weak` and ends when the engine drops.
+pub struct Heartbeat {
+    /// The last line `status_text` gave (empty before the first).
+    pub status_line: String,
+    /// The last full `diag_text`.
+    pub diag: String,
+    /// The objective as the status files show it ("none" until set).
+    pub objective: String,
+    /// When the loop last wrote the files itself (mono us).
+    pub engine_mono: i64,
+}
+
+/// The two file texts the heartbeat writes while the loop is held for
+/// `held_us`: the last contents plus how long the step has taken. `wall` is
+/// the clock time for the status line, as `clock::hms` gives it.
+fn heartbeat_files(h: &Heartbeat, wall: &str, held_us: i64) -> (String, String) {
+    let secs = held_us / 1_000_000;
+    let diag = format!(
+        "{}\nheld: the loop has been inside one step for {} s (a long decode, or a server reading a long prompt); this line is the heartbeat\n",
+        h.diag, secs
+    );
+    let status = format!(
+        "{wall} {} (held {secs} s in one step)\nobjective: {}\n",
+        h.status_line, h.objective
+    );
+    (diag, status)
+}
 /// How often the camera feeds are read (`poll_feeds`).
 const FEEDS_EVERY_US: i64 = 5_000_000;
 /// The probe's answers, as one-token forms (`yes_no`).
@@ -755,6 +794,12 @@ pub struct Engine {
     /// When `status.txt` was last written in the workspace (in development:
     /// its own status, readable by it, every `STATUS_FILE_US`).
     status_file_mono: i64,
+    /// Commands the pump caught during a held step (`sample_live`), in the
+    /// order they came; the loop takes these before its terminal's.
+    cmd_pending: VecDeque<Command>,
+    /// The heartbeat: what its thread writes when the loop is held
+    /// (`Heartbeat`, `heartbeat_files`).
+    heart: Arc<Mutex<Heartbeat>>,
     term_pending: usize,
     /// Its tool uses: the next id, the `act` id of each terminal command by
     /// the terminal's id, when it last used a tool and was last reminded to.
@@ -1315,6 +1360,13 @@ impl Engine {
             improver,
             improve_log,
             status_file_mono: i64::MIN / 2,
+            cmd_pending: VecDeque::new(),
+            heart: Arc::new(Mutex::new(Heartbeat {
+                status_line: String::new(),
+                diag: String::new(),
+                objective: "none".into(),
+                engine_mono: clock::mono_us(),
+            })),
             acts_open: HashMap::new(),
             recent_acts: VecDeque::new(),
             recent_dual: VecDeque::new(),
@@ -3721,6 +3773,9 @@ impl Engine {
         };
         let mut out = format!("DIAGNOSTICS at {}\n", clock::hms(now));
         out.push_str(&format!("status\n  {}\n", status_text(&self.status())));
+        if let Some(s) = remote_diag_line(self.llm.remote_info()) {
+            out.push_str(&s);
+        }
         out.push_str(&format!(
             "objective\n  {}\n",
             self.objective.as_ref().map_or("none", |o| o.1.as_str())
@@ -3847,6 +3902,8 @@ impl Engine {
     /// its sandbox; to improve its harness it reads what the harness does.
     fn write_status_file(&mut self) {
         let mono = clock::mono_us();
+        // The loop is alive: the heartbeat stands down while this happens.
+        self.heart.lock().unwrap().engine_mono = mono;
         if mono - self.status_file_mono < STATUS_FILE_US {
             return;
         }
@@ -3854,15 +3911,28 @@ impl Engine {
         // The diagnostics, the one text for the terminal and for the stream.
         let diag = self.diag_text();
         let _ = std::fs::write(self.cfg.workspace.join("diag.md"), &diag);
-        let _ = self.tx.send(Event::Diag(diag));
+        let _ = self.tx.send(Event::Diag(diag.clone()));
+        let objective = self
+            .objective
+            .as_ref()
+            .map_or("none", |o| o.1.as_str())
+            .to_string();
+        let line = status_text(&self.status());
+        {
+            // What the heartbeat may write if the next step holds the loop.
+            let mut h = self.heart.lock().unwrap();
+            h.diag = diag;
+            h.status_line = line.clone();
+            h.objective = objective.clone();
+        }
         if self.cfg.dev.is_none() {
             return;
         }
         let text = format!(
             "{} {}\nobjective: {}\n",
             clock::hms(clock::now_us()),
-            status_text(&self.status()),
-            self.objective.as_ref().map_or("none", |o| o.1.as_str())
+            line,
+            objective
         );
         let _ = std::fs::write(self.cfg.workspace.join("status.txt"), text);
     }
@@ -4447,6 +4517,48 @@ impl Engine {
         Ok(row)
     }
 
+    /// The next live token, answering the terminal during the wait: while
+    /// `sample` is held (a remote server reading a long prompt above all),
+    /// the pump moves commands out of the channel into `cmd_pending` (the
+    /// loop takes these before its terminal's next) and cancels the stream
+    /// with an `Aborted` error when a Quit comes or the terminal goes.
+    fn sample_live(&mut self, row: i32) -> Result<i32> {
+        // The status the wait reports from: this one, its mode the server's
+        // reading of the prompt (`remote.md`, During a wait), every 2 s.
+        let base = self.status();
+        let mut told = Instant::now();
+        let Engine {
+            llm,
+            rx,
+            tx,
+            cmd_pending,
+            ..
+        } = self;
+        llm.sample_pumped(row, &mut |progress| loop {
+            if let Some((done, total)) = progress {
+                if done < total && told.elapsed().as_millis() >= 2000 {
+                    told = Instant::now();
+                    let _ = tx.send(Event::Status(Status {
+                        mode: Mode::Reading { done, total },
+                        t_us: clock::now_us(),
+                        ..base.clone()
+                    }));
+                }
+            }
+            match rx.try_recv() {
+                Ok(c) => {
+                    let stop = matches!(c, Command::Quit);
+                    cmd_pending.push_back(c);
+                    if stop {
+                        return Ok(false);
+                    }
+                }
+                Err(TryRecvError::Disconnected) => return Ok(false),
+                Err(TryRecvError::Empty) => return Ok(true),
+            }
+        })
+    }
+
     /// Decode `tokens` into the live sequence after the pending token,
     /// logits of the last, and sample the next.
     fn direct(&mut self, tokens: &[i32]) -> Result<()> {
@@ -4456,7 +4568,7 @@ impl Engine {
         let row = self.feed_live(&all, pos0)?;
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
-        self.next = self.llm.sample(row)?;
+        self.next = self.sample_live(row)?;
         Ok(())
     }
 
@@ -4532,7 +4644,7 @@ impl Engine {
         self.history.extend_from_slice(&all);
         self.mind_step(pos0 + all.len() as i32 - 1, *all.last().unwrap())?;
         let out = self.llm.logits(row)?.to_vec();
-        self.next = self.llm.sample(row)?;
+        self.next = self.sample_live(row)?;
         Ok(out)
     }
 
@@ -4742,7 +4854,7 @@ impl Engine {
         self.llm.seq_rm(old, -1, -1);
         self.free_seqs.push(old);
         self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
-        self.next = self.llm.sample(row)?;
+        self.next = self.sample_live(row)?;
         let mark = self.framed_system(&c.label);
         self.say(mark, Kind::Given);
         Ok(())
@@ -4764,7 +4876,7 @@ impl Engine {
         let row = self.feed_live(&all, 0)?;
         self.history = all;
         self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
-        self.next = self.llm.sample(row)?;
+        self.next = self.sample_live(row)?;
         let mark = self.framed_system(&label);
         self.say(mark, Kind::Given);
         Ok(())
@@ -5052,7 +5164,7 @@ impl Engine {
                 f
             }
             (None, Some(m)) => self.llm.sample_logits(&m)?,
-            (None, None) => self.llm.sample(row)?,
+            (None, None) => self.sample_live(row)?,
         };
         if self.journal() && (t == self.eot || self.llm.is_eog(t)) {
             // The journal has no end: a newline stands in for it.
@@ -6322,6 +6434,31 @@ impl Engine {
     /// the model comes back for the next run.
     pub fn run(mut self) -> Result<Llm> {
         let _ = fs::write(self.cfg.workspace.join("persona.md"), &self.cfg.system);
+        // The heartbeat: while the loop runs, it stands down; when one step
+        // holds the loop past `HEART_TAKEOVER_US` (a remote server reading a
+        // long prompt above all), it keeps `diag.md` and `status.txt` fresh
+        // from what the loop last left. It ends when the engine drops.
+        {
+            let weak = Arc::downgrade(&self.heart);
+            let ws = self.cfg.workspace.clone();
+            let dev = self.cfg.dev.is_some();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+                let Some(shared) = weak.upgrade() else { return };
+                let (diag, status) = {
+                    let h = shared.lock().unwrap();
+                    let held = clock::mono_us() - h.engine_mono;
+                    if held < HEART_TAKEOVER_US {
+                        continue;
+                    }
+                    heartbeat_files(&h, &clock::hms(clock::now_us()), held)
+                };
+                let _ = std::fs::write(ws.join("diag.md"), &diag);
+                if dev {
+                    let _ = std::fs::write(ws.join("status.txt"), &status);
+                }
+            });
+        }
         // An objective kept from before is sent to the terminals too: their
         // OBJECTIVE said "none sent by this service" while it worked on one.
         if let Some((t, text)) = self.objective.clone() {
@@ -6351,7 +6488,18 @@ impl Engine {
         }
         self.history.extend_from_slice(&tokens);
         self.mind_step(tokens.len() as i32 - 1, *tokens.last().unwrap())?;
-        self.next = self.llm.sample(row)?;
+        self.next = match self.sample_live(row) {
+            Ok(t) => t,
+            // A Quit while the server read the opening: a clean stop, as
+            // in the loop below (nothing was said yet, so no summary).
+            Err(e) if e.downcast_ref::<remote::Aborted>().is_some() => {
+                self.abandon();
+                self.release();
+                let _ = self.tx.send(Event::Stopped);
+                return Ok(self.finish());
+            }
+            Err(e) => return Err(e),
+        };
         self.say(opening.clone(), Kind::Given);
         // The agent frame: its first turn begins here.
         self.turn_start = self.history.len();
@@ -6360,17 +6508,17 @@ impl Engine {
         loop {
             // Commands: all that are waiting; when paused, wait for one.
             loop {
-                let cmd = if self.paused {
-                    match self.rx.recv() {
+                let cmd = match self.cmd_pending.pop_front() {
+                    Some(c) => c,
+                    None if self.paused => match self.rx.recv() {
                         Ok(c) => c,
                         Err(_) => {
                             self.abandon();
                             self.release();
                             return Ok(self.finish());
                         }
-                    }
-                } else {
-                    match self.rx.try_recv() {
+                    },
+                    None => match self.rx.try_recv() {
                         Ok(c) => c,
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
@@ -6378,7 +6526,7 @@ impl Engine {
                             self.release();
                             return Ok(self.finish());
                         }
-                    }
+                    },
                 };
                 if !self.handle(cmd) {
                     self.abandon();
@@ -6426,8 +6574,22 @@ impl Engine {
                 }
                 let _ = self.tx.send(Event::Status(self.status()));
             }
-            self.cycle()?;
-            self.after()?;
+            if let Err(e) = self.cycle().and_then(|()| self.after()) {
+                if e.downcast_ref::<remote::Aborted>().is_none() {
+                    return Err(e);
+                }
+                // A command cancelled a held step (a server reading a long
+                // prompt above all): take what the pump caught, then end as
+                // the command loop ends on a Quit. The step is half done and
+                // its pending token spent, so nothing decodes after this.
+                while let Some(c) = self.cmd_pending.pop_front() {
+                    self.handle(c);
+                }
+                self.abandon();
+                self.release();
+                let _ = self.tx.send(Event::Stopped);
+                return Ok(self.finish());
+            }
             self.release();
             // Quitting: once the summary is kept, or past the deadline.
             if self.stop_now || self.quit_deadline.is_some_and(|d| clock::mono_us() > d) {
@@ -7167,9 +7329,50 @@ pub fn status_text(st: &Status) -> String {
         st.stream_tps, st.side_tps, st.cycle_ms, st.pos, st.n_ctx, st.queued, st.notes, st.frame
     )
 }
+
+/// The `remote` section of the diagnostics (`diag_text`, `diag.md`): where
+/// the model is served, and what its streams have given (`Llm::remote_info`
+/// with `--remote`; none with a model in this process).
+fn remote_diag_line(info: Option<(String, String, u64, u64)>) -> Option<String> {
+    info.map(|(url, name, streams, tokens)| {
+        format!("remote\n  {url}: {name}, {streams} streams, {tokens} tokens sampled\n")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The heartbeat's two texts carry the loop's last contents and how
+    /// long the step has held it: pure formatting, no engine, no network.
+    #[test]
+    fn the_heartbeat_texts_carry_the_last_status_and_the_hold() {
+        let h = Heartbeat {
+            status_line: "thinking; 5.1 tok/s".into(),
+            diag: "DIAGNOSTICS at 12:00:00\n  status".into(),
+            objective: "keep status fresh".into(),
+            engine_mono: 0,
+        };
+        let (diag, status) = heartbeat_files(&h, "12:00:05", 12_400_000);
+        assert!(diag.starts_with("DIAGNOSTICS at 12:00:00"));
+        assert!(diag.contains("for 12 s"));
+        assert!(status.starts_with("12:00:05 thinking; 5.1 tok/s (held 12 s in one step)"));
+        assert!(status.contains("objective: keep status fresh"));
+    }
+
+    #[test]
+    fn the_diagnostics_show_the_remote_streams_and_tokens() {
+        assert_eq!(remote_diag_line(None), None);
+        let s = remote_diag_line(Some((
+            "http://127.0.0.1:8001".into(),
+            "Qwen3.8-Flash-Next".into(),
+            7,
+            1234,
+        )))
+        .unwrap();
+        assert!(s.starts_with("remote\n  http://127.0.0.1:8001: Qwen3.8-Flash-Next, "));
+        assert!(s.ends_with("7 streams, 1234 tokens sampled\n"));
+    }
 
     #[test]
     fn the_agent_persona_teaches_the_tools_not_the_bracketed_lines() {

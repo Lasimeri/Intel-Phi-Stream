@@ -17,7 +17,7 @@ server). Nothing here loads a model, a GPU backend or the cards.
   guide and the goal probe cannot run. `main.rs` turns them off at start
   (`remote_off`, said on stderr), and the engine has no free sequence for
   them (`Engine::new`: the free sequences come from `n_seq`, 1 here).
-- **Sampling on the server.** `sample` sends the whole sequence as a token
+- **Sampling on the server.** `sample_pumped` sends the whole sequence as a token
   array to `POST /completion` with `stream`, `return_tokens` and
   `cache_prompt`, pinned to `--remote-slot` (default 1, so a client that
   does not pin takes slot 0 and does not evict this cache), with the
@@ -31,7 +31,7 @@ server). Nothing here loads a model, a GPU backend or the cards.
   (`Stream::continues`): the engine decodes the token it was handed, asks
   for the next, and gets the next event's token. Anything else placed (a
   forced token, a tool's results, a rollover) drops the connection, which
-  stops the server's generation, and the next `sample` opens a new request
+  stops the server's generation, and the next `sample_pumped` opens a new request
   from the whole sequence; the server reuses its slot's cache up to where
   the two differ. Measured on the rack (2026-10-07, Flash-Next Q6_K_XL,
   llama.phi b11462-d02556691): a prompt of 15966 tokens 31.6 s cold, the
@@ -46,9 +46,24 @@ server). Nothing here loads a model, a GPU backend or the cards.
 - **Retries.** No connection, HTTP 5xx or 429: asked again every 5 s for
   up to 15 minutes (a server restarting loads its model in about five),
   said on stderr once a minute. HTTP 4xx: an error at once, with the
-  server's message. Waits: the first token up to 30 minutes (a whole
-  131072-token context read at the rack's 350 tokens a second is six),
-  then 5 minutes between tokens.
+  server's message. A stream that opens and breaks before its first
+  token is asked again the same way, every 5 s within the same 15
+  minutes, then an error: asking again at once could go on forever, and a
+  count of five breaks would have ended the service at the rack's model
+  switch of 2026-10-08, when a restarting server broke more streams than
+  that. Waits: the first token up to 30 minutes (a whole 131072-token
+  context read at the rack's 350 tokens a second is six), then 5 minutes
+  between tokens.
+- **During a wait.** A held `sample` is not deaf: its pump
+  (`sample_pumped`, driven by the engine's `sample_live`) takes the
+  terminal's commands at every round and every `POLL` while bytes are
+  awaited. A Quit cancels the stream with an `Aborted` error and the
+  service ends there, without a summary (the model is busy reading, and
+  the half-done step's pending token is spent, so nothing decodes on);
+  other commands wait their turn in `cmd_pending`, ahead of the
+  terminal's next. `status` never waits: the service answers it with the
+  last line it has, which the engine's heartbeat keeps marked with how
+  long the step has held it (`engine.md`).
 
 ## The vocabulary
 
@@ -98,4 +113,5 @@ vocabulary of a small hand-made GGUF head (pieces, control and
 user-defined tokens, the end set, a skipped merges array), a cut head as
 an error, addresses, the chunked event stream read through a source that
 gives seven bytes at a time with timeouts between them (tokens queued,
-`continues` after each, the stop), a sized answer.
+`continues` after each, the stop), a sized answer, and a place past the
+server's context refused before the sequence is touched.

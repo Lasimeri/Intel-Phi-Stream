@@ -691,11 +691,18 @@ impl Llm {
     }
 
     /// The sampler chain's choice for batch row `row` (accepted into its
-    /// own history).
-    pub fn sample(&mut self, row: i32) -> Result<i32> {
+    /// own history), with a pump for the wait behind a remote server's
+    /// first token (`Remote::sample_pumped`); the in-process chain answers
+    /// at once, so its pump is never called.
+    pub fn sample_pumped(
+        &mut self,
+        row: i32,
+        pump: &mut dyn FnMut(Option<(usize, usize)>) -> Result<bool>,
+    ) -> Result<i32> {
         if let Some(r) = self.remote.as_mut() {
-            return r.sample();
+            return r.sample_pumped(pump);
         }
+        let _ = pump;
         // SAFETY: the row asked for logits in the last decode.
         Ok(unsafe { sys::llama_sampler_sample(self.sampler, self.ctx_ptr(), row) })
     }

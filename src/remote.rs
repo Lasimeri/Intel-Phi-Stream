@@ -649,6 +649,9 @@ struct Stream {
     queue: VecDeque<i32>,
     /// The server's `stop_type`, once it stopped.
     stop: Option<String>,
+    /// The server's reading of the prompt, (done, total) tokens, from its
+    /// `prompt_progress` events (`return_progress`); none before the first.
+    progress: Option<(usize, usize)>,
 }
 
 impl Stream {
@@ -679,6 +682,10 @@ impl Stream {
                             .push_back(t.as_i64().context("a token id")? as i32);
                     }
                 }
+                if let Some(p) = v.get("prompt_progress") {
+                    let n = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0) as usize;
+                    self.progress = Some((n("cache") + n("processed"), n("total")));
+                }
                 if v.get("stop").and_then(Value::as_bool) == Some(true) {
                     let why = v
                         .get("stop_type")
@@ -692,8 +699,20 @@ impl Stream {
     }
 
     /// The next token; none once the server stopped and every token it sent
-    /// was handed out.
+    /// was handed out (the tests' form: the engine always pumps).
+    #[cfg(test)]
     fn next(&mut self) -> Result<Option<i32>> {
+        self.next_with(&mut |_| Ok(true))
+    }
+
+    /// `next` with a pump called on every wait for bytes (once per `POLL`):
+    /// Ok(false) cancels with an `Aborted` error, so what waits behind a
+    /// slow first token is answered during the wait, not queued after it
+    /// (`Remote::sample_pumped`).
+    fn next_with(
+        &mut self,
+        pump: &mut dyn FnMut(Option<(usize, usize)>) -> Result<bool>,
+    ) -> Result<Option<i32>> {
         loop {
             if let Some(t) = self.queue.pop_front() {
                 self.given.push(t);
@@ -709,6 +728,11 @@ impl Stream {
             if self.body.done || self.body.closed {
                 bail!("the server ended the stream without saying it stopped");
             }
+            if !pump(self.progress)? {
+                return Err(
+                    anyhow::Error::new(Aborted).context("the wait was cancelled by a command")
+                );
+            }
             let wait = if self.given.is_empty() {
                 FIRST_TOKEN
             } else {
@@ -720,6 +744,19 @@ impl Stream {
         }
     }
 }
+
+/// The engine cancelled a wait (`sample_pumped`'s pump said stop): a mark
+/// on the error, so a caller can tell a clean stop from a server failure.
+#[derive(Debug)]
+pub struct Aborted;
+
+impl std::fmt::Display for Aborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled by a command")
+    }
+}
+
+impl std::error::Error for Aborted {}
 
 /// Why a stream could not be opened.
 enum Open {
@@ -786,6 +823,9 @@ impl Remote {
             .and_then(Value::as_i64)
             .unwrap_or(1);
         if slot < 0 || slot as i64 >= slots {
+            if slots <= 0 {
+                bail!("--remote-slot {slot}: the server says it has no slots");
+            }
             bail!(
                 "--remote-slot {slot}: the server has {slots} slot(s), 0 to {}",
                 slots - 1
@@ -903,15 +943,17 @@ impl Remote {
                 self.hist.len()
             );
         }
-        self.hist.truncate(p);
-        self.hist.extend_from_slice(tokens);
-        if self.hist.len() >= self.n_ctx as usize {
+        // Room first, then the change: truncating before the check left a
+        // destroyed sequence behind when the place was refused.
+        if p + tokens.len() >= self.n_ctx as usize {
             bail!(
-                "the sequence ({} tokens) fills the server's context of {}",
-                self.hist.len(),
+                "the sequence ({p} + {} tokens) fills the server's context of {}",
+                tokens.len(),
                 self.n_ctx
             );
         }
+        self.hist.truncate(p);
+        self.hist.extend_from_slice(tokens);
         Ok(())
     }
 
@@ -954,7 +996,16 @@ impl Remote {
     /// placed drops it (the server stops generating when the connection
     /// closes) and a new request continues from the whole sequence, the
     /// server reusing its slot's cache up to where the two differ.
-    pub fn sample(&mut self) -> Result<i32> {
+    ///
+    /// The pump is called once per round of the retry loop and, through
+    /// the stream, once per wait for bytes (`Stream::next_with`), with the
+    /// server's reading of the prompt when it has said; Ok(false) cancels
+    /// with an `Aborted` error, which is how a command answered during a
+    /// long first-token wait stops this (the engine's `sample_live`).
+    pub fn sample_pumped(
+        &mut self,
+        pump: &mut dyn FnMut(Option<(usize, usize)>) -> Result<bool>,
+    ) -> Result<i32> {
         if self.hist.is_empty() {
             bail!("nothing to continue: the sequence is empty");
         }
@@ -962,8 +1013,13 @@ impl Remote {
         let mut told: Option<Instant> = None;
         let mut fresh = false;
         loop {
+            if !pump(None)? {
+                return Err(
+                    anyhow::Error::new(Aborted).context("the wait was cancelled by a command")
+                );
+            }
             match self.stream.as_mut() {
-                Some(s) if s.continues(&self.hist) => match s.next() {
+                Some(s) if s.continues(&self.hist) => match s.next_with(pump) {
                     Ok(Some(t)) => {
                         self.tokens += 1;
                         return Ok(t);
@@ -975,9 +1031,31 @@ impl Remote {
                             bail!("the server stopped ({why}) without a token");
                         }
                     }
+                    Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+                        // The pump cancelled the wait: a clean stop, not a
+                        // broken stream to ask again for.
+                        self.stream = None;
+                        return Err(e);
+                    }
                     Err(e) => {
                         eprintln!("phi-stream: remote: the stream broke ({e:#}); asking again");
+                        let empty = s.given.is_empty();
                         self.stream = None;
+                        if empty {
+                            // Opened, then broken before a token: within the
+                            // same window as a server that does not answer
+                            // (a restarting server does this several times;
+                            // seen at the rack's model switch, 2026-10-08),
+                            // and paced like it, never at once and forever.
+                            if Instant::now() > give_up {
+                                return Err(e.context(format!(
+                                    "{} broke every stream before a token for {} minutes",
+                                    self.server.url(),
+                                    RETRY_FOR.as_secs() / 60
+                                )));
+                            }
+                            std::thread::sleep(Duration::from_secs(5));
+                        }
                     }
                 },
                 _ => self.stream = None,
@@ -1022,6 +1100,9 @@ impl Remote {
             "stream": true,
             "return_tokens": true,
             "cache_prompt": true,
+            // Its reading of a long prompt as it goes, for the status
+            // during the wait (`prompt_progress` events, `sample_pumped`).
+            "return_progress": true,
             "id_slot": self.slot,
             "temperature": s.temp,
             "top_k": s.top_k,
@@ -1081,6 +1162,7 @@ impl Remote {
             given: Vec::new(),
             queue: VecDeque::new(),
             stop: None,
+            progress: None,
         })
     }
 }
@@ -1251,6 +1333,7 @@ mod tests {
             given: Vec::new(),
             queue: VecDeque::new(),
             stop: None,
+            progress: None,
         };
         assert!(s.continues(&[5, 6]));
         assert_eq!(s.next().unwrap(), Some(16));
@@ -1286,5 +1369,92 @@ mod tests {
         };
         assert_eq!(b.head(Instant::now() + SHORT).unwrap(), 200);
         assert_eq!(b.read_all(Instant::now() + SHORT).unwrap(), body);
+    }
+
+    /// A `Remote` with no live server: placing and the context's bound are
+    /// local bookkeeping, so they can be tested without one.
+    fn bare(n_ctx: u32) -> Remote {
+        Remote {
+            server: Server::parse("http://127.0.0.1:9").unwrap(),
+            vocab: Vocab::from_bytes(&tiny()).unwrap(),
+            n_ctx,
+            model: "toy".into(),
+            slot: 0,
+            hist: vec![1, 2, 3],
+            stream: None,
+            sampling: Sampling {
+                temp: 0.0,
+                top_k: 1,
+                top_p: 1.0,
+                min_p: 0.0,
+                dry_multiplier: 0.0,
+                dry_base: 1.0,
+                dry_allowed_length: 2,
+                dry_last_n: -1,
+                seed: 1,
+                repeat_penalty: 1.0,
+                repeat_last_n: -1,
+                ban_dashes: false,
+            },
+            never: Vec::new(),
+            streams: 0,
+            tokens: 0,
+        }
+    }
+
+    /// A place that does not fit is refused before the sequence is touched:
+    /// truncating first left a destroyed sequence behind when it bailed.
+    #[test]
+    fn a_refused_place_leaves_the_sequence_as_it_was() {
+        let mut r = bare(8);
+        // Six tokens at 2 reaches 8, the whole context: refused, and the
+        // old sequence stands whole.
+        assert!(r.place(0, &[4, 5, 6, 7, 8, 9], 2).is_err());
+        assert_eq!(r.hist, vec![1, 2, 3]);
+        // One under the cap goes in.
+        r.place(0, &[4, 5], 0).unwrap();
+        assert_eq!(r.hist, vec![4, 5]);
+    }
+
+    /// A source that never has bytes: every wait stays in the pump.
+    struct Stall;
+    impl Read for Stall {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(ErrorKind::WouldBlock, "nothing yet"))
+        }
+    }
+
+    /// The pump runs on every wait for bytes and can cancel one: no
+    /// network, no server, nothing slept (no network: `improve.md`).
+    #[test]
+    fn the_pump_answers_during_a_wait_and_cancels_it() {
+        let body = Body {
+            src: Box::new(Stall),
+            raw: Vec::new(),
+            chunked: false,
+            left: None,
+            chunk_left: 0,
+            after_chunk: false,
+            done: false,
+            closed: false,
+            last: Instant::now(),
+        };
+        let mut s = Stream {
+            body,
+            sse: Vec::new(),
+            base: 0,
+            given: Vec::new(),
+            queue: VecDeque::new(),
+            stop: None,
+            progress: None,
+        };
+        let mut calls = 0usize;
+        let r = s.next_with(&mut |_| {
+            calls += 1;
+            Ok(calls < 3)
+        });
+        assert_eq!(calls, 3);
+        let e = r.unwrap_err();
+        assert!(e.downcast_ref::<Aborted>().is_some());
     }
 }

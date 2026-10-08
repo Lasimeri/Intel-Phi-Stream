@@ -33,7 +33,7 @@ One model split three ways and one context over llama.cpp's C API.
   tokens at their positions, the last one's logits kept on request. A
   cycle of the engine is one live token (its sequence) and a chunk of a
   sequence being read or caught up; llama.cpp's hybrid memory splits such
-  a batch into equal-share micro-batches by itself. `logits`, `sample`
+  a batch into equal-share micro-batches by itself. `logits`, `sample_pumped`
   (the chain: top-k, top-p, temperature and the seeded draw, or greedy at
   temperature 0; the model's header recommends 20, 0.95 and 1) and
   `greedy` read a row of the last decode; `sample_logits` puts logits the
@@ -74,7 +74,7 @@ their backend is loaded. A second model then has the GPU to itself.
 With `--remote URL` nothing is loaded here: `Llm` holds a
 [`Remote`](remote.md) instead of a model, a context and a sampler, and
 every method goes to it. `decode` keeps the lanes' tokens in order (only
-sequence 0) and returns row 0 for the last; `sample` asks the server for
+sequence 0) and returns row 0 for the last; `sample_pumped` asks the server for
 the next token; `tokenize` is the server's; `piece`, `is_eog`, `eot`,
 `tokens_containing` and the dash scan come from the vocabulary file;
 `seq_rm` and `seq_pos_max` act on the one sequence, `seq_cp` and `accept`
@@ -84,5 +84,5 @@ banned tokens with the next request. `logits`, `greedy` and
 the server's slot, `n_seq` 1, `batch_cap` the whole context (a sequence
 goes to the server as one prompt). `forks()` says whether sequences beside
 the live one exist (false here); `remote_info()` gives the server, the
-model's name and the streams and tokens so far. `sample` and
+model's name and the streams and tokens so far. `sample_pumped` and
 `sample_logits` return a `Result` in both modes (a network can fail).

@@ -692,10 +692,14 @@ next user turn (which wakes a rest: an outcome is something to act on),
 a note, and for a candidate that passed, a message to Claude
 (`to-claude.md`, `[improve]`, with the path of its `change.patch`).
 
-In development, its own status is written every 10 s to `status.txt` in
+In development, its own status is written every 5 s to `status.txt` in
 its workspace (`write_status_file`: the line `phi-stream status` prints,
 `status_text`, with its time and objective), since the service's socket
-is outside its sandbox.
+is outside its sandbox. When one step holds the loop past twice that
+(`HEART_TAKEOVER_US`) -- a remote server reading a long prompt above all
+(`remote.md` Limits) -- a heartbeat thread keeps `diag.md` and
+`status.txt` fresh from what the loop last left plus how long the step
+has run (`Heartbeat`, `heartbeat_files`); it ends when the engine drops.
 With the loop on, `build`, `diff`, `revert` and `report` too
 (`agent_build`, `agent_diff`, `agent_revert`, `agent_report`;
 `improve.md`); a trial's outcome (number 0) is told and logged as
