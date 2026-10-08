@@ -91,7 +91,11 @@ binary is used when there is one, else the GPU and the host alone.
 the live token, `engine.md`; `chain on|off|against` on the socket while it runs),
 `--chain-against` (the second chain argues against each line toward the
 objective; implies `--second-chain`), `--goal-probe` (P(yes) that a line serves
-the objective, in `goal.log`; `goal on|off` live),
+the objective, in `goal.log`; `goal on|off` live), `--inject` (with
+`--remote` and the agent frame: an input past `--direct-max` read on the
+server's prefill engine beside the stream and spliced into its thinking
+once read, `engine.md`; off by default; `inject on|off` live, which the
+subcommand `phi-stream inject on|off` sends),
 `--terminal` (the stream's sandboxed
 terminal, `term.md`) and `--no-objective-gate` (its output not held until
 it has an objective, `engine.md`); `objective TEXT` (`-` clears) sets the
@@ -108,5 +112,6 @@ server's model), `--remote-slot N` the slot (default 1). `load_with` then
 makes `Llm::remote` and leaves the backends alone; `load_mind` loads no
 capture; `serve` and `run` call `remote_off`, which turns off what needs
 the model's state in this process (the mind, the checks, the second
-chain, the guide, the goal probe) and says each on stderr. `-c` is
+chain, the guide, the goal probe; `--inject` stays, being made for a
+remote model) and says each on stderr. `-c` is
 ignored: the context is the server's slot.

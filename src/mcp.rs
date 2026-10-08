@@ -87,7 +87,7 @@ pub fn run(socket: &Path) -> Result<()> {
     Ok(())
 }
 
-const INSTRUCTIONS: &str = "The management interface of the running phi-stream service (one model reasoning without pause; its terminal interface, the same one a person uses). screen reads it; type and keys type into it (a line typed and Enter is sent to the stream as the person's words, a line starting with / is a command: /objective TEXT, /chain on|off|against|audit, /goal on|off, /help; Tab moves between panes, PageUp and PageDown scroll). ask sends the stream a message from Claude and waits for its answer (its tell_claude tool); inbox reads what it sent Claude on its own. The person can watch the same screen with: tmux attach -t phi-stream-mcp";
+const INSTRUCTIONS: &str = "The management interface of the running phi-stream service (one model reasoning without pause; its terminal interface, the same one a person uses). screen reads it; type and keys type into it (a line typed and Enter is sent to the stream as the person's words, a line starting with / is a command: /objective TEXT, /chain on|off|against|audit, /goal on|off, /inject on|off, /help; Tab moves between panes, PageUp and PageDown scroll). ask sends the stream a message from Claude and waits for its answer (its tell_claude tool); inbox reads what it sent Claude on its own. The person can watch the same screen with: tmux attach -t phi-stream-mcp";
 
 fn tools() -> Value {
     json!([
@@ -100,7 +100,7 @@ fn tools() -> Value {
         },
         {
             "name": "type",
-            "description": "Type text into the interface's input line, then Enter (unless enter is false); the screen after. A line is said to the stream as the person; a line starting with / is a command (/objective TEXT, /chain on|off|against|audit, /goal on|off, /help).",
+            "description": "Type text into the interface's input line, then Enter (unless enter is false); the screen after. A line is said to the stream as the person; a line starting with / is a command (/objective TEXT, /chain on|off|against|audit, /goal on|off, /inject on|off, /help).",
             "inputSchema": {"type": "object", "properties": {
                 "text": {"type": "string"},
                 "enter": {"type": "boolean", "description": "Press Enter after (default true)."}

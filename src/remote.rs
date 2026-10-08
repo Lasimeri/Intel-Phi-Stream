@@ -616,6 +616,20 @@ impl Server {
         Ok((status, b))
     }
 
+    /// A request answered within `within`: its status and its body's bytes,
+    /// whatever the status (the caller reads both).
+    fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        within: Duration,
+    ) -> Result<(u16, Vec<u8>)> {
+        let deadline = Instant::now() + within;
+        let (status, b) = self.send(method, path, body, deadline)?;
+        Ok((status, b.read_all(deadline)?))
+    }
+
     /// A short JSON request and its JSON answer; an error for any status
     /// but 200, with the server's message.
     pub fn json(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value> {
@@ -630,6 +644,109 @@ impl Server {
         }
         Ok(v)
     }
+}
+
+// ----------------------------------------------------------- prefetch
+
+/// How long asking for a prefetch, or for its state, may hold the engine's
+/// cycle: the server answers both at once (it queues the prompt, or looks
+/// the id up), so a longer wait is a busy server, asked again later.
+const PREFETCH_ASK: Duration = Duration::from_secs(2);
+
+/// The server's path for prompts read by its prefill engine without a slot
+/// (llama.phi's decode server; llama.cpp's own server has none).
+const PREFETCH_PATH: &str = "/phi/prefetch";
+
+/// What asking for a prefetch gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefetchStart {
+    /// Accepted: the id its state is asked by.
+    Id(u64),
+    /// The server has no prefetch (HTTP 404 on its path): llama.cpp's own
+    /// server, or llama.phi before it had one.
+    Unsupported,
+}
+
+/// A prefetch's state, as the server gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prefetch {
+    /// Queued or being read.
+    Waiting,
+    /// Read: the state is in the decode server's prompt cache. The
+    /// contract names two such states, `ready` and `done`; both are taken
+    /// as read until the server's final format says otherwise.
+    Ready,
+    /// The server gave it up, with its words.
+    Failed(String),
+    /// A state this side does not know (the format may change): waited on
+    /// as `Waiting`, and named so the caller can say so.
+    Unknown(String),
+}
+
+/// The answer to `POST /phi/prefetch` (`{"id": N}`), by its status and
+/// body.
+pub fn prefetch_started(status: u16, body: &[u8]) -> Result<PrefetchStart> {
+    if status == 404 {
+        return Ok(PrefetchStart::Unsupported);
+    }
+    let v: Value = serde_json::from_slice(body).with_context(|| {
+        format!(
+            "{PREFETCH_PATH}: an answer that is not JSON (HTTP {status}, {} bytes)",
+            body.len()
+        )
+    })?;
+    if status != 200 {
+        bail!("{PREFETCH_PATH}: HTTP {status}: {}", err_text(&v));
+    }
+    let id = match v.get("id") {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    };
+    id.map(PrefetchStart::Id)
+        .with_context(|| format!("{PREFETCH_PATH}: no id in {}", err_text(&v)))
+}
+
+/// The answer to `GET /phi/prefetch?id=N`, by its status and body: the
+/// state as a string field (`state`, else `status`) or the body itself a
+/// string. HTTP 5xx is an error (the caller asks again); another failure
+/// status is the prefetch failed, with the server's message.
+pub fn prefetch_state(status: u16, body: &[u8]) -> Result<Prefetch> {
+    let v: Value = serde_json::from_slice(body).with_context(|| {
+        format!(
+            "{PREFETCH_PATH}: an answer that is not JSON (HTTP {status}, {} bytes)",
+            body.len()
+        )
+    })?;
+    if status >= 500 {
+        bail!("{PREFETCH_PATH}: HTTP {status}: {}", err_text(&v));
+    }
+    if status != 200 {
+        return Ok(Prefetch::Failed(format!("HTTP {status}: {}", err_text(&v))));
+    }
+    let state = match &v {
+        Value::String(s) => s.clone(),
+        _ => v
+            .get("state")
+            .or_else(|| v.get("status"))
+            .and_then(Value::as_str)
+            .with_context(|| format!("{PREFETCH_PATH}: no state in {}", err_text(&v)))?
+            .to_string(),
+    };
+    Ok(match state.trim().to_ascii_lowercase().as_str() {
+        "waiting" | "queued" | "pending" | "running" | "reading" => Prefetch::Waiting,
+        "ready" | "done" => Prefetch::Ready,
+        "failed" | "error" => Prefetch::Failed(
+            v.get("error")
+                .or_else(|| v.get("message"))
+                .map(|e| match e {
+                    Value::String(s) => s.clone(),
+                    other => err_text(&json!({ "error": other })),
+                })
+                .unwrap_or_else(|| "failed, no reason given".to_string()),
+        ),
+        _ => Prefetch::Unknown(state),
+    })
 }
 
 // ------------------------------------------------------------- stream
@@ -928,6 +1045,31 @@ impl Remote {
                     .context("/tokenize: a token that is not an id")
             })
             .collect()
+    }
+
+    /// Ask the server to read `tokens` on its prefill engine, beside the
+    /// slot's stream (llama.phi's `POST /phi/prefetch`): the finished state
+    /// lands in the decode server's prompt cache, and a later stream whose
+    /// prompt begins with `tokens` starts from it. Answered at once.
+    pub fn prefetch(&self, tokens: &[i32]) -> Result<PrefetchStart> {
+        let (status, body) = self.server.exchange(
+            "POST",
+            PREFETCH_PATH,
+            Some(&json!({ "tokens": tokens })),
+            PREFETCH_ASK,
+        )?;
+        prefetch_started(status, &body)
+    }
+
+    /// The state of the prefetch `id` (`GET /phi/prefetch?id=N`).
+    pub fn prefetch_state(&self, id: u64) -> Result<Prefetch> {
+        let (status, body) = self.server.exchange(
+            "GET",
+            &format!("{PREFETCH_PATH}?id={id}"),
+            None,
+            PREFETCH_ASK,
+        )?;
+        prefetch_state(status, &body)
     }
 
     /// Place `tokens` at `pos0` of sequence `seq` (only 0 exists here):
@@ -1414,6 +1556,100 @@ mod tests {
         // One under the cap goes in.
         r.place(0, &[4, 5], 0).unwrap();
         assert_eq!(r.hist, vec![4, 5]);
+    }
+
+    /// A whole HTTP answer read off a trickling connection, as `exchange`
+    /// reads one: its status and body.
+    fn answer(raw: &str) -> (u16, Vec<u8>) {
+        let mut b = Body {
+            src: Box::new(Trickle {
+                bytes: raw.as_bytes().to_vec(),
+                at: 0,
+                pause: false,
+            }),
+            raw: Vec::new(),
+            chunked: false,
+            left: None,
+            chunk_left: 0,
+            after_chunk: false,
+            done: false,
+            closed: false,
+            last: Instant::now(),
+        };
+        let status = b.head(Instant::now() + SHORT).unwrap();
+        (status, b.read_all(Instant::now() + SHORT).unwrap())
+    }
+
+    fn sized(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The prefetch's answers, from the bytes a server sends (no network):
+    /// an id, a server without the path, a refusal, and every state.
+    #[test]
+    fn prefetch_answers_map_to_their_states() {
+        let (s, b) = answer(&sized("200 OK", "{\"id\":7}"));
+        assert_eq!(prefetch_started(s, &b).unwrap(), PrefetchStart::Id(7));
+        let (s, b) = answer(&sized("200 OK", "{\"id\":\"12\"}"));
+        assert_eq!(prefetch_started(s, &b).unwrap(), PrefetchStart::Id(12));
+        // llama-server's answer to a path it does not have.
+        let (s, b) = answer(&sized(
+            "404 Not Found",
+            "{\"error\":{\"message\":\"File Not Found\",\"type\":\"not_found_error\",\"code\":404}}",
+        ));
+        assert_eq!(prefetch_started(s, &b).unwrap(), PrefetchStart::Unsupported);
+        // Refused, and accepted without an id: errors, with the server's words.
+        let (s, b) = answer(&sized(
+            "400 Bad Request",
+            "{\"error\":{\"message\":\"no tokens\"}}",
+        ));
+        assert!(format!("{:#}", prefetch_started(s, &b).unwrap_err()).contains("no tokens"));
+        let (s, b) = answer(&sized("200 OK", "{\"queued\":true}"));
+        assert!(prefetch_started(s, &b).is_err());
+        assert!(prefetch_started(200, b"not json").is_err());
+
+        let state = |raw: &str| {
+            let (s, b) = answer(raw);
+            prefetch_state(s, &b)
+        };
+        assert_eq!(
+            state(&sized("200 OK", "{\"id\":7,\"state\":\"waiting\"}")).unwrap(),
+            Prefetch::Waiting
+        );
+        assert_eq!(
+            state(&sized("200 OK", "{\"status\":\"ready\"}")).unwrap(),
+            Prefetch::Ready
+        );
+        assert_eq!(
+            state(&sized("200 OK", "\"done\"")).unwrap(),
+            Prefetch::Ready
+        );
+        assert_eq!(
+            state(&sized(
+                "200 OK",
+                "{\"state\":\"failed\",\"error\":\"out of memory\"}"
+            ))
+            .unwrap(),
+            Prefetch::Failed("out of memory".into())
+        );
+        assert_eq!(
+            state(&sized("200 OK", "{\"state\":\"evicted\"}")).unwrap(),
+            Prefetch::Unknown("evicted".into())
+        );
+        // An id the server does not know: failed; a server error: asked again.
+        assert!(matches!(
+            state(&sized("404 Not Found", "{\"error\":{\"message\":\"no such id\"}}")).unwrap(),
+            Prefetch::Failed(m) if m.contains("no such id")
+        ));
+        assert!(state(&sized(
+            "503 Service Unavailable",
+            "{\"error\":{\"message\":\"loading\"}}"
+        ))
+        .is_err());
+        assert!(state(&sized("200 OK", "{\"id\":7}")).is_err());
     }
 
     /// A source that never has bytes: every wait stays in the pump.

@@ -84,5 +84,8 @@ banned tokens with the next request. `logits`, `greedy` and
 the server's slot, `n_seq` 1, `batch_cap` the whole context (a sequence
 goes to the server as one prompt). `forks()` says whether sequences beside
 the live one exist (false here); `remote_info()` gives the server, the
-model's name and the streams and tokens so far. `sample_pumped` and
+model's name and the streams and tokens so far; `prefetch` and
+`prefetch_state` ask the server to read a prompt on its prefill engine
+beside the stream and say how far it is (`remote.md`, an error with a
+model here). `sample_pumped` and
 `sample_logits` return a `Result` in both modes (a network can fail).

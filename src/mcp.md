@@ -23,6 +23,11 @@ develops for the interface it also sees.
 | `inbox` | what it sent Claude, from `to-claude.md` in the workspace its `info` line names: after number `since`, or the last ten |
 | `status` | the service's status line |
 
+- The server's instructions and `type`'s description name the terminal's
+  commands an agent uses most (`/objective TEXT`, `/chain on|off|against|audit`,
+  `/goal on|off`, `/inject on|off`, `/help`): `/inject on|off` reaches the
+  splicing of inputs into its thinking (`engine.md`) from here.
+
 - Register it once: `claude mcp add --scope user phi-stream --
   "<checkout>/target/release/phi-stream" mcp`. A session started before
   the registration sees it after `/mcp` reconnects. With the service on

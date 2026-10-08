@@ -585,6 +585,7 @@ pub fn stream(
             agent: false,
             guide: false,
             improve: false,
+            inject: false,
         };
         let (etx, erx) = mpsc::channel();
         let (ctx, crx) = mpsc::channel::<Command>();

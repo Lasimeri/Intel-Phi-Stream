@@ -282,6 +282,12 @@ struct StreamArgs {
     /// improve.log; one that passes goes to Claude for review.
     #[arg(long)]
     improve: bool,
+    /// Inputs past --direct-max tokens read on the remote server's prefill
+    /// engine beside the stream and spliced into its thinking once read, at
+    /// a line start, never in a tool call (src/engine.md; the agent frame
+    /// with --remote; off by default; `phi-stream inject on|off` live).
+    #[arg(long)]
+    inject: bool,
     #[command(flatten)]
     mind: MindArgs,
 }
@@ -424,6 +430,13 @@ enum Cmd {
     /// it was chosen and the objective).
     Chain {
         #[arg(value_parser = ["on", "off", "against", "audit"])]
+        state: String,
+    },
+    /// Inputs spliced into its thinking once the remote server has read
+    /// them beside the stream (src/engine.md, the agent frame with
+    /// --remote), or left for the turn's end, live.
+    Inject {
+        #[arg(value_parser = ["on", "off"])]
         state: String,
     },
     /// The goal probe, live (src/engine.md): every 30 s at most, whether
@@ -851,6 +864,7 @@ fn config(s: &StreamArgs, sampling: Sampling) -> Result<Config> {
         goal_probe: s.goal_probe,
         guide: s.guide,
         improve: s.improve,
+        inject: s.inject,
         agent,
     })
 }
@@ -1293,6 +1307,7 @@ fn main() -> Result<()> {
         Cmd::Chunk { n } => ask(&socket, &format!("chunk {n}")),
         Cmd::Chain { state } => ask(&socket, &format!("chain {state}")),
         Cmd::Goal { state } => ask(&socket, &format!("goal {state}")),
+        Cmd::Inject { state } => ask(&socket, &format!("inject {state}")),
         Cmd::Guide { state } => ask(&socket, &format!("guide {state}")),
         Cmd::Experts { state } => ask(&socket, &format!("experts {state}")),
         Cmd::Breaker { state } => ask(&socket, &format!("breaker {state}")),

@@ -519,7 +519,9 @@ and two tool calls. Now:
   asked by Claude) is taken there too (`take_waiting`), each within the
   room the context has (`read_room`; one too big is refused with its size);
   the clock and the tool reminder are not put in at all (every user turn
-  carries the time and the objective);
+  carries the time and the objective); the one exception is a splice with
+  a remote model (`inject on`, "Splicing inputs into its thinking" below),
+  its input put in as a user turn of its own, under guards;
 - a turn that runs past `AGENT_TURN_MAX_US` (180 s, at a line start; 15 s
   when quitting)
   while something waits for it is closed, its unfinished calls not run
@@ -888,3 +890,80 @@ says: the rack's slot holds 131072 tokens and the dev launch carries
 150000.
 
 The quit waits for the summary until it gains no token for two minutes, or `PHI_STREAM_QUIT_WAIT` seconds (`quit_wait_us`; every token gained moves the deadline on, `quit_len`: a remote server re-reading 99k tokens for twelve minutes before the summary's first token ran past the fixed deadline it had before, 2026-10-08): the rack's Flash Next, at 7 tokens a second, needed more than two to close its turn and write one (2026-10-07: the stop kept no summary).
+
+### Splicing inputs into its thinking (`inject on|off`, `--inject`, 2026-10-08)
+
+The remote form of hearing and reading, then joining. The person asked
+for it as the agent harness's management interface: the input is read
+while the model goes on reasoning, then put into the reasoning chain
+once it is read.
+
+- **The prefetch.** With the agent frame, a remote model and `inject
+  on`, the queue's front item, if past `direct_max` tokens and within
+  `read_room`, is taken at a fork point `p` (`fork_ok`). Its tokens `T`
+  are the item as a user turn (`inject_turn`: the turn it is in closed,
+  the input, the assistant's turn and thinking opened again;
+  `agent::responses_turn` with nothing but it). `T` is tokenized once.
+  `history[..p] + T` goes to the server's prefill engine (`remote.md`,
+  the prefetch) and the live stream continues. Its state is asked at
+  most once a second, never waiting more than 2 s (`inject_step`,
+  `splice_poll`, after every cycle).
+- **The join** (`splice_join`, `spliced`). Once read, at the first
+  cycle outside an open tool call (`join_ok`), the sequence becomes
+  `history[..p]`, `T`, the tokens `G` placed since `p`, and the pending
+  token, placed as one decode. The open stream drops. The next request
+  starts from the server's cached state of `history[..p] + T` and reads
+  about `|G| + 1` tokens. This is the in-process join's composition, with
+  the chase done by the server. The text already shown is unchanged, and
+  `T`'s text is shown at the join. `turn_start` moves past `T` (its calls
+  are read from there), its turn time starts again, and the second
+  chain's reflection, an open objection and the guide go, as at `swap`.
+  The note at each join gives `p`, `|T|` and `|G|`, to match the decode
+  server's prompt-eval line.
+- **Guards** (the 2026-10-02 evidence: a line put mid-turn cut a tool
+  call in two, and the model took to writing such lines itself, with
+  times it made up):
+  - The fork is only at a line start inside the thinking (the last token
+    placed ends with a newline), outside a code block, and in a turn that
+    has written neither `</think>` nor `<tool_call>`. Elsewhere the input
+    stays in the queue and comes at the turn's end, as today.
+  - The input's marks are control tokens, and `<|im_start|>` is banned
+    from the sampler in the agent frame always (`base_ban`, with inject
+    off too, so a comparison of on against off measures the splice
+    alone). The model cannot open a user turn itself.
+  - Only the queue's front: a short item ahead keeps its place, and so
+    does everything behind it, so the order of inputs is kept.
+- **Fallbacks** (`Inject`). Every input given up goes back to the queue's
+  front, and comes in the next user turn as with inject off:
+  - its turn ended first (the turn's end, a summary, a quit, the calls'
+    wait, a rest);
+  - `agent_stalled` closed the turn (a splice in flight counts as an
+    input waiting);
+  - the sequence was replaced;
+  - `inject off`;
+  - the server failed it, never answered about it (30 polls running), or
+    did not read it in 30 minutes.
+
+  A server without the prefetch (HTTP 404) is said once, and not asked
+  again until `inject on`. After a failure, no other splice is tried in
+  that turn. An unknown state is named once and waited on. The
+  diagnostics' `inject` section shows the toggle, the splice in flight,
+  and the joins and the splices given up. `inject.log` in the workspace
+  keeps each start, join, give-up and toggle with its time (`t_us`, a
+  tab, the note): a measurement counts its joins from it, since the notes
+  themselves reach only the socket.
+- **Short inputs** (`direct_max` or less) keep today's path: the turn's
+  end. With the model in this process, `inject` changes nothing (readings
+  beside the stream join already), and in the other frames every input is
+  heard at once.
+- **Default off**, in code and on the command line; `inject on|off` on
+  the socket, `phi-stream inject on|off`, `/inject on|off` in the terminal
+  (so the MCP `type` tool reaches it), `--inject` on `serve`.
+
+Tests (no network): the composition (positions, `G` carried after `T`,
+the pending token last, the prefetch exactly the prefix and `T`), the
+fork point (a line start in the thinking, never mid-line, after
+`</think>`, in code, or once a tool call began), the join's wait on an
+open tool call, the input's frame as the template's user turn, and the
+toggle with every fallback (`the_toggle_and_the_fallbacks`: each server
+answer given as a value).

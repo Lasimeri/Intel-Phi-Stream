@@ -41,7 +41,8 @@ Nothing here touches the model: every command becomes an engine
 
 `objective TEXT` sets what the stream works toward (empty clears it;
 `engine.md`). `chain on|off|against` sets the second chain (`against`: it argues
-against each line toward the objective), `goal on|off` the goal probe; `guide on|off` the guide
+against each line toward the objective), `goal on|off` the goal probe, `inject on|off` the
+splicing of inputs into its thinking once the remote server has read them (`engine.md`); `guide on|off` the guide
 lane, and `guide chain|lens|placebo` where its asides come from (`engine.md`). The last
 400 `delib` lines are replayed to a new tail too. The last `objective` line and the last 64 `term` lines are
 replayed to a new tail, after the stream's text and the readings, so a

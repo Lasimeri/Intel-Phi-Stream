@@ -184,6 +184,10 @@ pub enum Command {
     /// The harness's own interventions on or off, live: `breaker` (a line
     /// repeated is held back) and `nudges` (circling, no tool used).
     Guard(String, bool),
+    /// Inputs spliced into its thinking once the server has read them
+    /// (`inject on`, the agent frame with a remote model: `Splice`), or
+    /// left for the turn's end (`off`), live.
+    Inject(bool),
     Quit,
 }
 
@@ -288,6 +292,10 @@ pub struct Config {
     /// changes built and tested in a sandbox, `improve.log`. Needs `dev`
     /// and the agent frame.
     pub improve: bool,
+    /// Inputs read on the server's prefill engine beside the stream and
+    /// spliced into its thinking once read (`Splice`; the agent frame with
+    /// a remote model), from the start; `Command::Inject` sets it live.
+    pub inject: bool,
 }
 
 /// The base of the personality when no file gives one.
@@ -404,6 +412,203 @@ struct Reading {
     prefix: usize,
     /// Text shown when the reading joins the stream.
     label: String,
+}
+
+/// An input being read on the server's prefill engine while the live
+/// stream goes on (`inject on`, the agent frame with a remote model): the
+/// remote form of a reading beside the live sequence. When the server has
+/// read `history[..p]` and `t`, the sequence becomes those, then the tokens
+/// placed since `p`, then the pending token (`spliced`), and the server
+/// reads only the tokens placed since.
+struct Splice {
+    /// The fork point: a history index at a line start in its thinking
+    /// (`fork_ok`).
+    p: usize,
+    /// The input as a user turn (`inject_turn`): the very tokens sent to the
+    /// server after `history[..p]`, placed at the join unchanged (tokenized
+    /// once, so the prompt matches what the server read).
+    t: Vec<i32>,
+    /// What it came from in the queue (text, label): put back at the front
+    /// when the splice is given up, so it comes at the turn's end as without
+    /// one.
+    item: (String, String),
+    /// The server's id for it.
+    id: u64,
+    /// When it was asked for, and when its state is asked next (monotonic
+    /// microseconds; at most once a second).
+    since_mono: i64,
+    next_poll_mono: i64,
+    /// Polls in a row that got no answer.
+    misses: u32,
+    /// The server said it is read: it joins at the first cycle outside an
+    /// open tool call (`join_ok`).
+    ready: bool,
+    /// An unknown state was named once.
+    told_unknown: bool,
+}
+
+/// Splicing inputs into its thinking (`inject on|off`): the toggle, the
+/// splice in flight, and what came of them. Kept apart from the engine so
+/// the toggle and every fallback are tested without a server: each answer
+/// of the server comes in as a value, and each input given up goes back to
+/// the queue's front, so it comes at the turn's end as with inject off.
+#[derive(Default)]
+struct Inject {
+    /// On (`inject on`, `--inject`).
+    on: bool,
+    /// The server has no prefetch (said once; `inject on` asks again).
+    unsupported: bool,
+    /// The turn (its `turn_start`) whose splice failed: no other is tried
+    /// in it, so its inputs come at its end.
+    held_turn: Option<usize>,
+    splice: Option<Splice>,
+    /// The queue front's size as last counted (text, tokens).
+    sized: Option<(String, usize)>,
+    /// Joins and splices given up since the start.
+    joins: u32,
+    given_up: u32,
+}
+
+impl Inject {
+    /// Whether a splice may begin in the turn that began at `turn_start`.
+    fn may_start(&self, turn_start: usize) -> bool {
+        self.on && !self.unsupported && self.held_turn != Some(turn_start) && self.splice.is_none()
+    }
+
+    /// `inject on|off`: off gives up the splice in flight; on asks a server
+    /// again (it may have the prefetch now) and lets a held turn go. The
+    /// note of what was given up, if anything.
+    fn set(&mut self, on: bool, queue: &mut VecDeque<(String, String)>) -> Option<String> {
+        self.on = on;
+        if on {
+            self.unsupported = false;
+            self.held_turn = None;
+            None
+        } else {
+            self.give_up("inject off", queue)
+        }
+    }
+
+    /// The splice given up: its input back at the queue's front; the note.
+    fn give_up(&mut self, why: &str, queue: &mut VecDeque<(String, String)>) -> Option<String> {
+        let s = self.splice.take()?;
+        self.given_up += 1;
+        let note = format!(
+            "inject: {} not spliced in ({why}): it comes at the turn's end",
+            s.item.1
+        );
+        queue.push_front(s.item);
+        Some(note)
+    }
+
+    /// The server's answer to the prefetch of `history[..p]` and `t` (the
+    /// input `item`'s turn), asked in the turn begun at `turn_start` at
+    /// `mono`: the splice in flight, or the input back at the queue's front
+    /// (a server without the prefetch: not asked again until `inject on`;
+    /// a refusal: not again in this turn). The note to give.
+    #[allow(clippy::too_many_arguments)]
+    fn started(
+        &mut self,
+        asked: Result<remote::PrefetchStart>,
+        item: (String, String),
+        p: usize,
+        t: Vec<i32>,
+        turn_start: usize,
+        mono: i64,
+        queue: &mut VecDeque<(String, String)>,
+    ) -> String {
+        match asked {
+            Ok(remote::PrefetchStart::Id(id)) => {
+                let note = format!(
+                    "reading {} ({} tokens) on the prefill server beside the stream, forked at {p} (prefetch {id})",
+                    item.1,
+                    t.len()
+                );
+                self.splice = Some(Splice {
+                    p,
+                    t,
+                    item,
+                    id,
+                    since_mono: mono,
+                    next_poll_mono: mono + SPLICE_POLL_US,
+                    misses: 0,
+                    ready: false,
+                    told_unknown: false,
+                });
+                note
+            }
+            Ok(remote::PrefetchStart::Unsupported) => {
+                queue.push_front(item);
+                self.unsupported = true;
+                "inject: the server has no /phi/prefetch (HTTP 404): inputs come at the turn's end, as with inject off; inject on asks again".to_string()
+            }
+            Err(e) => {
+                queue.push_front(item);
+                self.held_turn = Some(turn_start);
+                self.given_up += 1;
+                format!("inject: the prefetch was not accepted ({e:#}): this turn's inputs come at its end")
+            }
+        }
+    }
+
+    /// The id to ask the state of at `mono`, when the splice in flight is
+    /// not read yet and a second has passed since it was last asked (the
+    /// next ask a second on).
+    fn poll_due(&mut self, mono: i64) -> Option<u64> {
+        let s = self.splice.as_mut().filter(|s| !s.ready)?;
+        if mono < s.next_poll_mono {
+            return None;
+        }
+        s.next_poll_mono = mono + SPLICE_POLL_US;
+        Some(s.id)
+    }
+
+    /// What the server said of the splice in flight at `mono`: read (it
+    /// joins when it may), waiting (given up past `SPLICE_MAX_US`), failed or
+    /// unanswered `SPLICE_MISSES` times running (given up, and no other
+    /// splice in the turn begun at `turn_start`). The note to give.
+    fn polled(
+        &mut self,
+        state: Result<remote::Prefetch>,
+        mono: i64,
+        turn_start: usize,
+        queue: &mut VecDeque<(String, String)>,
+    ) -> Option<String> {
+        let s = self.splice.as_mut()?;
+        let why = match state {
+            Ok(remote::Prefetch::Ready) => {
+                s.ready = true;
+                s.misses = 0;
+                return None;
+            }
+            Ok(remote::Prefetch::Failed(why)) => format!("the server: {why}"),
+            Ok(state) => {
+                s.misses = 0;
+                let mut note = None;
+                if let remote::Prefetch::Unknown(name) = state {
+                    if !std::mem::replace(&mut s.told_unknown, true) {
+                        note = Some(format!(
+                            "inject: the server says {name:?} of prefetch {}, a state not known here: waited on",
+                            s.id
+                        ));
+                    }
+                }
+                if mono - s.since_mono <= SPLICE_MAX_US {
+                    return note;
+                }
+                format!("not read in {} min", SPLICE_MAX_US / 60_000_000)
+            }
+            Err(e) => {
+                s.misses += 1;
+                if s.misses < SPLICE_MISSES {
+                    return None;
+                }
+                format!("no answer about it {SPLICE_MISSES} times running: {e:#}")
+            }
+        };
+        self.held_turn = Some(turn_start);
+        self.give_up(&why, queue)
+    }
 }
 
 struct Chase {
@@ -829,6 +1034,11 @@ pub struct Engine {
     /// but never stop a rest or wake one.
     asides: Vec<String>,
     turn_open_mono: i64,
+    /// Splicing inputs into its thinking (`Inject`, `Splice`).
+    inject: Inject,
+    /// Every start, join and splice given up, with its time (`inject.log`:
+    /// `t_us<TAB>text`): what a measurement counts its joins from.
+    inject_log: RotLog,
     summary_due: Option<Summary>,
     to_claude_next: u64,
     /// Its last message to Claude: its id and its words (a repeat is not sent).
@@ -989,6 +1199,15 @@ pub struct Engine {
 }
 
 const MAX_READ_BYTES: u64 = 1 << 20;
+/// A splice's state is asked at most this often (microseconds).
+const SPLICE_POLL_US: i64 = 1_000_000;
+/// A splice not read in this long is given up (microseconds): its input
+/// comes at the turn's end. The rack's prefill reads about 70 tokens a
+/// second deep in a long context (docs/results/2026-10-08-remote-harness.md),
+/// so a whole context of 131072 tokens could take half an hour.
+const SPLICE_MAX_US: i64 = 30 * 60_000_000;
+/// Polls in a row without an answer before a splice is given up.
+const SPLICE_MISSES: u32 = 30;
 /// How long a quit waits for its summary to gain a token (microseconds), or
 /// `PHI_STREAM_QUIT_WAIT` seconds (a slower model: the rack's Flash Next at
 /// 7 tokens a second closes a turn and writes a summary of up to 1024
@@ -1100,7 +1319,17 @@ impl Engine {
             (control, llm.tokens_containing("»"))
         } else {
             // In chat, speech begins when the thoughts close.
-            (Vec::new(), llm.special("</think>").into_iter().collect())
+            // The agent frame: a turn is opened by the engine, never by the
+            // model, so `<|im_start|>` is never sampled. An input spliced
+            // into its thinking comes as a user turn it cannot write itself
+            // (`inject_turn`), and a summary had come back as
+            // `<|im_start|>user` and two tool calls (`degenerate`).
+            let control: Vec<i32> = if cfg.agent {
+                llm.special("<|im_start|>").into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            (control, llm.special("</think>").into_iter().collect())
         };
         fs::create_dir_all(&cfg.workspace)
             .with_context(|| format!("making {}", cfg.workspace.display()))?;
@@ -1252,7 +1481,9 @@ impl Engine {
         let jspace_log = RotLog::open(cfg.workspace.join("jspace.log"));
         let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
         let dual_log = RotLog::open(cfg.workspace.join("dual.log"));
+        let inject_log = RotLog::open(cfg.workspace.join("inject.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
+        let inject = cfg.inject && !cfg.task;
         let chain_audit = cfg.chain_audit;
         // The goal probe's answers: their one-token forms, none shared.
         let yes_no = {
@@ -1389,6 +1620,11 @@ impl Engine {
             waiting: Vec::new(),
             asides: Vec::new(),
             turn_open_mono: clock::mono_us(),
+            inject: Inject {
+                on: inject,
+                ..Default::default()
+            },
+            inject_log,
             summary_due: None,
             to_claude_next,
             last_to_claude: None,
@@ -3184,7 +3420,12 @@ impl Engine {
         {
             return Ok(());
         }
-        let due = self.summary_due.is_some() || !self.waiting.is_empty() || !self.queue.is_empty();
+        // A splice in flight is an input waiting too: a turn that runs on is
+        // closed for it as for one in the queue.
+        let due = self.summary_due.is_some()
+            || !self.waiting.is_empty()
+            || !self.queue.is_empty()
+            || self.inject.splice.is_some();
         let limit = if self.quit_deadline.is_some() {
             AGENT_QUIT_GRACE_US
         } else {
@@ -3200,6 +3441,8 @@ impl Engine {
             "its turn ran {} s with something waiting for it: closed",
             (mono - self.turn_open_mono) / 1_000_000
         ));
+        // Its input comes in the user turn that closes this one.
+        self.splice_give_up("its turn was closed");
         // A thought cut off is closed first, so the turn reads as one.
         let close = if self.speaking { "" } else { "\n</think>\n\n" };
         let turn = match self.summary_due.take() {
@@ -3779,6 +4022,36 @@ impl Engine {
         out.push_str(&format!("status\n  {}\n", status_text(&self.status())));
         if let Some(s) = remote_diag_line(self.llm.remote_info()) {
             out.push_str(&s);
+        }
+        // Splicing inputs into its thinking (`inject`): only where it can be.
+        if self.cfg.agent && !self.llm.forks() {
+            let mono = clock::mono_us();
+            let flight = self.inject.splice.as_ref().map(|s| {
+                format!(
+                    "{} ({} tokens, forked at {}, {} {} s)",
+                    s.item.1,
+                    s.t.len(),
+                    s.p,
+                    if s.ready {
+                        "read, joining after"
+                    } else {
+                        "reading for"
+                    },
+                    (mono - s.since_mono) / 1_000_000
+                )
+            });
+            out.push_str(&format!(
+                "inject\n  {}{}; in flight: {}; {} joined, {} given up\n",
+                if self.inject.on { "on" } else { "off" },
+                if self.inject.unsupported {
+                    " (the server has no /phi/prefetch)"
+                } else {
+                    ""
+                },
+                flight.as_deref().unwrap_or("none"),
+                self.inject.joins,
+                self.inject.given_up
+            ));
         }
         out.push_str(&format!(
             "objective\n  {}\n",
@@ -4839,6 +5112,8 @@ impl Engine {
     /// The chase has fed every thought up to the pending token: the
     /// composed sequence becomes the live one.
     fn swap(&mut self, c: Chase, row: i32) -> Result<()> {
+        // A splice forked from the old sequence: its input comes at the turn's end.
+        self.splice_give_up("the sequence was replaced");
         // The live sequence is replaced: a reflection on the old one goes.
         self.end_chain(false);
         // And an open objection: its place in the old history means nothing
@@ -4869,6 +5144,7 @@ impl Engine {
     /// done at once: the live sequence becomes `base` and the pending token,
     /// decoded from the start (the server reads it as one prompt).
     fn resume_now(&mut self, base: Vec<i32>, label: String) -> Result<()> {
+        self.splice_give_up("the sequence was replaced");
         self.end_chain(false);
         self.open_objection = None;
         self.objection_unsent = false;
@@ -4884,6 +5160,188 @@ impl Engine {
         let mark = self.framed_system(&label);
         self.say(mark, Kind::Given);
         Ok(())
+    }
+
+    /// The agent frame with a remote model: an input in the queue's front,
+    /// past `direct_max` tokens, is read on the server's prefill engine while
+    /// the live stream goes on, and spliced into its thinking once read
+    /// (`Splice`). Called after every cycle; asks the server at most once a
+    /// second and never waits on it longer than `remote.rs`'s `PREFETCH_ASK`.
+    fn inject_step(&mut self) -> Result<()> {
+        if !self.cfg.agent || self.llm.forks() {
+            return Ok(());
+        }
+        if self.inject.splice.is_some() {
+            // Nothing to splice into: a summary, a quit, the calls' wait or
+            // a rest (its input comes in the next user turn).
+            if self.summary.is_some()
+                || self.quit_deadline.is_some()
+                || self.awaiting.is_some()
+                || self.rest.is_some()
+            {
+                self.splice_give_up("its turn ended first");
+                return Ok(());
+            }
+            return self.splice_poll();
+        }
+        self.splice_start()
+    }
+
+    /// A splice begun when the live position allows it (`fork_ok`) and the
+    /// queue's front is an input past `direct_max` that fits the room; a
+    /// shorter one keeps today's path (the turn's end), and so does
+    /// everything behind it.
+    fn splice_start(&mut self) -> Result<()> {
+        if !self.inject.may_start(self.turn_start)
+            || self.summary.is_some()
+            || self.summary_due.is_some()
+            || self.quit_deadline.is_some()
+            || self.awaiting.is_some()
+            || self.rest.is_some()
+            || self.queue.is_empty()
+        {
+            return Ok(());
+        }
+        let Some(&last) = self.history.last() else {
+            return Ok(());
+        };
+        let last_piece = self.llm.text(&[last]);
+        // The cheap test first: most cycles are not at a line's start.
+        if !last_piece.ends_with('\n') {
+            return Ok(());
+        }
+        let from = self.turn_start.min(self.history.len());
+        let turn = self.llm.text(&self.history[from..]);
+        // The pending token counts: `</think>` or a call about to open.
+        let thinking = !self.speaking
+            && self.next != self.think_close
+            && !self.llm.text(&[self.next]).contains("<tool_call>");
+        if !fork_ok(&turn, &last_piece, thinking, self.in_code) {
+            return Ok(());
+        }
+        let text = self.queue.front().unwrap().0.clone();
+        let n = match &self.inject.sized {
+            Some((t, n)) if *t == text => *n,
+            _ => {
+                let n = self.tok(&text, false)?.len();
+                self.inject.sized = Some((text, n));
+                n
+            }
+        };
+        // Short: heard at the turn's end, as today. Too big for the room:
+        // left for `take_waiting`, which refuses it with its size.
+        if n <= self.cfg.direct_max || n > self.read_room() {
+            return Ok(());
+        }
+        let item = self.queue.pop_front().unwrap();
+        let t = self.tok(&inject_turn(&item.0), true)?;
+        let p = self.history.len();
+        let mut prompt = self.history[..p].to_vec();
+        prompt.extend_from_slice(&t);
+        let asked = self.llm.prefetch(&prompt);
+        let note = self.inject.started(
+            asked,
+            item,
+            p,
+            t,
+            self.turn_start,
+            clock::mono_us(),
+            &mut self.queue,
+        );
+        self.inject_note(note);
+        Ok(())
+    }
+
+    /// The splice in flight: its state asked at most once a second; once
+    /// read, joined at the first cycle outside an open tool call.
+    fn splice_poll(&mut self) -> Result<()> {
+        let mono = clock::mono_us();
+        if let Some(id) = self.inject.poll_due(mono) {
+            let state = self.llm.prefetch_state(id);
+            if let Some(note) = self
+                .inject
+                .polled(state, mono, self.turn_start, &mut self.queue)
+            {
+                self.inject_note(note);
+            }
+        }
+        let Some(p) = self.inject.splice.as_ref().filter(|s| s.ready).map(|s| s.p) else {
+            return Ok(());
+        };
+        // The fork point must still be in the history (every path that cuts
+        // it gives the splice up first; this keeps a new one from panicking).
+        if p > self.history.len() {
+            self.splice_give_up("the sequence was cut before its fork point");
+            return Ok(());
+        }
+        let mut since = self.history[p..].to_vec();
+        since.push(self.next);
+        if !join_ok(&self.llm.text(&since)) {
+            return Ok(());
+        }
+        self.splice_join()
+    }
+
+    /// The join: the sequence becomes `history[..p]`, the input's turn, the
+    /// tokens placed since `p` (which the model now sees after the input)
+    /// and the pending token, placed as one; the open stream drops, and the
+    /// next request starts from the server's cached state of the first two,
+    /// reading only the rest. The text already shown is unchanged.
+    fn splice_join(&mut self) -> Result<()> {
+        let s = self.inject.splice.take().unwrap();
+        // The live sequence is replaced, as at a reading's join (`swap`).
+        self.end_chain(false);
+        self.open_objection = None;
+        self.objection_unsent = false;
+        self.drop_guide();
+        let carried = self.history.len() - s.p;
+        let all = spliced(&self.history, s.p, &s.t, self.next);
+        let rows = self.llm.decode(&[Lane {
+            seq: self.live,
+            tokens: &all,
+            pos0: 0,
+            logits: true,
+        }])?;
+        // History indices past the fork move by the input's length.
+        if self.line_from >= s.p {
+            self.line_from += s.t.len();
+        }
+        self.history = all;
+        // The input closed the turn it was in and opened a new one: its calls
+        // are read from here, and its time counts from now.
+        self.turn_start = s.p + s.t.len();
+        self.turn_open_mono = clock::mono_us();
+        self.inject.sized = None;
+        self.inject.joins += 1;
+        self.inject_note(format!(
+            "joined {}: {} tokens read on the prefill server at {}, the {carried} placed since carried after them and the pending one ({} for the server to read), {} s after it was asked",
+            s.item.1,
+            s.t.len(),
+            s.p,
+            carried + 1,
+            (clock::mono_us() - s.since_mono) / 1_000_000
+        ));
+        self.mind_step(self.history.len() as i32 - 1, *self.history.last().unwrap())?;
+        self.next = self.sample_live(rows[0])?;
+        // Shown where the stream is now; placed where it was when it forked.
+        self.say(inject_turn(&s.item.0), Kind::Given);
+        Ok(())
+    }
+
+    /// A note of the splicing's, kept in `inject.log` too with its time
+    /// (`t_us<TAB>text`): what a measurement counts its joins from.
+    fn inject_note(&mut self, text: String) {
+        self.inject_log
+            .line(&format!("{}\t{text}", clock::now_us()));
+        self.note(text);
+    }
+
+    /// The splice given up: its input back at the queue's front, so it comes
+    /// at the turn's end as with inject off; said, with why.
+    fn splice_give_up(&mut self, why: &str) {
+        if let Some(note) = self.inject.give_up(why, &mut self.queue) {
+            self.inject_note(note);
+        }
     }
 
     /// One cycle: the live token and whatever runs beside it.
@@ -5964,6 +6422,14 @@ impl Engine {
         if std::mem::take(&mut self.lens_line_ended) {
             self.lens_aside();
         }
+        // A splice in flight when its turn ends, or a summary is being
+        // written: its input goes back to the queue's front and comes in the
+        // next user turn (`take_waiting`), as with inject off.
+        if self.inject.splice.is_some()
+            && (self.summary.is_some() || self.next == self.eot || self.llm.is_eog(self.next))
+        {
+            self.splice_give_up("its turn ended first");
+        }
         // The summary being written: collect until its closing line.
         if let Some(s) = &mut self.summary {
             s.push(self.next);
@@ -6048,6 +6514,12 @@ impl Engine {
             self.speaking = false;
             self.say("\n".into(), Kind::Given);
             return Ok(());
+        }
+
+        // The agent frame with a remote model: an input read beside the
+        // stream, spliced into its thinking once read (`inject_step`).
+        if self.cfg.agent {
+            self.inject_step()?;
         }
 
         // Journal frame: the model kept trying to end; a word from the system.
@@ -6411,6 +6883,23 @@ impl Engine {
                     "the goal probe {}",
                     if self.goal_on { "on" } else { "off" }
                 ));
+            }
+            Command::Inject(on) => {
+                if let Some(note) = self.inject.set(on, &mut self.queue) {
+                    self.inject_note(note);
+                }
+                self.inject_note(if !on {
+                    "inject off: inputs come at the turn's end".to_string()
+                } else if self.llm.forks() {
+                    "inject on, and nothing changes: with the model in this process an input past direct_max is read beside the stream and joined already".to_string()
+                } else if !self.cfg.agent {
+                    "inject on, and nothing changes: splicing is for the agent frame (--frame agent); this frame hears every input at once".to_string()
+                } else {
+                    format!(
+                        "inject on: an input past {} tokens is read on the prefill server beside the stream and spliced into its thinking once read",
+                        self.cfg.direct_max
+                    )
+                });
             }
             Command::Quit => {
                 // Its context outlives the restart: the summary first (at
@@ -7065,6 +7554,57 @@ fn past(budget: usize, room: usize) -> String {
 }
 
 /// How many leading lines, of these token counts, fit in `budget` tokens.
+/// An input spliced into the agent's thinking, as a user turn: the turn it
+/// was in closed, the input, its thinking opened again; the form a waiting
+/// input takes at a turn's end (`agent::responses_turn` with nothing but
+/// it), so the model reads it as it reads every input. Its marks are
+/// control tokens the sampler never draws in the agent frame
+/// (`<|im_start|>`), so the model cannot write one itself; bracketed text
+/// put inside its turns it took to imitating, with times it made up
+/// (2026-10-02).
+fn inject_turn(text: &str) -> String {
+    crate::agent::responses_turn(&[], &[text.trim().to_string()])
+}
+
+/// Where an input may be spliced in (`Splice`): the history ends a line
+/// (`last_piece`, the last token placed, ends with a newline), inside its
+/// thinking, outside a code block, and its turn so far (`turn`) has neither
+/// closed its thoughts nor begun a tool call: a line put inside a tool call
+/// cut it in two (2026-10-02), and a call written in its thinking before
+/// the fork would be left in the turn the input closes, never run.
+fn fork_ok(turn: &str, last_piece: &str, thinking: bool, in_code: bool) -> bool {
+    thinking
+        && !in_code
+        && last_piece.ends_with('\n')
+        && !turn.contains("</think>")
+        && !turn.contains("<tool_call>")
+}
+
+/// Whether a tool call is open at the end of `text`.
+fn tool_call_open(text: &str) -> bool {
+    text.matches("<tool_call>").count() > text.matches("</tool_call>").count()
+}
+
+/// Whether a splice that is read may join now: the text placed since the
+/// fork and the pending token (`since`) leave no tool call open, since the
+/// rest of a call would then be written with the input newly in view.
+fn join_ok(since: &str) -> bool {
+    !tool_call_open(since)
+}
+
+/// The sequence after a splice joins: the history up to the fork point
+/// `p`, the input's tokens `t`, the tokens placed since `p`, then the pending
+/// token `next` (sampled, not yet decoded). `history[..p]` and `t` are what
+/// the server read beside the stream; the rest it reads at the next request.
+fn spliced(history: &[i32], p: usize, t: &[i32], next: i32) -> Vec<i32> {
+    let mut all = Vec::with_capacity(history.len() + t.len() + 1);
+    all.extend_from_slice(&history[..p]);
+    all.extend_from_slice(t);
+    all.extend_from_slice(&history[p..]);
+    all.push(next);
+    all
+}
+
 fn lines_within(counts: &[usize], budget: usize) -> usize {
     let mut sum = 0;
     counts
@@ -7861,5 +8401,258 @@ mod tests {
         let ws = Path::new("/ws");
         assert_eq!(resolve("a/b.md", ws), PathBuf::from("/ws/a/b.md"));
         assert_eq!(resolve("/etc/hosts", ws), PathBuf::from("/etc/hosts"));
+    }
+
+    /// The join's composition: the fork's prefix, the input, the tokens
+    /// placed since (carried, in order, after the input) and the pending
+    /// token last; what the server read beside the stream is exactly the
+    /// first two.
+    #[test]
+    fn a_splice_joins_as_a_reading_beside_the_stream_does() {
+        // History 0..6 decoded, forked at 4; 4 and 5 were placed since.
+        let history = [10, 11, 12, 13, 14, 15];
+        let t = [90, 91, 92];
+        let all = spliced(&history, 4, &t, 16);
+        assert_eq!(all, vec![10, 11, 12, 13, 90, 91, 92, 14, 15, 16]);
+        // Positions: the input at the fork point, the carried tokens moved on
+        // by its length, the pending token at the end.
+        assert_eq!(&all[4..7], &t);
+        assert_eq!(all.iter().position(|&x| x == 14), Some(4 + t.len()));
+        assert_eq!(*all.last().unwrap(), 16);
+        // The prefetch read the prefix and the input, nothing after the fork:
+        // the server then reads the carried tokens and the pending one.
+        let mut asked = history[..4].to_vec();
+        asked.extend_from_slice(&t);
+        assert_eq!(&all[..asked.len()], &asked[..]);
+        assert_eq!(all.len() - asked.len(), history.len() - 4 + 1);
+        // Nothing placed since the fork: the input, then the pending token.
+        assert_eq!(spliced(&history, 6, &t, 16)[6..], [90, 91, 92, 16]);
+    }
+
+    /// Where a splice may fork: a line start in its thinking, never mid-line,
+    /// after its thoughts closed, in a code block, or once a tool call began
+    /// in the turn.
+    #[test]
+    fn a_splice_forks_only_at_a_line_start_in_its_thinking() {
+        let turn = "Let me look at the reader first.\nThe chunk size is fixed.\n";
+        assert!(fork_ok(turn, ".\n", true, false));
+        assert!(fork_ok(turn, "\n\n", true, false));
+        // Mid-line.
+        assert!(!fork_ok("Let me look at", " at", true, false));
+        // Not thinking (the action part, or `</think>` pending).
+        assert!(!fork_ok(turn, ".\n", false, false));
+        assert!(!fork_ok(
+            "Done.\n</think>\n\nI will read it.\n",
+            ".\n",
+            true,
+            false
+        ));
+        // Inside a code block of its own.
+        assert!(!fork_ok(turn, "\n", true, true));
+        // A tool call in the turn so far, open or closed: never inside one,
+        // and a call written in its thinking stays in the turn that runs it.
+        let open = "I will check.\n<tool_call>\n<function=run>\n";
+        assert!(!fork_ok(open, "\n", true, false));
+        let closed = "I will check.\n<tool_call>\n<function=run>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>\n";
+        assert!(!fork_ok(closed, "\n", true, false));
+    }
+
+    /// A splice that is read joins only outside an open tool call.
+    #[test]
+    fn a_read_splice_waits_for_an_open_tool_call_to_close() {
+        assert!(join_ok("More thoughts.\nAnd more.\n"));
+        assert!(join_ok("Done.\n</think>\n\nReading it.\n"));
+        assert!(!join_ok(
+            "Done.\n</think>\n\n<tool_call>\n<function=read>\n<parameter=path>\nsrc/"
+        ));
+        assert!(!join_ok("Done.\n</think>\n\n<tool_call>"));
+        assert!(join_ok(
+            "<tool_call>\n<function=run>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
+        ));
+        assert!(tool_call_open("<tool_call>a</tool_call><tool_call>"));
+    }
+
+    /// The input comes as a user turn in the template's own marks (the form
+    /// a waiting input takes at a turn's end), never as bracketed text in
+    /// its thinking.
+    #[test]
+    fn the_spliced_input_is_a_user_turn() {
+        let t = inject_turn("\n[at 10:11:12 Claude says: \"look at remote.rs\"]\n");
+        assert_eq!(
+            t,
+            "<|im_end|>\n<|im_start|>user\n[at 10:11:12 Claude says: \"look at remote.rs\"]<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert_eq!(
+            t,
+            crate::agent::responses_turn(
+                &[],
+                &["[at 10:11:12 Claude says: \"look at remote.rs\"]".to_string()]
+            )
+        );
+    }
+
+    fn item(s: &str) -> (String, String) {
+        (format!("text of {s}"), s.to_string())
+    }
+
+    /// The toggle and every fallback, each answer of the server given as a
+    /// value (no network: `improve.md`): an input given up always goes back
+    /// to the queue's front, so it comes at the turn's end as with inject off.
+    #[test]
+    fn the_toggle_and_the_fallbacks() {
+        let mut q: VecDeque<(String, String)> = VecDeque::new();
+        let mut i = Inject::default();
+        // Off by default.
+        assert!(!i.may_start(0));
+        assert_eq!(i.set(true, &mut q), None);
+        assert!(i.may_start(0));
+
+        // A server without the prefetch: the input back, said once, not asked
+        // again until `inject on`.
+        q.push_back(item("later"));
+        let note = i.started(
+            Ok(remote::PrefetchStart::Unsupported),
+            item("a"),
+            4,
+            vec![1, 2],
+            0,
+            0,
+            &mut q,
+        );
+        assert!(note.contains("no /phi/prefetch"));
+        assert_eq!(q.front().unwrap().1, "a");
+        assert!(!i.may_start(0) && !i.may_start(9));
+        i.set(true, &mut q);
+        assert!(i.may_start(0));
+
+        // Accepted: in flight, out of the queue; asked at most once a second.
+        q.pop_front();
+        let note = i.started(
+            Ok(remote::PrefetchStart::Id(7)),
+            item("a"),
+            4,
+            vec![1, 2],
+            0,
+            1_000_000,
+            &mut q,
+        );
+        assert!(note.contains("forked at 4") && note.contains("prefetch 7"));
+        assert_eq!(q.front().unwrap().1, "later");
+        assert!(!i.may_start(0));
+        assert_eq!(i.poll_due(1_500_000), None);
+        assert_eq!(i.poll_due(2_000_000), Some(7));
+        assert_eq!(i.poll_due(2_500_000), None);
+        assert_eq!(
+            i.polled(Ok(remote::Prefetch::Waiting), 2_000_000, 0, &mut q),
+            None
+        );
+        // An unknown state: named once, waited on.
+        let unk = |i: &mut Inject, q: &mut VecDeque<(String, String)>| {
+            i.polled(
+                Ok(remote::Prefetch::Unknown("evicted".into())),
+                3_000_000,
+                0,
+                q,
+            )
+        };
+        assert!(unk(&mut i, &mut q).unwrap().contains("evicted"));
+        assert_eq!(unk(&mut i, &mut q), None);
+        // Unanswered polls: given up at the cap, the input back in front.
+        for _ in 1..SPLICE_MISSES {
+            assert_eq!(
+                i.polled(Err(anyhow::anyhow!("timed out")), 4_000_000, 0, &mut q),
+                None
+            );
+        }
+        assert!(i.splice.is_some());
+        let note = i
+            .polled(Err(anyhow::anyhow!("timed out")), 4_000_000, 0, &mut q)
+            .unwrap();
+        assert!(note.contains("not spliced in") && note.contains("timed out"));
+        assert_eq!(q.front().unwrap().1, "a");
+        assert_eq!(q.len(), 2);
+        // No other splice in that turn; the next turn may.
+        assert!(!i.may_start(0) && i.may_start(50));
+
+        // The server fails one: the same.
+        q.pop_front();
+        i.started(
+            Ok(remote::PrefetchStart::Id(8)),
+            item("b"),
+            60,
+            vec![3],
+            50,
+            0,
+            &mut q,
+        );
+        let note = i
+            .polled(
+                Ok(remote::Prefetch::Failed("out of memory".into())),
+                0,
+                50,
+                &mut q,
+            )
+            .unwrap();
+        assert!(note.contains("out of memory"));
+        assert_eq!(q.front().unwrap().1, "b");
+        assert!(!i.may_start(50));
+
+        // Refused at the start: the input back, the turn held.
+        q.pop_front();
+        let note = i.started(
+            Err(anyhow::anyhow!("HTTP 400: no tokens")),
+            item("c"),
+            80,
+            vec![4],
+            70,
+            0,
+            &mut q,
+        );
+        assert!(note.contains("no tokens"));
+        assert_eq!(q.front().unwrap().1, "c");
+        assert!(!i.may_start(70) && i.may_start(71));
+
+        // Never read: given up past the limit.
+        q.pop_front();
+        i.started(
+            Ok(remote::PrefetchStart::Id(9)),
+            item("d"),
+            90,
+            vec![5],
+            71,
+            0,
+            &mut q,
+        );
+        assert_eq!(
+            i.polled(Ok(remote::Prefetch::Waiting), SPLICE_MAX_US, 71, &mut q),
+            None
+        );
+        assert!(i
+            .polled(Ok(remote::Prefetch::Waiting), SPLICE_MAX_US + 1, 71, &mut q)
+            .unwrap()
+            .contains("not read in 30 min"));
+        assert_eq!(q.front().unwrap().1, "d");
+
+        // Read: not asked again; it waits to join. `inject off` gives it up.
+        q.pop_front();
+        i.started(
+            Ok(remote::PrefetchStart::Id(10)),
+            item("e"),
+            100,
+            vec![6],
+            99,
+            0,
+            &mut q,
+        );
+        assert_eq!(i.polled(Ok(remote::Prefetch::Ready), 1, 99, &mut q), None);
+        assert!(i.splice.as_ref().unwrap().ready);
+        assert_eq!(i.poll_due(10_000_000), None);
+        let note = i.set(false, &mut q).unwrap();
+        assert!(note.contains("inject off"));
+        assert_eq!(q.front().unwrap().1, "e");
+        assert!(i.splice.is_none() && !i.may_start(200));
+        // Every input came back: "later" behind the last one given up.
+        assert_eq!(q.len(), 2);
+        assert_eq!(i.given_up, 5);
     }
 }

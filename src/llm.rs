@@ -441,6 +441,24 @@ impl Llm {
             .map(|r| (r.url(), r.vocab.name.clone(), r.streams, r.tokens))
     }
 
+    /// With `--remote`: `tokens` read on the server's prefill engine beside
+    /// the slot's stream (`Remote::prefetch`); an error with a model here,
+    /// whose readings beside the live sequence need no server.
+    pub fn prefetch(&self, tokens: &[i32]) -> Result<crate::remote::PrefetchStart> {
+        match &self.remote {
+            Some(r) => r.prefetch(tokens),
+            None => bail!("no prefetch: the model is in this process"),
+        }
+    }
+
+    /// With `--remote`: the state of the prefetch `id`.
+    pub fn prefetch_state(&self, id: u64) -> Result<crate::remote::Prefetch> {
+        match &self.remote {
+            Some(r) => r.prefetch_state(id),
+            None => bail!("no prefetch: the model is in this process"),
+        }
+    }
+
     fn model_ptr(&self) -> *mut sys::llama_model {
         self.model.expect("a model in this process").as_ptr()
     }

@@ -79,6 +79,26 @@ tool calls, as its chat template (read from the GGUF's
   A turn that runs past 180 s while something waits for it is closed at
   its next line start (anywhere past 360 s)
   (`engine.rs`, `agent_stalled`).
+  - **The one exception: a splice** (`inject on`, the model remote,
+    2026-10-08; `engine.md`). An input past `--direct-max` tokens is
+    read on the server's prefill engine while the turn goes on. Once
+    read, it goes in where the stream was when it arrived, as a user turn
+    of its own (`<|im_end|>`, the user turn, then the assistant's turn and
+    thinking opened again, the form `responses_turn` gives it), with the
+    thoughts written since carried after it. Guards, against the two
+    failures above:
+    - The fork point is a line start in the thinking, outside a code
+      block, in a turn that has not closed its thinking or begun a tool
+      call. Elsewhere, the input waits for the turn's end.
+    - The join waits while a tool call is open.
+    - The marks are control tokens, and the sampler never draws
+      `<|im_start|>` in this frame, so the model cannot write such a turn
+      itself. Bracketed text was what it imitated.
+    - Its calls are read from the new turn on (`turn_start` after the
+      input).
+
+    A short input, or a splice given up (its turn ended first, the server
+    failed it or lacks the call), keeps the path above.
 - A summary (a rollover, a restart) is asked in a user turn of its own at
   the end of the turn it is in, its answer opened with no thinking and
   the summary's first words (`summary_turn`); asked inside a turn, it

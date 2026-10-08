@@ -16,7 +16,10 @@ server). Nothing here loads a model, a GPU backend or the cards.
   so readings beside the stream, forks, the checks, the second chain, the
   guide and the goal probe cannot run. `main.rs` turns them off at start
   (`remote_off`, said on stderr), and the engine has no free sequence for
-  them (`Engine::new`: the free sequences come from `n_seq`, 1 here).
+  them (`Engine::new`: the free sequences come from `n_seq`, 1 here). A
+  reading beside the stream has a remote form of its own: the server reads
+  it on its prefill engine (the prefetch, below), and the engine splices
+  it in once read.
 - **Sampling on the server.** `sample_pumped` sends the whole sequence as a token
   array to `POST /completion` with `stream`, `return_tokens` and
   `cache_prompt`, pinned to `--remote-slot` (default 1, so a client that
@@ -64,6 +67,43 @@ server). Nothing here loads a model, a GPU backend or the cards.
   terminal's next. `status` never waits: the service answers it with the
   last line it has, which the engine's heartbeat keeps marked with how
   long the step has held it (`engine.md`).
+
+## Reading beside the stream: the prefetch (2026-10-08)
+
+The remote form of a reading beside the live sequence (`engine.md`,
+splicing). llama.phi's decode server reads a prompt on its prefill
+engine (the GPUs) without taking a slot, and the finished state lands in
+its prompt cache, so the slot's stream keeps going meanwhile. The two
+calls live here, and nowhere else in the program:
+
+- `prefetch(tokens)`: `POST /phi/prefetch {"tokens": [...]}`, answered at
+  once with `{"id": N}` (`PrefetchStart::Id`). HTTP 404 on the path is a
+  server without it (`Unsupported`: llama.cpp's own server, or llama.phi
+  before it had one). Any other refusal is an error with the server's
+  words.
+- `prefetch_state(id)`: `GET /phi/prefetch?id=N`. The state is read from
+  a string field `state` (else `status`), or from a body that is itself a
+  string. `waiting`, `queued`, `pending`, `running` and `reading` are
+  `Waiting`. `ready` and `done` are `Ready`: both are taken as read until
+  the server's final format says otherwise. `failed` and `error` are
+  `Failed`, with its `error` or `message`. Anything else is `Unknown`,
+  waited on as `Waiting` and named once by the engine. HTTP 5xx is an
+  error (asked again at the next poll); another failure status (an id
+  the server does not know) is `Failed`.
+- Both wait at most `PREFETCH_ASK` (2 s), so a busy server never holds
+  the engine's cycle for longer. The mapping of answers is two pure
+  functions (`prefetch_started`, `prefetch_state`), tested on the bytes
+  a server sends.
+
+The splice then needs nothing new of `Remote`. The engine places the
+composed sequence as one decode at position 0 (`place` replaces `hist`),
+the open stream no longer `continues`, so it drops, and the next request
+sends the whole sequence. A server whose cache holds the prefetched
+prefix (the history up to the fork and the input) starts from that state
+and reads only the rest. That needs llama.phi to load, for a pinned slot
+that is not empty, a cached state sharing more of the new prompt than the
+slot itself does. Without that, the slot reuses only its own prefix up to
+the fork, and the input is read again in the decode server.
 
 ## The vocabulary
 
@@ -113,5 +153,9 @@ vocabulary of a small hand-made GGUF head (pieces, control and
 user-defined tokens, the end set, a skipped merges array), a cut head as
 an error, addresses, the chunked event stream read through a source that
 gives seven bytes at a time with timeouts between them (tokens queued,
-`continues` after each, the stop), a sized answer, and a place past the
-server's context refused before the sequence is touched.
+`continues` after each, the stop), a sized answer, a place past the
+server's context refused before the sequence is touched, and the
+prefetch's answers read off such a connection (an id given as a number
+or as a string, llama-server's 404 as `Unsupported`, a refusal, an
+answer with no id, each state including an unknown one, an unknown id,
+and a 5xx).

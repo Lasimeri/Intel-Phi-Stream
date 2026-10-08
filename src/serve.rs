@@ -409,6 +409,10 @@ fn connection(
                 "audit" => ctx.send(Command::Chain(ChainSet::Audit)).map(|_| "the second chain auditing each thinking token".to_string()).map_err(|_| "the engine is gone".to_string()),
                 _ => Err("chain takes on, off, against or audit".to_string()),
             },
+            "inject" => match arg.trim() {
+                s @ ("on" | "off") => ctx.send(Command::Inject(s == "on")).map(|_| format!("inject {s}")).map_err(|_| "the engine is gone".to_string()),
+                _ => Err("inject takes on or off".to_string()),
+            },
             "goal" => match arg.trim() {
                 s @ ("on" | "off") => ctx.send(Command::Goal(s == "on")).map(|_| format!("the goal probe {s}")).map_err(|_| "the engine is gone".to_string()),
                 _ => Err("goal takes on or off".to_string()),
@@ -421,7 +425,7 @@ fn connection(
                 ctx.send(Command::Quit).ok();
                 Ok("stopping".to_string())
             }
-            _ => Err(format!("unknown command {cmd}; say, say-as, ask, feed, persona, objective, chain, chunk, set, temp, pause, resume, status, recent, tail, quit")),
+            _ => Err(format!("unknown command {cmd}; say, say-as, ask, feed, persona, objective, chain, goal, inject, chunk, set, temp, pause, resume, status, recent, tail, quit")),
         };
         match reply {
             Ok(m) => writeln!(w, "ok {m}")?,
