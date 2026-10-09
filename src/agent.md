@@ -107,7 +107,10 @@ tool calls, as its chat template (read from the GGUF's
   answered with the time and its objective (`continue_turn`).
 - Every call is a JSON line of `calls.log` in the workspace (`CallRec`:
   name, parameter names, why it was refused, inside thinking or not, the
-  result's characters, the milliseconds until the result), and the
+  result's characters, the milliseconds until the result; for a call not
+  run, the turn's last 160 characters with its control tokens and the
+  token that ended it, since a long tell_claude ended mid-parameter on
+  10-09 and nothing on disk showed which token ended it), and the
   counts since the start are in `diag.md` (`tool calls`). `stream.log`
   shows no control token the model wrote (`</think>`, `<|im_end|>`), so
   a turn's end cannot be read from it; the ledger says how each call went.

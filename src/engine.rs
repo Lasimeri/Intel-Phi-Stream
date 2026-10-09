@@ -663,6 +663,11 @@ struct CallRec {
     t0_mono: i64,
     /// When its result came in (none yet: a command still running).
     t1_mono: Option<i64>,
+    /// For a call not run: the turn's last characters with its control
+    /// tokens, and the token that ended it, so a call cut short says how
+    /// (a long tell_claude ended mid-parameter after `rfind(` on 10-09, and
+    /// nothing on disk showed which token ended it).
+    tail: Option<String>,
 }
 
 /// A call's record, its result in at `mono` (a command's is set again when
@@ -682,7 +687,16 @@ fn call_rec(
         in_thinking,
         t0_mono: mono,
         t1_mono: Some(mono),
+        tail: None,
     }
+}
+
+/// The last `n` characters of `text`, on a character boundary.
+fn tail_chars(text: &str, n: usize) -> &str {
+    let skip = text.chars().count().saturating_sub(n);
+    text.char_indices()
+        .nth(skip)
+        .map_or("", |(i, _)| &text[i..])
 }
 
 /// The agent frame's calls since the start, for `diag.md`.
@@ -3291,6 +3305,13 @@ impl Engine {
         for (i, (c, refused)) in blocks.iter().enumerate() {
             let mut rec = call_rec(c.as_ref(), refused.clone(), in_thinking, mono);
             rec.t1_mono = None;
+            if refused.is_some() {
+                rec.tail = Some(format!(
+                    "{}[ended by {:?}]",
+                    tail_chars(&text, 160),
+                    self.llm.text(&[self.next])
+                ));
+            }
             wait.recs.push(rec);
             if let Some(why) = refused {
                 if c.is_some() {
@@ -3393,6 +3414,7 @@ impl Engine {
                     "in_thinking": r.in_thinking,
                     "result_chars": result.chars().count(),
                     "ms": (mono - r.t0_mono) / 1000,
+                    "tail": r.tail,
                 })
                 .to_string(),
             );
@@ -8683,6 +8705,15 @@ mod tests {
             "<tool_call>\n<function=run>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
         ));
         assert!(tool_call_open("<tool_call>a</tool_call><tool_call>"));
+    }
+
+    /// The ledger's tail of a turn is cut on a character boundary.
+    #[test]
+    fn a_tail_keeps_whole_characters() {
+        assert_eq!(tail_chars("héllo", 3), "llo");
+        assert_eq!(tail_chars("héllo", 4), "éllo");
+        assert_eq!(tail_chars("ab", 5), "ab");
+        assert_eq!(tail_chars("", 3), "");
     }
 
     /// The input comes as a user turn in the template's own marks (the form
