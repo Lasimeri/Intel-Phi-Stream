@@ -8,6 +8,13 @@ tool calls, as its chat template (read from the GGUF's
   `# Tools`, the functions in a `<tools>` block, one JSON object each in the
   form the template's `tojson` gives (keys in order, `", "` and `": "`
   between them), then the template's own instructions for the call format.
+  Qwen3.8 Flash-Next's template (the rack's, read from llama-server's
+  `/props` on 2026-10-09) puts a line before `# Tools` for a reasoning
+  effort of xhigh (its default) or low, and none for medium; the harness
+  writes none, so its system turn is the template's at medium.
+- One table (`Spec`: name, description, parameters with their JSON
+  types, the required ones) gives both the tools section and `check`, so
+  what the model is told and what is checked cannot drift apart.
   Seven functions: `run` (a command in the sandboxed terminal, `term.md`; its
   output at most about 4096 tokens, past that the leading lines and what
   was cut, `engine.rs` `fit_output`; it
@@ -58,19 +65,43 @@ tool calls, as its chat template (read from the GGUF's
 - Each turn opens `<|im_start|>assistant\n<think>\n`: it reasons first,
   then closes its thoughts and acts. A call is
   `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>`
-  (`parse_calls`; a block that does not parse is counted and told). Calls
+  (`parse_blocks`: each block in the order written, as its call or why it
+  does not parse). Calls
   written inside its thinking, in a turn that never closed it, run too, and
-  it is told to close its thoughts first (3 percent of its calls were
+  it is told to close its thoughts first, in the user turn after the
+  responses (3 percent of its calls were
   dropped so on the live service, without a word). The mechanics ask for
   calls that do not depend on one another in one turn (several reads,
   searches or commands at once): on the live service it made one call a
   turn, each turn about 200 thinking tokens and 40 to 60 s (2026-10-03).
-- When its turn ends, the calls run (`engine.rs`, `agent_turn_end`): read,
+- When its turn ends, each call is checked against its tool's declaration
+  (`check`): an unknown function, a parameter the tool does not have, a
+  required one missing, one given twice, or an integer that is not one.
+  A refused call is not run; its answer says what is wrong and the tool's
+  parameters (`read: it has no parameter "start_line"; read takes path
+  (required), start, end`). Before this a `read` with start_line and
+  end_line read the whole file without a word (8 calls of 70 between
+  2026-10-07 and 10-09, `stream.log`), and an integer that was no number
+  fell back to a default. An unknown parameter left empty says nothing
+  and is let pass (a read with an empty end_path beside start and end
+  had read just that range).
+- Then the calls run (`engine.rs`, `agent_turn_end`): read,
   write and note at once, a command in the terminal. Nothing is decoded
   while a command runs; its result is waited for, so it never invents one.
-  The results go back in one user turn, one `<tool_response>` each
-  (`responses_turn`), and its next turn opens. A turn without a call is
+  The results go back in one user turn, exactly one `<tool_response>` a
+  block in the order written, a block that did not parse or was refused
+  answered in its place with why (`responses_turn`; each trimmed at both
+  ends, as the template trims a message), and its next turn opens. The
+  harness's own lines (calls written inside thinking) come in the user
+  turn after the responses, never as responses of their own: they had
+  made more responses than calls (4 turns, 10-07 to 10-09). A turn without a call is
   answered with the time and its objective (`continue_turn`).
+- Every call is a JSON line of `calls.log` in the workspace (`CallRec`:
+  name, parameter names, why it was refused, inside thinking or not, the
+  result's characters, the milliseconds until the result), and the
+  counts since the start are in `diag.md` (`tool calls`). `stream.log`
+  shows no control token the model wrote (`</think>`, `<|im_end|>`), so
+  a turn's end cannot be read from it; the ledger says how each call went.
 - Nothing is put inside a turn. Lines from the system, what was said or
   handed over, and Claude's messages wait for the next user turn, after
   the tool responses in a user turn of their own (`extra`): put inside
@@ -78,7 +109,12 @@ tool calls, as its chat template (read from the GGUF's
   such lines itself with times it made up (2026-10-02, the live service).
   A turn that runs past 180 s while something waits for it is closed at
   its next line start (anywhere past 360 s)
-  (`engine.rs`, `agent_stalled`).
+  (`engine.rs`, `agent_stalled`), but never while it holds a call, open or
+  written (the pending token counted), up to 180 s more
+  (`AGENT_CALL_GRACE_US`): closing never runs a turn's calls, so a turn
+  cut inside one left a call without its end in the context, one cut
+  between two calls dropped the first unanswered, and notes written as a
+  quit came (15 s then 30 s) were lost so.
   - **The one exception: a splice** (`inject on`, the model remote,
     2026-10-08; `engine.md`). An input past `--direct-max` tokens is
     read on the server's prefill engine while the turn goes on. Once
@@ -102,7 +138,10 @@ tool calls, as its chat template (read from the GGUF's
 - A summary (a rollover, a restart) is asked in a user turn of its own at
   the end of the turn it is in, its answer opened with no thinking and
   the summary's first words (`summary_turn`); asked inside a turn, it
-  called tools, and the summary kept the template's marks.
+  called tools, and the summary kept the template's marks. The turn's
+  `note` and `tell_claude` calls still go first (its memory and its
+  messages); nothing else of it runs, and every call of it is in the
+  ledger (the rest with "the summary came first").
 - Paths: relative to the repository, through its working copy (a file it
   wrote reads from there, a write goes there; the repository never
   changes), or in its workspace; `/tmp` is its workspace's `tmp/` as in
@@ -113,7 +152,10 @@ tool calls, as its chat template (read from the GGUF's
   for in the repository, tools/loopiness.c in the workspace).
 
 Tests: calls parse as the template writes them (multi-line values,
-several calls); broken blocks are counted and not run; the tools section
+several calls); broken blocks are counted and not run, each keeping its
+place with why it failed; calls are checked against their declarations
+(an unknown parameter, a non-integer, one given twice, one missing, a
+tool of the loop without it); the tools section
 is the template's, and the responses turn its tool form; what waited
 comes in a user turn of its own after the responses, or before the
 objective in a continuing turn; the summary turn opens on its first

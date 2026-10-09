@@ -793,15 +793,25 @@ impl Stream {
                 if v.get("error").is_some() {
                     bail!("the server: {}", err_text(&v));
                 }
-                if let Some(ts) = v.get("tokens").and_then(Value::as_array) {
-                    for t in ts {
-                        self.queue
-                            .push_back(t.as_i64().context("a token id")? as i32);
-                    }
+                // A progress event is a partial result made from an empty
+                // token: llama-server sends `"tokens":[0]` with it
+                // (`send_partial_response(slot, {}, true)`), and 0 is `!`.
+                // Taken as the model's, one `!` a progress event opened every
+                // turn's thinking, and the server, which never held them,
+                // read each turn again at the next request (10-08 to 10-09).
+                let ts = match v.get("prompt_progress") {
+                    Some(_) => None,
+                    None => v.get("tokens").and_then(Value::as_array),
+                };
+                for t in ts.into_iter().flatten() {
+                    self.queue
+                        .push_back(t.as_i64().context("a token id")? as i32);
                 }
                 if let Some(p) = v.get("prompt_progress") {
                     let n = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0) as usize;
-                    self.progress = Some((n("cache") + n("processed"), n("total")));
+                    // `processed` is the slot's whole prompt so far, the
+                    // cached part included (`slot.prompt.tokens.size()`).
+                    self.progress = Some((n("processed"), n("total")));
                 }
                 if v.get("stop").and_then(Value::as_bool) == Some(true) {
                     let why = v
@@ -1442,6 +1452,8 @@ mod tests {
     #[test]
     fn chunked_events_give_their_tokens_and_stop() {
         let events = [
+            // A progress event as llama-server sends it: its token is no token.
+            "data: {\"index\":0,\"content\":\"\",\"tokens\":[0],\"stop\":false,\"id_slot\":1,\"tokens_predicted\":0,\"tokens_evaluated\":3,\"prompt_progress\":{\"total\":3,\"cache\":1,\"processed\":2,\"time_ms\":5}}\n\n",
             "data: {\"tokens\":[16],\"stop\":false}\n\n",
             "data: {\"tokens\":[198, 17],\"stop\":false}\r\n\r\n",
             "data: {\"tokens\":[],\"stop\":true,\"stop_type\":\"limit\"}\n\n",
@@ -1485,6 +1497,7 @@ mod tests {
         assert_eq!(s.next().unwrap(), Some(17));
         assert_eq!(s.next().unwrap(), None);
         assert_eq!(s.stop.as_deref(), Some("limit"));
+        assert_eq!(s.progress, Some((2, 3)));
     }
 
     /// A short answer by its length, then the connection closed.

@@ -642,6 +642,58 @@ struct Saved {
 struct AgentWait {
     results: Vec<Option<String>>,
     runs: HashMap<u64, usize>,
+    /// Each call's record for the ledger, in the same order.
+    recs: Vec<CallRec>,
+    /// Lines for it beside the responses (in the user turn after them),
+    /// never as responses of their own: one answer a call.
+    notes: Vec<String>,
+}
+
+/// One call of the agent frame for its ledger (`calls.log`, one JSON line
+/// a call): what was called, whether its check refused it, and, once its
+/// result is in, the result's size and how long it took. `stream.log`
+/// shows no control token the model wrote (`</think>`, `<|im_end|>`), so
+/// it cannot say how a call went; this does.
+struct CallRec {
+    name: String,
+    keys: Vec<String>,
+    /// Why it was not run: it did not parse, or its check refused it.
+    refused: Option<String>,
+    in_thinking: bool,
+    t0_mono: i64,
+    /// When its result came in (none yet: a command still running).
+    t1_mono: Option<i64>,
+}
+
+/// A call's record, its result in at `mono` (a command's is set again when
+/// it ends).
+fn call_rec(
+    c: Option<&crate::agent::Call>,
+    refused: Option<String>,
+    in_thinking: bool,
+    mono: i64,
+) -> CallRec {
+    CallRec {
+        name: c.map_or(String::new(), |c| c.name.clone()),
+        keys: c.map_or(Vec::new(), |c| {
+            c.params.iter().map(|(k, _)| k.clone()).collect()
+        }),
+        refused,
+        in_thinking,
+        t0_mono: mono,
+        t1_mono: Some(mono),
+    }
+}
+
+/// The agent frame's calls since the start, for `diag.md`.
+#[derive(Default)]
+struct CallCounts {
+    blocks: u64,
+    ran: u64,
+    unparsed: u64,
+    refused: u64,
+    in_thinking: u64,
+    last_refused: Option<String>,
 }
 
 /// The second chain (`--second-chain`, `engine.md`): a lane forked from the
@@ -752,6 +804,8 @@ struct Rest {
     next_look_mono: i64,
     /// The results of the turn that rested, for the turn that wakes.
     results: Vec<String>,
+    /// Its lines beside them (`AgentWait::notes`).
+    notes: Vec<String>,
 }
 
 /// The guide's measures are reported every this many thinking tokens; a
@@ -1039,6 +1093,9 @@ pub struct Engine {
     /// Every start, join and splice given up, with its time (`inject.log`:
     /// `t_us<TAB>text`): what a measurement counts its joins from.
     inject_log: RotLog,
+    /// The agent frame's ledger of calls (`CallRec`) and its counts.
+    calls_log: RotLog,
+    calls: CallCounts,
     summary_due: Option<Summary>,
     to_claude_next: u64,
     /// Its last message to Claude: its id and its words (a repeat is not sent).
@@ -1226,6 +1283,10 @@ fn quit_wait_us() -> i64 {
 /// waits for the summary.
 const AGENT_TURN_MAX_US: i64 = 180_000_000;
 const AGENT_QUIT_GRACE_US: i64 = 15_000_000;
+/// How much longer a turn may run while a call in it is open: a note of a
+/// few thousand characters takes about 2 minutes at 6 to 14 tokens a second.
+/// A quit's deadline moves on with every token, so this costs it no summary.
+const AGENT_CALL_GRACE_US: i64 = 180_000_000;
 /// Commands that may wait for its terminal at once, and its time limit.
 const MAX_TERM_PENDING: usize = 4;
 /// How long without a tool before it is reminded to check something real.
@@ -1482,6 +1543,7 @@ impl Engine {
         let ground_log = RotLog::open(cfg.workspace.join("ground.log"));
         let dual_log = RotLog::open(cfg.workspace.join("dual.log"));
         let inject_log = RotLog::open(cfg.workspace.join("inject.log"));
+        let calls_log = RotLog::open(cfg.workspace.join("calls.log"));
         let (chain_against, goal_probe) = (cfg.chain_against, cfg.goal_probe);
         let inject = cfg.inject && !cfg.task;
         let chain_audit = cfg.chain_audit;
@@ -1625,6 +1687,8 @@ impl Engine {
                 ..Default::default()
             },
             inject_log,
+            calls_log,
+            calls: CallCounts::default(),
             summary_due: None,
             to_claude_next,
             last_to_claude: None,
@@ -3127,58 +3191,122 @@ impl Engine {
             .rsplit_once("</think>")
             .map_or("", |(_, c)| c)
             .to_string();
-        let (mut calls, mut bad) = crate::agent::parse_calls(&content);
+        let mut blocks = crate::agent::parse_blocks(&content);
         // Calls written inside its thinking, in a turn that never closed it:
         // they run, and it is told to close its thoughts first (3 percent of
         // its calls on the live service were dropped so, without a word, and
         // the turn after told it to act with a tool).
         let mut in_thinking = false;
-        if calls.is_empty() && bad == 0 && !text.contains("</think>") {
-            let (c, b) = crate::agent::parse_calls(&text);
-            if !c.is_empty() {
+        if blocks.is_empty() && !text.contains("</think>") {
+            let b = crate::agent::parse_blocks(&text);
+            if b.iter().any(Result::is_ok) {
                 self.note(format!(
                     "{} calls written inside its thinking: run",
-                    c.len()
+                    b.len()
                 ));
-                calls = c;
-                bad = b;
+                blocks = b;
                 in_thinking = true;
             }
         }
-        // A summary due comes first; the turn's calls are not run.
+        // Each call checked against its tool's declaration before anything
+        // runs; a block that does not parse or a call refused is answered
+        // in its place with why, and not run.
+        // Each block: its call if it parsed, and why it is not run if it
+        // did not parse or its check refused it.
+        let improve = self.improver.is_some();
+        let blocks: Vec<(Option<crate::agent::Call>, Option<String>)> = blocks
+            .into_iter()
+            .map(|b| match b {
+                Ok(c) => {
+                    let refused = crate::agent::check(&c, improve).err();
+                    (Some(c), refused)
+                }
+                Err(why) => (
+                    None,
+                    Some(format!(
+                        "{why}. A call is <tool_call>, <function=NAME>, each <parameter=KEY>, its value and </parameter>, then </function> and </tool_call>"
+                    )),
+                ),
+            })
+            .collect();
+        // A summary due comes first. Its memory and its messages still go
+        // (a note written as a quit came, to carry its state over, had been
+        // lost with the turn); nothing else of the turn runs.
         if let Some(why) = self.summary_due.take() {
-            if !calls.is_empty() {
-                self.note(format!(
-                    "{} calls not run: the summary comes first",
-                    calls.len()
-                ));
+            let mono = clock::mono_us();
+            let mut skipped = 0;
+            let (mut recs, mut results) = (Vec::new(), Vec::new());
+            self.calls.blocks += blocks.len() as u64;
+            for (c, refused) in &blocks {
+                let ran = match c.as_ref().filter(|_| refused.is_none()) {
+                    Some(c) => match (c.name.as_str(), c.param("text")) {
+                        ("note", Some(t)) if !t.trim().is_empty() => Some(self.add_note(t.trim())),
+                        ("tell_claude", Some(t)) if !t.trim().is_empty() => {
+                            Some(self.send_claude(t.trim(), c.param("re")))
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                };
+                let why_not = match (&ran, refused) {
+                    (Some(_), _) => None,
+                    (None, Some(r)) => Some(r.clone()),
+                    (None, None) => Some("the summary came first".to_string()),
+                };
+                if ran.is_some() {
+                    self.calls.ran += 1;
+                } else {
+                    skipped += 1;
+                }
+                recs.push(call_rec(c.as_ref(), why_not, in_thinking, mono));
+                results.push(ran.unwrap_or_default());
+            }
+            self.ledger(&recs, &results);
+            if skipped > 0 {
+                self.note(format!("{skipped} calls not run: the summary comes first"));
             }
             return self.open_summary(why);
         }
-        if calls.is_empty() {
+        if blocks.is_empty() {
             let extra = self.take_waiting();
-            let turn = if bad > 0 {
-                self.note(format!("{bad} tool calls did not parse"));
-                crate::agent::responses_turn(
-                    &[format!(
-                        "{bad} tool call(s) did not parse: write <tool_call>, then <function=NAME>, then each <parameter=KEY>, its value and </parameter>, then </function> and </tool_call>"
-                    )],
-                    &extra,
-                )
-            } else {
-                crate::agent::continue_turn(
-                    &clock::hms(clock::now_us()),
-                    self.objective.as_ref().map(|o| o.1.as_str()),
-                    &extra,
-                )
-            };
+            let turn = crate::agent::continue_turn(
+                &clock::hms(clock::now_us()),
+                self.objective.as_ref().map(|o| o.1.as_str()),
+                &extra,
+            );
             return self.agent_open(turn);
         }
+        let mono = clock::mono_us();
         let mut wait = AgentWait {
-            results: vec![None; calls.len()],
+            results: vec![None; blocks.len()],
             runs: HashMap::new(),
+            recs: Vec::with_capacity(blocks.len()),
+            notes: Vec::new(),
         };
-        for (i, c) in calls.iter().enumerate() {
+        self.calls.blocks += blocks.len() as u64;
+        if in_thinking {
+            self.calls.in_thinking += blocks.len() as u64;
+        }
+        for (i, (c, refused)) in blocks.iter().enumerate() {
+            let mut rec = call_rec(c.as_ref(), refused.clone(), in_thinking, mono);
+            rec.t1_mono = None;
+            wait.recs.push(rec);
+            if let Some(why) = refused {
+                if c.is_some() {
+                    self.calls.refused += 1;
+                } else {
+                    self.calls.unparsed += 1;
+                }
+                self.calls.last_refused = Some(why.clone());
+                self.note(format!("a call not run: {why}"));
+                wait.results[i] = Some(format!("not run: {why}"));
+                continue;
+            }
+            let Some(c) = c else {
+                wait.results[i] = Some("not run".to_string());
+                continue;
+            };
+            self.calls.ran += 1;
             let result = match c.name.as_str() {
                 "run" => match (c.param("command"), self.term.is_some()) {
                     (Some(cmd), true) => {
@@ -3228,28 +3356,46 @@ impl Engine {
                 "diff" => Some(self.agent_diff()),
                 "revert" => Some(self.agent_revert(c)),
                 "report" => Some(self.agent_report()),
+                // `check` let no other name through.
                 other => Some(format!(
-                    "there is no function {other:?}: the functions are run, read, edit, write, note, wait{} and tell_claude",
-                    if self.improver.is_some() {
-                        ", propose, build, diff, revert, report"
-                    } else {
-                        ""
-                    }
+                    "there is no function {other:?}: the functions are {}",
+                    crate::agent::names(improve)
                 )),
             };
+            if result.is_some() {
+                wait.recs[i].t1_mono = Some(clock::mono_us());
+            }
             wait.results[i] = result;
         }
-        if bad > 0 {
-            wait.results
-                .push(Some(format!("{bad} more tool call(s) did not parse")));
-        }
         if in_thinking {
-            wait.results.push(Some(
-                "your calls were written inside your thinking; they ran, but close your thoughts with </think> before you call".to_string(),
+            wait.notes.push(format!(
+                "[{}] your calls were written inside your thinking; they ran, but close your thoughts with </think> before you call",
+                clock::hms(clock::now_us())
             ));
         }
         self.awaiting = Some(wait);
         self.finish_agent_wait()
+    }
+
+    /// The ledger's lines for a turn's calls whose results are all in
+    /// (`calls.log`): one JSON object a call.
+    fn ledger(&mut self, recs: &[CallRec], results: &[String]) {
+        let at = clock::hms(clock::now_us());
+        for (r, result) in recs.iter().zip(results) {
+            let mono = r.t1_mono.unwrap_or(r.t0_mono);
+            self.calls_log.line(
+                &serde_json::json!({
+                    "at": at,
+                    "name": r.name,
+                    "keys": r.keys,
+                    "refused": r.refused,
+                    "in_thinking": r.in_thinking,
+                    "result_chars": result.chars().count(),
+                    "ms": (mono - r.t0_mono) / 1000,
+                })
+                .to_string(),
+            );
+        }
     }
 
     /// When every result of the calls it waits for is in: they go back to it
@@ -3264,6 +3410,8 @@ impl Engine {
         }
         let w = self.awaiting.take().unwrap();
         let results: Vec<String> = w.results.into_iter().flatten().collect();
+        self.ledger(&w.recs, &results);
+        let notes = w.notes;
         if let Some(why) = self.summary_due.take() {
             self.rest_asked = None;
             return self.open_summary(why);
@@ -3280,6 +3428,7 @@ impl Engine {
                     until_mono: mono + minutes * 60_000_000,
                     next_look_mono: mono,
                     results,
+                    notes,
                 });
                 let _ = self.tx.send(Event::Status(self.status()));
                 return Ok(());
@@ -3294,7 +3443,8 @@ impl Engine {
                 ),
             );
         }
-        let extra = self.take_waiting();
+        let mut extra = notes;
+        extra.extend(self.take_waiting());
         self.agent_open(crate::agent::responses_turn(&results, &extra))
     }
 
@@ -3386,10 +3536,11 @@ impl Engine {
         if quitting {
             return self.open_summary(Summary::Restart);
         }
-        let mut extra: Vec<String> = woke
-            .iter()
-            .map(|w| format!("[{}] woken: {w}", clock::hms(clock::now_us())))
-            .collect();
+        let mut extra: Vec<String> = r.notes.clone();
+        extra.extend(
+            woke.iter()
+                .map(|w| format!("[{}] woken: {w}", clock::hms(clock::now_us()))),
+        );
         extra.extend(self.take_waiting());
         self.agent_open(crate::agent::responses_turn(&r.results, &extra))
     }
@@ -3436,6 +3587,23 @@ impl Engine {
         let ran = mono - self.turn_open_mono;
         if !due || ran < limit || (!self.line_start && ran < 2 * limit) {
             return Ok(());
+        }
+        // A turn with a call in it, open or written (the pending token
+        // counted), is let end by itself, up to `AGENT_CALL_GRACE_US` past
+        // the limit: a turn cut inside a call left it without its end in
+        // the context, and notes written as a quit came (the state meant to
+        // carry over) were lost so (2 of 8 calls left open, 10-07 to 10-09);
+        // one cut between two calls dropped the first unanswered (closing
+        // here never runs the turn's calls).
+        if ran < limit + AGENT_CALL_GRACE_US {
+            let from = self.turn_start.min(self.history.len());
+            let mut t = self.llm.text(&self.history[from..]);
+            if self.next >= 0 {
+                t.push_str(&self.llm.text(&[self.next]));
+            }
+            if t.contains("<tool_call>") {
+                return Ok(());
+            }
         }
         self.note(format!(
             "its turn ran {} s with something waiting for it: closed",
@@ -4060,6 +4228,21 @@ impl Engine {
                 self.base_ban
             ));
         }
+        // The agent frame's calls since the start (each in `calls.log`).
+        if self.cfg.agent {
+            let c = &self.calls;
+            out.push_str(&format!(
+                "tool calls\n  {} written: {} run, {} refused by their check, {} unparsed, {} inside thinking{}\n",
+                c.blocks,
+                c.ran,
+                c.refused,
+                c.unparsed,
+                c.in_thinking,
+                c.last_refused
+                    .as_ref()
+                    .map_or(String::new(), |w| format!("; the last not run: {w}"))
+            ));
+        }
         out.push_str(&format!(
             "objective\n  {}\n",
             self.objective.as_ref().map_or("none", |o| o.1.as_str())
@@ -4336,6 +4519,7 @@ impl Engine {
                     let text = self.fit_output(text);
                     if let Some(w) = self.awaiting.as_mut() {
                         w.results[slot] = Some(format!("{what}:\n{text}"));
+                        w.recs[slot].t1_mono = Some(clock::mono_us());
                     }
                     continue;
                 }

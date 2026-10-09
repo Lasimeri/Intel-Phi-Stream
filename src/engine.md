@@ -775,8 +775,13 @@ improve itself". `diag_text` makes one text every 5 s (`STATUS_FILE_US`):
 the status line, the objective, the goal probe over ten minutes (count,
 mean P(yes), the last answers), the second chain's kind and open objection,
 the two chains' last verdicts, the last grounding findings, the last tools
-ended (with their results), and with the loop on what is building, the
-last of `improve.log` and the lessons. The same text is written to
+ended (with their results), the agent frame's tool calls since the start
+(written, run, refused by their check, unparsed, inside thinking, and
+why the last one not run was not), and with the loop on what is building, the
+last of `improve.log` and the lessons. Each call is also a JSON line of
+`calls.log` in the workspace (its name, its parameters' names, why it
+was refused if it was, whether it was written inside thinking, its
+result's size, and the milliseconds until the result: `agent.md`). The same text is written to
 `diag.md` in the workspace (the stream reads it; the persona names it),
 sent to the terminals as a `diag` line (`Event::Diag`; the DIAGNOSTICS
 view, `tui.md`), and returned by the `report` tool: what the harness shows

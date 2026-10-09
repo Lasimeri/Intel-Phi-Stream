@@ -46,6 +46,18 @@ server). Nothing here loads a model, a GPU backend or the cards.
   (`stop_type` `eos`), so the engine sees a turn end exactly as it does in
   process. A stop at the length limit opens a new request; a fresh stream
   that stops without a token is an error, never a loop.
+- **Progress events carry no token.** With `return_progress` the server
+  sends a `prompt_progress` event as it reads a prompt (one at its start,
+  one a batch), each a partial result made from an empty token: its
+  `tokens` is `[0]`, and 0 is `!` (llama.phi `tools/server/
+  server-context.cpp`, `send_partial_response(slot, {}, true)`).
+  `Stream::events` takes tokens only from the other events. From 7114b30
+  (2026-10-08 06:36) to this fix it took them too. In `stream.log`'s
+  session from 10-08 19:11, 284 of 287 turns opened their thinking with
+  a run of two or more `!` (306 runs in all; one ended a tool call's
+  parameter), and since the
+  server never held them, each next request differed from its slot's
+  cache at the turn's start and read the turn again.
 - **Retries.** No connection, HTTP 5xx or 429: asked again every 5 s for
   up to 15 minutes (a server restarting loads its model in about five),
   said on stderr once a minute. HTTP 4xx: an error at once, with the

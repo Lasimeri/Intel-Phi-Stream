@@ -25,10 +25,36 @@ fn js(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 
+/// One tool, as declared to the model and as its calls are checked
+/// (`check`): one table for both, so the two cannot drift apart.
+pub struct Spec {
+    pub name: &'static str,
+    desc: &'static str,
+    /// Each parameter: its name, its JSON type and what it is.
+    params: &'static [(&'static str, &'static str, &'static str)],
+    required: &'static [&'static str],
+}
+
+const fn spec(
+    name: &'static str,
+    desc: &'static str,
+    params: &'static [(&'static str, &'static str, &'static str)],
+    required: &'static [&'static str],
+) -> Spec {
+    Spec {
+        name,
+        desc,
+        params,
+        required,
+    }
+}
+
 /// One tool as the template's `tojson` writes it: keys in their order,
 /// `", "` and `": "` between them (Python's json.dumps).
-fn tool(name: &str, desc: &str, props: &[(&str, &str, &str)], required: &[&str]) -> String {
-    let props: Vec<String> = props
+fn tool(s: &Spec) -> String {
+    let (name, desc, required) = (s.name, s.desc, s.required);
+    let props: Vec<String> = s
+        .params
         .iter()
         .map(|(k, t, d)| {
             format!(
@@ -49,16 +75,15 @@ fn tool(name: &str, desc: &str, props: &[(&str, &str, &str)], required: &[&str])
     )
 }
 
-/// The tools; `propose` only with the self-improvement loop (`improve.md`).
-fn tools(improve: bool) -> Vec<String> {
-    let mut list = vec![
-        tool(
+/// The tools of every run.
+const CORE: &[Spec] = &[
+        spec(
             "run",
             "Run a shell command in your sandbox and get its exit code and output (at most about 4096 tokens: past that its leading lines and how much was cut, so narrow a big output with head, tail or grep). It already starts in the repository, so paths are relative to it and no cd is needed; what it writes there lands in your working copy (the repository itself never changes). /tmp is kept between commands. No network, 60 s at most: a command stopped at the limit has no result. A Rust build (cargo) does not fit in that time here; Claude builds and tests the Rust code. Use it to build C with tcc, test, search (grep -n) and list; to read a file use read, to change one use edit.",
             &[("command", "string", "The command line, run by sh -c.")],
             &["command"],
         ),
-        tool(
+        spec(
             "read",
             "Read a file of the repository (your working copy) or your workspace, whole or by lines, or a directory's listing. One read gives at most about 4096 tokens (about 400 lines of this code): past that it gives the leading lines and says where the rest begins, so read the function you need with start and end (find it with run: grep -n).",
             &[
@@ -68,7 +93,7 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["path"],
         ),
-        tool(
+        spec(
             "edit",
             "Change a file of your working copy or workspace in place: the text old, which must occur exactly once in it, is replaced by new. Include enough lines around a change for old to be unique. Use it for every change to an existing file; write only creates new files or replaces one entirely.",
             &[
@@ -78,7 +103,7 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["path", "old", "new"],
         ),
-        tool(
+        spec(
             "write",
             "Write a whole new file into your working copy of the repository (a path relative to it) or your workspace, or replace one entirely. To change part of an existing file, use edit.",
             &[
@@ -87,13 +112,13 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["path", "content"],
         ),
-        tool(
+        spec(
             "note",
             "Keep a line in your own memory across time: it is shown to you again whenever your memory is refreshed, so keep each thing once. It is not a message: to tell Claude something, use tell_claude.",
             &[("text", "string", "The note.")],
             &["text"],
         ),
-        tool(
+        spec(
             "wait",
             "Rest until something new comes: a message from Claude, a new commit in the repository, a new objective, one of your commands ending, a candidate's outcome, or the time you give. Call it when your objective is met, or when you wait on Claude, rather than going on for its own sake: nothing is asked of you while you rest, and your next turn opens with what came.",
             &[
@@ -102,7 +127,7 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["reason"],
         ),
-        tool(
+        spec(
             "tell_claude",
             "Send a message to Claude, who develops this program with you and reads every message at once: a proposal (the file, the function, the change and why, and what you checked), a finding, a question, or your answer to a message of Claude's. Claude answers in a later turn.",
             &[
@@ -111,9 +136,11 @@ fn tools(improve: bool) -> Vec<String> {
             ],
             &["text"],
         ),
-    ];
-    if improve {
-        list.push(tool(
+];
+
+/// With the self-improvement loop only (`improve.md`).
+const IMPROVE: &[Spec] = &[
+        spec(
             "propose",
             "Put the change in your working copy forward as one improvement to yourself (this program, the one you run in). It is staged as a diff against the repository's current commit and refused if it touches the build, the scripts or this loop with its evaluators, or if a file it changes was changed in the repository after your copy was made; then it is built and tested in a sandbox (make check: format, clippy, release build, tests; it takes minutes). The outcome comes at a later turn and is kept in improve.log in your workspace with every earlier one: read it to choose what to try next, and fix a failed build from its errors. A change that passes goes to Claude for review, then is measured on the running model before it is kept. One candidate at a time; make one change, small and whole, per proposal.",
             &[
@@ -121,33 +148,117 @@ fn tools(improve: bool) -> Vec<String> {
                 ("why", "string", "What it should improve in you, and how that would show (a measure, a behaviour, a test)."),
             ],
             &["title", "why"],
-        ));
-        list.push(tool(
+        ),
+        spec(
             "build",
             "Build and test your working copy's change now, as a trial: the same sandbox and make check as propose (format, clippy, release build, tests), but nothing is sent to Claude and no candidate is made. Use it to find and fix compile errors and failing tests before you propose. The outcome comes at a later turn (about a minute, longer for a big change); the whole log is improve/trial/build.log in your workspace.",
             &[],
             &[],
-        ));
-        list.push(tool(
+        ),
+        spec(
             "diff",
             "Show your working copy's change against the repository's current commit, as a unified diff: exactly what propose or build would take. Read it before you propose.",
             &[],
             &[],
-        ));
-        list.push(tool(
+        ),
+        spec(
             "revert",
             "Take one file of your working copy back to the repository's version (your copy of it is dropped). Use it to undo a change that failed, or a stray file; you cannot delete from your working copy yourself.",
             &[("path", "string", "The file, relative to the repository.")],
             &["path"],
-        ));
-        list.push(tool(
+        ),
+        spec(
             "report",
             "Your own state in one look: your status (rate, cycle, memory used, checks), your objective, the goal probe's answers over the last ten minutes, what is building, and the last entries of improve.log.",
             &[],
             &[],
-        ));
+        ),
+];
+
+/// The tools of this run, in the order they are declared.
+pub fn specs(improve: bool) -> impl Iterator<Item = &'static Spec> {
+    CORE.iter().chain(IMPROVE.iter().filter(move |_| improve))
+}
+
+fn tools(improve: bool) -> Vec<String> {
+    specs(improve).map(tool).collect()
+}
+
+/// The names of this run's tools, for an answer naming them.
+pub fn names(improve: bool) -> String {
+    let n: Vec<&str> = specs(improve).map(|s| s.name).collect();
+    match n.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => n.join(""),
     }
-    list
+}
+
+/// A call checked against its tool's declaration before it runs: an
+/// unknown function, a parameter it does not have, one it needs and lacks,
+/// one given twice, or an integer that is not one. The answer names what
+/// is wrong and the tool's parameters, so the next call can be right: a
+/// `read` with start_line and end_line had read the whole file, silently
+/// (8 calls of 70 on the live service, 2026-10-07 to 10-09).
+pub fn check(c: &Call, improve: bool) -> Result<(), String> {
+    let Some(s) = specs(improve).find(|s| s.name == c.name) else {
+        return Err(format!(
+            "there is no function {:?}: the functions are {}",
+            c.name,
+            names(improve)
+        ));
+    };
+    let has = |k: &str| s.params.iter().any(|(p, _, _)| *p == k);
+    let mut wrong: Vec<String> = Vec::new();
+    for (i, (k, v)) in c.params.iter().enumerate() {
+        // An unknown parameter left empty says nothing: the call runs (a
+        // read with an empty end_path beside start and end had read just
+        // that range).
+        if !has(k) && v.trim().is_empty() {
+            continue;
+        }
+        if !has(k) {
+            wrong.push(format!("it has no parameter {k:?}"));
+        } else if c.params[..i].iter().any(|(e, _)| e == k) {
+            wrong.push(format!("{k} is given twice"));
+        } else if s.params.iter().any(|(p, t, _)| p == k && *t == "integer")
+            && v.trim().parse::<i64>().is_err()
+        {
+            wrong.push(format!("{k} must be a whole number, not {:?}", v.trim()));
+        }
+    }
+    for r in s.required {
+        if c.param(r).is_none() {
+            wrong.push(format!("it needs {r}"));
+        }
+    }
+    if wrong.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: {}; {}",
+        s.name,
+        wrong.join("; "),
+        signature(s)
+    ))
+}
+
+/// A tool's parameters in a line: `read takes path (required), start, end`.
+fn signature(s: &Spec) -> String {
+    if s.params.is_empty() {
+        return format!("{} takes no parameters", s.name);
+    }
+    let p: Vec<String> = s
+        .params
+        .iter()
+        .map(|(k, _, _)| {
+            if s.required.contains(k) {
+                format!("{k} (required)")
+            } else {
+                (*k).to_string()
+            }
+        })
+        .collect();
+    format!("{} takes {}", s.name, p.join(", "))
 }
 
 /// The system turn's tools section, exactly as the model's chat template
@@ -160,54 +271,68 @@ pub fn tools_section(improve: bool) -> String {
     )
 }
 
-/// The tool calls in a turn's text (after its thinking): every
-/// `<tool_call>` block with a `<function=NAME>` and its `<parameter=K>`
-/// values (a value's one leading and one trailing newline dropped, as the
-/// template writes them). A block that does not parse is skipped and
-/// counted.
-pub fn parse_calls(text: &str) -> (Vec<Call>, usize) {
-    let mut calls = Vec::new();
-    let mut bad = 0;
+/// The tool calls in a turn's text (after its thinking), in the order
+/// written: every `<tool_call>` block, as its call (a `<function=NAME>`
+/// and its `<parameter=K>` values, a value's one leading and one trailing
+/// newline dropped, as the template writes them) or why it does not parse.
+/// Each block gets its own answer in its place (`responses_turn`).
+pub fn parse_blocks(text: &str) -> Vec<Result<Call, String>> {
+    let mut blocks = Vec::new();
     let mut rest = text;
     while let Some(i) = rest.find("<tool_call>") {
         let after = &rest[i + "<tool_call>".len()..];
         let Some(j) = after.find("</tool_call>") else {
-            bad += 1;
+            blocks.push(Err("the call has no </tool_call>".to_string()));
             break;
         };
-        let block = &after[..j];
         rest = &after[j + "</tool_call>".len()..];
-        match parse_block(block) {
-            Some(c) => calls.push(c),
-            None => bad += 1,
+        blocks.push(parse_block(&after[..j]));
+    }
+    blocks
+}
+
+/// The calls of `parse_blocks` and how many blocks did not parse.
+#[cfg(test)]
+pub fn parse_calls(text: &str) -> (Vec<Call>, usize) {
+    let mut calls = Vec::new();
+    let mut bad = 0;
+    for b in parse_blocks(text) {
+        match b {
+            Ok(c) => calls.push(c),
+            Err(_) => bad += 1,
         }
     }
     (calls, bad)
 }
 
-fn parse_block(block: &str) -> Option<Call> {
-    let f = block.find("<function=")?;
+fn parse_block(block: &str) -> Result<Call, String> {
+    let no_name = || "the call has no <function=NAME>".to_string();
+    let f = block.find("<function=").ok_or_else(no_name)?;
     let after = &block[f + "<function=".len()..];
-    let close = after.find('>')?;
+    let close = after.find('>').ok_or_else(no_name)?;
     let name = after[..close].trim().to_string();
     if name.is_empty() {
-        return None;
+        return Err(no_name());
     }
     let mut body = &after[close + 1..];
     let mut params = Vec::new();
     while let Some(p) = body.find("<parameter=") {
         let a = &body[p + "<parameter=".len()..];
-        let c = a.find('>')?;
+        let c = a
+            .find('>')
+            .ok_or_else(|| format!("{name}: a <parameter= has no >"))?;
         let key = a[..c].trim().to_string();
         let v = &a[c + 1..];
-        let e = v.find("</parameter>")?;
+        let e = v
+            .find("</parameter>")
+            .ok_or_else(|| format!("{name}: the parameter {key:?} has no </parameter>"))?;
         let mut value = &v[..e];
         value = value.strip_prefix('\n').unwrap_or(value);
         value = value.strip_suffix('\n').unwrap_or(value);
         params.push((key, value.to_string()));
         body = &v[e + "</parameter>".len()..];
     }
-    Some(Call { name, params })
+    Ok(Call { name, params })
 }
 
 /// The user turn carrying the results back, in the template's tool form
@@ -220,7 +345,8 @@ pub fn responses_turn(results: &[String], extra: &[String]) -> String {
         s.push_str("<|im_end|>\n<|im_start|>user");
         for r in results {
             s.push_str("\n<tool_response>\n");
-            s.push_str(r.trim_end());
+            // Trimmed both ends, as the template trims a message.
+            s.push_str(r.trim());
             s.push_str("\n</tool_response>");
         }
     }
@@ -282,6 +408,57 @@ mod tests {
         assert!(calls.is_empty());
         assert_eq!(bad, 3);
         assert_eq!(parse_calls("no calls at all").0.len(), 0);
+    }
+
+    #[test]
+    fn each_block_keeps_its_place_and_says_why_it_failed() {
+        let b = parse_blocks("<tool_call>\n<function=note>\n<parameter=text>\na\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=run>\n<parameter=command>\nls\n</function>\n</tool_call>\n<tool_call>\n<function=note>\n<parameter=text>\nb\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=note>");
+        assert_eq!(b.len(), 4);
+        assert_eq!(b[0].as_ref().unwrap().param("text"), Some("a"));
+        assert_eq!(
+            b[1].as_ref().unwrap_err(),
+            "run: the parameter \"command\" has no </parameter>"
+        );
+        assert_eq!(b[2].as_ref().unwrap().param("text"), Some("b"));
+        assert_eq!(b[3].as_ref().unwrap_err(), "the call has no </tool_call>");
+    }
+
+    #[test]
+    fn calls_are_checked_against_their_declarations() {
+        let call = |name: &str, params: &[(&str, &str)]| Call {
+            name: name.into(),
+            params: params
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+        };
+        assert!(check(
+            &call("read", &[("path", "a"), ("start", "3"), ("end", "9")]),
+            false
+        )
+        .is_ok());
+        assert!(check(&call("read", &[("path", "a"), ("end_path", "")]), false).is_ok());
+        assert_eq!(
+            check(&call("read", &[("path", "a"), ("start_line", "3")]), false).unwrap_err(),
+            "read: it has no parameter \"start_line\"; read takes path (required), start, end"
+        );
+        assert_eq!(
+            check(&call("read", &[("start", "x")]), false).unwrap_err(),
+            "read: start must be a whole number, not \"x\"; it needs path; read takes path (required), start, end"
+        );
+        assert_eq!(
+            check(&call("note", &[("text", "a"), ("text", "b")]), false).unwrap_err(),
+            "note: text is given twice; note takes text (required)"
+        );
+        assert_eq!(
+            check(&call("diff", &[("path", "a")]), true).unwrap_err(),
+            "diff: it has no parameter \"path\"; diff takes no parameters"
+        );
+        // The loop's tools exist only with it.
+        let e = check(&call("diff", &[]), false).unwrap_err();
+        assert!(e.starts_with("there is no function \"diff\": the functions are run, read, edit,"));
+        assert!(e.ends_with("wait and tell_claude"));
+        assert!(names(true).ends_with("revert and report"));
     }
 
     #[test]
