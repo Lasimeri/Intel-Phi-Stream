@@ -68,7 +68,9 @@ tool calls, as its chat template (read from the GGUF's
   shown, so every turn's first word was missing from the screen and
   `stream.log` ("'m noticing", " me organize"), and a `!` from the progress
   events had stood in its place from 10-08 to 10-09. The same holds after
-  a swap, a resume and a splice.
+  the service's opening, a swap, a resume, a splice, an input decoded
+  straight in and the thinking budget's close: every place that decodes
+  given text and samples the next token.
 - Each turn opens `<|im_start|>assistant\n<think>\n`: it reasons first,
   then closes its thoughts and acts. A call is
   `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>`

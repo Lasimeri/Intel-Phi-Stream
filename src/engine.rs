@@ -2435,6 +2435,7 @@ impl Engine {
             let tokens = self.tok(&line, false)?;
             let with = self.direct_logits(&tokens)?;
             self.say(line, Kind::Given);
+            self.emit_pending();
             if let Some(without) = without {
                 let (kl, a, b) = weigh(&with, &without);
                 let (a, b) = (self.llm.text(&[a as i32]), self.llm.text(&[b as i32]));
@@ -5134,6 +5135,7 @@ impl Engine {
         let tokens = self.tok(&framed, false)?;
         self.direct(&tokens)?;
         self.say(framed, Kind::Given);
+        self.emit_pending();
         Ok(())
     }
 
@@ -6720,6 +6722,7 @@ impl Engine {
             self.direct(&tokens)?;
             self.speaking = false;
             self.say("\n".into(), Kind::Given);
+            self.emit_pending();
             return Ok(());
         }
 
@@ -6885,6 +6888,7 @@ impl Engine {
                 if tokens.len() <= self.cfg.direct_max || !self.llm.forks() {
                     self.direct(&tokens)?;
                     self.say(text, Kind::Given);
+                    self.emit_pending();
                 } else {
                     self.say(text, Kind::Given);
                     self.note(format!("reading {} tokens beside the stream", tokens.len()));
@@ -6911,6 +6915,7 @@ impl Engine {
             let close = self.tok("\n</think>\n\n", true)?;
             self.direct(&close)?;
             self.speaking = true;
+            self.emit_pending();
             self.note(format!(
                 "the thinking budget ({} tokens) closed the thoughts",
                 self.cfg.think_budget
@@ -7204,6 +7209,7 @@ impl Engine {
         self.say(opening.clone(), Kind::Given);
         // The agent frame: its first turn begins here.
         self.turn_start = self.history.len();
+        self.emit_pending();
         self.release();
         let _ = self.tx.send(Event::Status(self.status()));
         loop {
