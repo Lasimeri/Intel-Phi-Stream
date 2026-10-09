@@ -3669,11 +3669,24 @@ impl Engine {
         };
         let tokens = self.tok(&turn, true)?;
         self.direct(&tokens)?;
-        self.speaking = false;
+        // A summary's answer opens with its thinking closed (`summary_turn`).
+        self.speaking = turn.rfind("</think>") > turn.rfind("<think>");
         self.say(turn, Kind::Given);
         self.turn_start = self.history.len();
         self.turn_open_mono = clock::mono_us();
+        self.emit_pending();
         Ok(())
+    }
+
+    /// The pending token sampled after given text (a turn opened, a swap,
+    /// a resume, a splice) shown and counted like any other, after that
+    /// text: `advance` emits what it samples, these did not, so each turn's
+    /// first token was missing from the screen and `stream.log` (from
+    /// 10-08 06:36 a `!` from the progress events had stood in its place)
+    /// and was never weighed as thinking or speech.
+    fn emit_pending(&mut self) {
+        let t = self.next;
+        self.emit_token(t);
     }
 
     /// A path the agent named, for reading or writing: relative to the
@@ -5327,6 +5340,7 @@ impl Engine {
         self.next = self.sample_live(row)?;
         let mark = self.framed_system(&c.label);
         self.say(mark, Kind::Given);
+        self.emit_pending();
         Ok(())
     }
 
@@ -5350,6 +5364,7 @@ impl Engine {
         self.next = self.sample_live(row)?;
         let mark = self.framed_system(&label);
         self.say(mark, Kind::Given);
+        self.emit_pending();
         Ok(())
     }
 
@@ -5516,6 +5531,7 @@ impl Engine {
         self.next = self.sample_live(rows[0])?;
         // Shown where the stream is now; placed where it was when it forked.
         self.say(inject_turn(&s.item.0), Kind::Given);
+        self.emit_pending();
         Ok(())
     }
 

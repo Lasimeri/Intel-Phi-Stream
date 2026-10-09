@@ -62,6 +62,13 @@ tool calls, as its chat template (read from the GGUF's
   (`engine::agent_persona`), not the chat frame's bracketed lines
   (`[read: PATH]`, `[prefer: ...]`), which it still taught beside them. The persona follows,
   with the agent's mechanics in place of the chat's.
+- A turn's first token, sampled right after the given text, is shown and
+  counted like every other (`engine.rs` `emit_pending`, after the text and
+  with the turn's thinking or speech set): it had been placed but never
+  shown, so every turn's first word was missing from the screen and
+  `stream.log` ("'m noticing", " me organize"), and a `!` from the progress
+  events had stood in its place from 10-08 to 10-09. The same holds after
+  a swap, a resume and a splice.
 - Each turn opens `<|im_start|>assistant\n<think>\n`: it reasons first,
   then closes its thoughts and acts. A call is
   `<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n</function>\n</tool_call>`
